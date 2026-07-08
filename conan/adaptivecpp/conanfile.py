@@ -77,8 +77,10 @@ class AdaptiveCppConan(ConanFile):
         cmake.build()
 
     def package_info(self):
-        self.cpp_info.set_property("cmake_file_name", "AdaptiveCpp")
-        self.cpp_info.set_property("cmake_target_name", "AdaptiveCpp::acpp-rt")
+        # Use the original adaptivecpp-config.cmake (with add_sycl_to_target)
+        # instead of letting CMakeDeps generate a thin wrapper.
+        self.cpp_info.set_property("cmake_find_mode", "none")
+        self.cpp_info.builddirs = [os.path.join("lib", "cmake", "AdaptiveCpp")]
         self.cpp_info.libs = ["acpp-rt"]
         self.cpp_info.system_libs = ["dl", "rt", "pthread"]
         if self.settings.os == "Linux":
