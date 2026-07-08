@@ -11,11 +11,9 @@ class SyclSandboxConan(ConanFile):
         "yaml-cpp/0.8.0",
         "glfw/3.4",
         "imgui/1.92.8",
-        # adaptivecpp/25.10.0 is provided as a local recipe in conan/adaptivecpp/
-        # Build it with: conan create conan/adaptivecpp -pr profiles/gcc
-        # It requires system LLVM 22 and CUDA at /opt/cuda. Build takes ~45 min.
-        # Uncomment and pre-build with conan create once built:
-        # "adaptivecpp/25.10.0",
+        # adaptivecpp/25.10.0 — see conan/adaptivecpp/ for the recipe.
+        # CMakeDeps can't expose the add_sycl_to_target function needed for kernel
+        # compilation, so AdaptiveCpp is kept as a system dependency for now.
     ]
 
     tool_requires = [

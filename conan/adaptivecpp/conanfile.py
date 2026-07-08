@@ -1,6 +1,6 @@
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import get, copy, apply_conandata_patches
+from conan.tools.files import get, copy
 from conan.tools.build import check_min_cppstd
 import os
 
@@ -10,6 +10,7 @@ class AdaptiveCppConan(ConanFile):
     description = "SYCL implementation for CPUs and GPUs"
     license = "BSD-2-Clause"
     url = "https://github.com/AdaptiveCpp/AdaptiveCpp"
+    exports_sources = "patches/*"
     package_type = "library"
 
     settings = "os", "arch", "compiler", "build_type"
@@ -28,8 +29,7 @@ class AdaptiveCppConan(ConanFile):
         "experimental_llvm": True,
     }
 
-    def export(self):
-        copy(self, "patches/*.patch", src=self.recipe_folder, dst=self.export_folder)
+    settings = "os", "arch", "compiler", "build_type"
 
     def config_options(self):
         if self.settings.os == "Windows":
@@ -43,7 +43,19 @@ class AdaptiveCppConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
-        apply_conandata_patches(self)
+        # Apply LLVM 22 compat patch inline
+        for root, _, files in os.walk("."):
+            for f in files:
+                path = os.path.join(root, f)
+                if f in ("AdaptiveCppLlvmPasses.cpp", "Emitter.cpp"):
+                    with open(path) as fh:
+                        content = fh.read()
+                    content = content.replace(
+                        '#include "llvm/Passes/PassPlugin.h"',
+                        '#if LLVM_VERSION_MAJOR >= 22\n#include "llvm/Plugins/PassPlugin.h"\n#else\n#include "llvm/Passes/PassPlugin.h"\n#endif'
+                    )
+                    with open(path, "w") as fh:
+                        fh.write(content)
 
     def generate(self):
         tc = CMakeToolchain(self)
@@ -64,11 +76,6 @@ class AdaptiveCppConan(ConanFile):
         cmake.configure()
         cmake.build()
 
-    def package(self):
-        cmake = CMake(self)
-        cmake.install()
-        copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
-
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "AdaptiveCpp")
         self.cpp_info.set_property("cmake_target_name", "AdaptiveCpp::acpp-rt")
@@ -76,3 +83,10 @@ class AdaptiveCppConan(ConanFile):
         self.cpp_info.system_libs = ["dl", "rt", "pthread"]
         if self.settings.os == "Linux":
             self.cpp_info.system_libs.append("numa")
+
+    def package(self):
+        cmake = CMake(self)
+        cmake.install()
+        copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
+        # CMakeDeps generates a thin wrapper; the original config (with add_sycl_to_target)
+        # lives in lib/cmake/AdaptiveCpp/. Expose it via builddirs above.

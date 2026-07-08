@@ -1,7 +1,7 @@
 sources:
   "25.10.0":
-    url: "https://github.com/AdaptiveCpp/AdaptiveCpp/archive/da2463e9e8a5a8a1119c7ea0ecb08ef5f0b15e6d.tar.gz"
-    sha256: "d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed"
+    url: "https://github.com/AdaptiveCpp/AdaptiveCpp/archive/da2463e45aa90aa36306c45abcfc05b87de51bc6.tar.gz"
+    sha256: "c38cf1e36fb033221d3f6b096b62a4211265c4110874bbcdfb195bb1cc60d008"
 patches:
   "25.10.0":
     - patch_file: "patches/llvm22-pass-plugin.patch"
