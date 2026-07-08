@@ -15,6 +15,12 @@ endif()
 # ------------------------------------------------------------------ SYCL
 find_package(AdaptiveCpp CONFIG REQUIRED)
 
+# Default: compile kernels for CUDA + generic (CPU) fallback.
+# Override with -DACPP_TARGETS="cuda:sm_89" for GPU-only.
+if(NOT ACPP_TARGETS)
+    set(ACPP_TARGETS "cuda:sm_89;generic" CACHE STRING "AdaptiveCpp backend targets")
+endif()
+
 # ------------------------------------------------------------------ deps (conan-provided)
 find_package(glm REQUIRED)
 find_package(yaml-cpp REQUIRED)

@@ -116,7 +116,13 @@ int main() {
                              std::string("kernels/") + s.kernel);
 
     // ---- SYCL queue ----
-    sycl::queue q(sycl::gpu_selector_v);
+    sycl::queue q;
+    try {
+        q = sycl::queue(sycl::gpu_selector_v);
+    } catch (...) {
+        fprintf(stderr, "[sycl] GPU not available, falling back to default device\n");
+        q = sycl::queue{};
+    }
     fprintf(stderr, "[sycl] device: %s\n",
             q.get_device().get_info<sycl::info::device::name>().c_str());
 
