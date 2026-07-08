@@ -1,0 +1,9 @@
+name: "One Weekend — Random Spheres"
+kernel: one_weekend
+
+params:
+  num_spheres: 22
+  max_bounces: 12
+  spp_frame: 1
+  ground_color: [0.5, 0.5, 0.5]
+  background: [0.5, 0.7, 1.0]
