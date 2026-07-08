@@ -8,8 +8,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # ------------------------------------------------------------------ SYCL
 find_package(AdaptiveCpp CONFIG REQUIRED)
 
-# ------------------------------------------------------------------ deps
-include(cmake/fetch_deps.cmake)
+# ------------------------------------------------------------------ deps (conan-provided)
+find_package(glm REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(glfw3 REQUIRED)
+find_package(imgui REQUIRED)
+find_package(OpenGL REQUIRED)
 
 # ------------------------------------------------------------------ targets
 add_subdirectory(src)
