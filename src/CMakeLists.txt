@@ -1,31 +1,26 @@
-# ---- ImGui backends convenience library ----
-# conan's imgui package is header-only (interface); we compile core + backends.
-# get imgui's source directory from the conan-generated target's include path
-get_target_property(_IMGUI_INCLUDE imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
-# Pick the first matching include dir that contains imgui.h
-set(IMGUI_DIR "")
-foreach(_dir ${_IMGUI_INCLUDE})
-    if(EXISTS "${_dir}/imgui.h")
-        set(IMGUI_DIR "${_dir}")
-        break()
-    endif()
-endforeach()
-if(NOT IMGUI_DIR)
-    message(FATAL_ERROR "Cannot find imgui.h from conan imgui package")
+# ---- ImGui backends helper ----
+# conan imgui provides core as a prebuilt static library (imgui::imgui).
+# Backend .cpp files are fetched from GitHub since the conan package doesn't compile them.
+include(FetchContent)
+FetchContent_Declare(imgui_backends
+    GIT_REPOSITORY  https://github.com/ocornut/imgui.git
+    GIT_TAG         tags/v1.92.8
+    GIT_SHALLOW     TRUE
+    SOURCE_SUBDIR   NONE
+)
+FetchContent_GetProperties(imgui_backends)
+if(NOT imgui_backends_POPULATED)
+    FetchContent_Populate(imgui_backends)
 endif()
 
 set(IMGUI_SRC
-    ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_draw.cpp
-    ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    "${imgui_backends_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_backends_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp"
 )
 add_library(imgui_helper STATIC ${IMGUI_SRC})
 target_include_directories(imgui_helper PUBLIC
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
+    "${imgui_backends_SOURCE_DIR}"
+    "${imgui_backends_SOURCE_DIR}/backends"
 )
 target_link_libraries(imgui_helper PUBLIC glfw imgui::imgui)
 
@@ -43,7 +38,7 @@ target_include_directories(sandbox PRIVATE
 )
 
 target_link_libraries(sandbox PRIVATE
-    AdaptiveCpp::AdaptiveCpp
+    AdaptiveCpp::acpp-rt
     imgui_helper
     glfw
     glm::glm-header-only

@@ -1,19 +1,19 @@
-file(GLOB kernel_dirs RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} */)
-foreach(kdir ${kernel_dirs})
-    get_filename_component(kname ${kdir} NAME)
-    file(GLOB_RECURSE ksources ${kdir}/*.cpp)
+# known kernel subdirectories — add new ones here
+set(KERNEL_DIRS one_weekend)
 
-    add_library(${kname} SHARED ${ksources})
-    add_sycl_to_target(TARGET ${kname} SOURCES ${ksources})
+foreach(kdir ${KERNEL_DIRS})
+    file(GLOB_RECURSE ksources "${kdir}/*.cpp")
 
-    target_include_directories(${kname} PRIVATE
+    add_library(${kdir} SHARED ${ksources})
+    add_sycl_to_target(TARGET ${kdir} SOURCES ${ksources})
+
+    target_include_directories(${kdir} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/${kdir}
     )
-    target_link_libraries(${kname} PRIVATE glm::glm)
+    target_link_libraries(${kdir} PRIVATE glm::glm)
 
-    # Install to predictable location for the runtime to dlopen
-    set_target_properties(${kname} PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/kernels/${kname}"
+    set_target_properties(${kdir} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/kernels/${kdir}"
     )
 endforeach()
