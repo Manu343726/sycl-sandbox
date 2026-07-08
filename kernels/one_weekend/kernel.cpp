@@ -42,16 +42,16 @@ static CameraData* g_d_cam     = nullptr;
 static int         g_num_spheres = 0;
 
 // ── host scene builder ─────────────────────────────────────────────────
-static Sphere* build_random_spheres(int n, f3 gc) {
+static Sphere* build_random_spheres(int n, sycl::float3 gc) {
     auto* s = new Sphere[n + 4];
     int i = 0;
     s[i++] = { {0,-1000,0}, 1000, MatType::LAMBERTIAN, gc, 0,0,{0,0,0} };
     RNG rng{42};
     for (int k = 0; k < n; k++) {
         float x = -10 + 20*rng.next(), z = -10 + 20*rng.next();
-        f3 c = {x,0.2f,z};
+        sycl::float3 c = {x,0.2f,z};
         if (vlen(c) <= 0.9f) continue;
-        f3 col = { rng.next()*rng.next(), rng.next()*rng.next(),
+        sycl::float3 col = { rng.next()*rng.next(), rng.next()*rng.next(),
                        rng.next()*rng.next() };
         float d = rng.next();
         if      (d < 0.6f)  s[i++] = { c,0.2f, MatType::LAMBERTIAN, col,0,0,{0,0,0} };
@@ -65,11 +65,11 @@ static Sphere* build_random_spheres(int n, f3 gc) {
 }
 
 static CameraData setup_camera(float aspect) {
-    f3 from = {13,2,3};
+    sycl::float3 from = {13,2,3};
     float theta = 20.f * 3.14159265f / 180.f;
     float h = tanf(theta/2), vh = 2*h, vw = aspect*vh, fd = 10.f, ap = 0.1f;
-    f3 w = vnorm(vsub(from, {0,0,0})), u = vnorm(vcross({0,1,0}, w));
-    f3 v = vcross(w, u);
+    sycl::float3 w = vnorm(vsub(from, {0,0,0})), u = vnorm(vcross({0,1,0}, w));
+    sycl::float3 v = vcross(w, u);
     CameraData c;
     c.origin     = from;
     c.horizontal = vscale(u, vw*fd);
@@ -83,7 +83,7 @@ static CameraData setup_camera(float aspect) {
 // ── device hit / scatter / trace ───────────────────────────────────────
 inline bool hit(const Sphere& s, const Ray& r,
                                float mn, float mx, HitRecord& rec) {
-    f3 oc = vsub(r.orig, s.center);
+    sycl::float3 oc = vsub(r.orig, s.center);
     float a = vdot(r.dir,r.dir), b = vdot(oc,r.dir);
     float c = vdot(oc,oc) - s.radius*s.radius;
     float d = b*b - a*c;
@@ -100,13 +100,13 @@ inline bool hit(const Sphere& s, const Ray& r,
     return true;
 }
 
- inline f3 rnd_dir(RNG& r) {
-    for (int i=0;i<100;i++) { f3 p = {2*r.next()-1,2*r.next()-1,2*r.next()-1}; if (vlen2(p)<1) return p; }
+ inline sycl::float3 rnd_dir(RNG& r) {
+    for (int i=0;i<100;i++) { sycl::float3 p = {2*r.next()-1,2*r.next()-1,2*r.next()-1}; if (vlen2(p)<1) return p; }
     return {0,0,1};
 }
- inline f3 reflect(f3 v, f3 n) { return vsub(v, vscale(n, 2*vdot(v,n))); }
- inline bool refract(f3 v, f3 n, float eta, f3& o) {
-    f3 uv = vnorm(v); float dt = vdot(uv,n), d = 1-eta*eta*(1-dt*dt);
+ inline sycl::float3 reflect(sycl::float3 v, sycl::float3 n) { return vsub(v, vscale(n, 2*vdot(v,n))); }
+ inline bool refract(sycl::float3 v, sycl::float3 n, float eta, sycl::float3& o) {
+    sycl::float3 uv = vnorm(v); float dt = vdot(uv,n), d = 1-eta*eta*(1-dt*dt);
     if (d<=0) return false;
     o = vscale(vsub(uv, vscale(n,dt)), eta); o = vsub(o, vscale(n, sycl::sqrt(d)));
     return true;
@@ -115,31 +115,31 @@ inline bool hit(const Sphere& s, const Ray& r,
     float r0 = (1-ir)/(1+ir); r0*=r0; return r0+(1-r0)*sycl::pow(1-c,5);
 }
 
- f3 trace(const Ray& r, const Sphere* spheres, int n,
-                            f3 bg, int bounces, RNG& rng) {
-    f3 att = {1,1,1};
+ sycl::float3 trace(const Ray& r, const Sphere* spheres, int n,
+                            sycl::float3 bg, int bounces, RNG& rng) {
+    sycl::float3 att = {1,1,1};
     Ray ray = r;
     for (int b=0; b<bounces; b++) {
         HitRecord rec; float closest = 1e30f; bool hit_any = false;
         for (int i=0; i<n; i++) if (hit(spheres[i], ray, 0.001f, closest, rec))
             { closest = rec.t; hit_any = true; }
         if (!hit_any) {
-            float t = 0.5f*(ray.dir.y+1);
+            float t = 0.5f*(ray.dir[1]+1);
             return vmul(att, vlerp({1,1,1}, bg, t));
         }
         switch (rec.mat_type) {
         case MatType::LAMBERTIAN: {
-            f3 tg = vadd(rec.p, vadd(rec.normal, rnd_dir(rng)));
+            sycl::float3 tg = vadd(rec.p, vadd(rec.normal, rnd_dir(rng)));
             ray = {rec.p, vsub(tg,rec.p)}; att = vmul(att, rec.albedo); break;
         }
         case MatType::METAL: {
-            f3 rfl = reflect(vnorm(ray.dir), rec.normal);
-            f3 f = vadd(rfl, vscale(rnd_dir(rng), rec.fuzz));
+            sycl::float3 rfl = reflect(vnorm(ray.dir), rec.normal);
+            sycl::float3 f = vadd(rfl, vscale(rnd_dir(rng), rec.fuzz));
             if (vdot(f,rec.normal)<=0) return {0,0,0};
             ray = {rec.p,f}; att = vmul(att, rec.albedo); break;
         }
         case MatType::DIELECTRIC: {
-            f3 out; float eta, cos;
+            sycl::float3 out; float eta, cos;
             if (vdot(ray.dir, rec.normal) > 0) {
                 out = vscale(rec.normal,-1); eta = rec.ir;
                 cos = rec.ir*vdot(ray.dir,rec.normal)/vlen(ray.dir);
@@ -147,7 +147,7 @@ inline bool hit(const Sphere& s, const Ray& r,
                 out = rec.normal; eta = 1/rec.ir;
                 cos = -vdot(ray.dir,rec.normal)/vlen(ray.dir);
             }
-            f3 refr; float rp;
+            sycl::float3 refr; float rp;
             if (refract(ray.dir, out, eta, refr)) rp = schlick(cos, rec.ir);
             else rp = 1;
             ray = {rec.p, rng.next()<rp ? reflect(vnorm(ray.dir),rec.normal) : refr};
@@ -164,7 +164,7 @@ extern "C" void init_kernel(sycl::queue* q, int w, int h,
                              const void* params, size_t) {
     auto* p = (const float*)params;
     int n = (int)p[P_NUM_SPHERES];
-    f3 gc; memcpy(&gc, p + P_GROUND_COLOR, 12);
+    sycl::float3 gc; memcpy(&gc, p + P_GROUND_COLOR, 12);
 
     int cnt = n + 4;
     auto* hs = build_random_spheres(n, gc);
@@ -186,7 +186,7 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
     auto* p = (const float*)params;
     int spp = (int)p[P_SPP_FRAME];
     int bounces = (int)p[P_MAX_BOUNCES];
-    f3 bg; memcpy(&bg, p + P_BACKGROUND, 12);
+    sycl::float3 bg; memcpy(&bg, p + P_BACKGROUND, 12);
 
     auto* acc = (float*)accum;
     auto* d_sph = g_d_spheres;
@@ -202,8 +202,8 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                 + (uint64_t)(si * 2654435761u)) };
             float u = (x + rng.next()) / (float)w;
             float v_ = (y + rng.next()) / (float)h;
-            f3 rd = vscale(rnd_dir(rng), d_cam->lens_radius);
-            f3 off = vadd(vscale(d_cam->u, rd.x), vscale(d_cam->v, rd.y));
+            sycl::float3 rd = vscale(rnd_dir(rng), d_cam->lens_radius);
+            sycl::float3 off = vadd(vscale(d_cam->u, rd[0]), vscale(d_cam->v, rd[1]));
             Ray ray;
             ray.orig = vadd(d_cam->origin, off);
             ray.dir  = vsub(vadd(vadd(d_cam->lower_left,
@@ -211,11 +211,11 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                  vscale(d_cam->vertical, v_)),
                            vadd(d_cam->origin, off));
 
-            f3 col = trace(ray, d_sph, nsph, bg, bounces, rng);
+            sycl::float3 col = trace(ray, d_sph, nsph, bg, bounces, rng);
             int base = idx * 4;
-            acc[base+0] += col.x;
-            acc[base+1] += col.y;
-            acc[base+2] += col.z;
+            acc[base+0] += col[0];
+            acc[base+1] += col[1];
+            acc[base+2] += col[2];
             acc[base+3] += 1;
         }
     }).wait();

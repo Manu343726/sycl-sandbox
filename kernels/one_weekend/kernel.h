@@ -2,33 +2,32 @@
 #include <sycl/sycl.hpp>
 
 // ── device math types ──────────────────────────────────────────────────
-struct f3 { float x, y, z; };
-inline f3 make_f3(float x, float y, float z) { return {x, y, z}; }
+// Use sycl::float3 (vec<float,3>) directly — portable across all backends.
 
-inline f3 vadd(f3 a, f3 b) {
-    return {a.x + b.x, a.y + b.y, a.z + b.z};
+inline sycl::float3 vadd(sycl::float3 a, sycl::float3 b) {
+    return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
 }
-inline f3 vsub(f3 a, f3 b) {
-    return {a.x - b.x, a.y - b.y, a.z - b.z};
+inline sycl::float3 vsub(sycl::float3 a, sycl::float3 b) {
+    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
 }
-inline f3 vmul(f3 a, f3 b) {
-    return {a.x * b.x, a.y * b.y, a.z * b.z};
+inline sycl::float3 vmul(sycl::float3 a, sycl::float3 b) {
+    return {a[0] * b[0], a[1] * b[1], a[2] * b[2]};
 }
-inline f3 vscale(f3 a, float t) {
-    return {a.x * t, a.y * t, a.z * t};
+inline sycl::float3 vscale(sycl::float3 a, float t) {
+    return {a[0] * t, a[1] * t, a[2] * t};
 }
-inline float  vdot(f3 a, f3 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
+inline float  vdot(sycl::float3 a, sycl::float3 b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-inline f3 vcross(f3 a, f3 b) {
-    return { a.y*b.z - a.z*b.y,
-             a.z*b.x - a.x*b.z,
-             a.x*b.y - a.y*b.x };
+inline sycl::float3 vcross(sycl::float3 a, sycl::float3 b) {
+    return { a[1]*b[2] - a[2]*b[1],
+             a[2]*b[0] - a[0]*b[2],
+             a[0]*b[1] - a[1]*b[0] };
 }
-inline float  vlen2(f3 a) { return vdot(a, a); }
-inline float  vlen(f3 a)  { return sycl::sqrt(vlen2(a)); }
-inline f3 vnorm(f3 a) { return vscale(a, 1.f / vlen(a)); }
-inline f3 vlerp(f3 a, f3 b, float t) {
+inline float  vlen2(sycl::float3 a) { return vdot(a, a); }
+inline float  vlen(sycl::float3 a)  { return sycl::sqrt(vlen2(a)); }
+inline sycl::float3 vnorm(sycl::float3 a) { return vscale(a, 1.f / vlen(a)); }
+inline sycl::float3 vlerp(sycl::float3 a, sycl::float3 b, float t) {
     return vadd(vscale(a, 1.f - t), vscale(b, t));
 }
 
@@ -45,8 +44,8 @@ struct RNG {
 
 // ── ray ────────────────────────────────────────────────────────────────
 struct Ray {
-    f3 orig;
-    f3 dir;
+    sycl::float3 orig;
+    sycl::float3 dir;
 };
 
 // ── material types ─────────────────────────────────────────────────────
@@ -54,26 +53,26 @@ enum class MatType : uint8_t { LAMBERTIAN, METAL, DIELECTRIC, DIFFUSE_LIGHT };
 
 // ── sphere (the only primitive for this kernel) ──────────────────────
 struct Sphere {
-    f3  center;
-    float   radius;
-    MatType mat_type;
-    f3  albedo;
-    float   fuzz;       // metal only
-    float   ir;         // dielectric only (index of refraction)
-    f3  emit;       // light only
+    sycl::float3  center;
+    float         radius;
+    MatType       mat_type;
+    sycl::float3  albedo;
+    float         fuzz;
+    float         ir;
+    sycl::float3  emit;
 };
 
 // ── hit record ─────────────────────────────────────────────────────────
 struct HitRecord {
-    f3  p;
-    f3  normal;
-    float   t;
-    f3  albedo;
-    f3  emit;
-    MatType mat_type;
-    float   fuzz;
-    float   ir;
-    bool    front_face;
+    sycl::float3  p;
+    sycl::float3  normal;
+    float         t;
+    sycl::float3  albedo;
+    sycl::float3  emit;
+    MatType       mat_type;
+    float         fuzz;
+    float         ir;
+    bool          front_face;
 };
 
 // ── device scene (flat arrays, uploaded at init) ─────────────────────
@@ -84,10 +83,10 @@ struct DeviceScene {
 
 // ── camera ─────────────────────────────────────────────────────────────
 struct CameraData {
-    f3 origin;
-    f3 lower_left;
-    f3 horizontal;
-    f3 vertical;
-    f3 u, v, w;
-    float  lens_radius;
+    sycl::float3 origin;
+    sycl::float3 lower_left;
+    sycl::float3 horizontal;
+    sycl::float3 vertical;
+    sycl::float3 u, v, w;
+    float        lens_radius;
 };
