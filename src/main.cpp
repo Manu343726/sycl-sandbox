@@ -116,7 +116,7 @@ int main() {
                              std::string("kernels/") + s.kernel);
 
     // ---- SYCL queue ----
-    sycl::queue q;
+    sycl::queue q(sycl::gpu_selector_v);
     fprintf(stderr, "[sycl] device: %s\n",
             q.get_device().get_info<sycl::info::device::name>().c_str());
 
