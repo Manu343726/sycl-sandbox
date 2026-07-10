@@ -30,87 +30,104 @@ inline float schlick(float c, float ir) {
     return r0 + (1-r0)*sycl::pow(1-c, 5);
 }
 
-// ── Hit dispatch ───────────────────────────────────────────────────────
-inline bool hit(const Geometry& g, const Ray& r, float t_min, float t_max, HitRecord& rec) {
-    switch (g.type) {
-    case GEOM_SPHERE: {
-        float3 oc = sub(r.orig, g.center);
-        float a = dot(r.dir, r.dir);
-        float b = dot(oc, r.dir);
-        float c_ = dot(oc, oc) - g.radius * g.radius;
-        float d = b*b - a*c_;
-        if (d <= 0) return false;
-        float t = (-b - sycl::sqrt(d)) / a;
-        if (t < t_min || t > t_max) t = (-b + sycl::sqrt(d)) / a;
-        if (t < t_min || t > t_max) return false;
-        rec.t = t; rec.p = add(r.orig, scale(r.dir, t));
-        rec.normal = scale(sub(rec.p, g.center), 1.f / g.radius);
-        rec.front_face = dot(r.dir, rec.normal) < 0;
-        if (!rec.front_face) rec.normal = scale(rec.normal, -1);
-        return true;
-    }
-    case GEOM_QUAD: {
-        float denom = dot(g.normal, r.dir);
-        if (sycl::fabs(denom) < 1e-8f) return false;
-        float t = dot(sub(g.a, r.orig), g.normal) / denom;
-        if (t < t_min || t > t_max) return false;
-        float3 p = add(r.orig, scale(r.dir, t));
-        float3 ba = sub(g.b, g.a), ca = sub(g.c, g.a), pa = sub(p, g.a);
-        float d00 = dot(ba,ba), d01 = dot(ba,ca), d11 = dot(ca,ca);
-        float d20 = dot(pa,ba), d21 = dot(pa,ca);
-        float den = d00*d11 - d01*d01;
-        if (sycl::fabs(den) < 1e-12f) return false;
-        float u = (d11*d20 - d01*d21)/den, v = (d00*d21 - d01*d20)/den;
-        if (u<0||u>1||v<0||v>1) return false;
-        rec.t = t; rec.p = p;
-        rec.normal = denom<0 ? g.normal : scale(g.normal,-1.f);
-        rec.front_face = denom < 0;
-        return true;
-    }
-    }
-    return false;
+// ── Hit implementations per geometry type ──────────────────────────────
+inline bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
+    float3 oc = sub(r.orig, center);
+    float a = dot(r.dir, r.dir);
+    float b = dot(oc, r.dir);
+    float c_ = dot(oc, oc) - radius * radius;
+    float d = b*b - a*c_;
+    if (d <= 0) return false;
+    float t = (-b - sycl::sqrt(d)) / a;
+    if (t < t_min || t > t_max) t = (-b + sycl::sqrt(d)) / a;
+    if (t < t_min || t > t_max) return false;
+    rec.t = t; rec.p = add(r.orig, scale(r.dir, t));
+    rec.normal = scale(sub(rec.p, center), 1.f / radius);
+    rec.front_face = dot(r.dir, rec.normal) < 0;
+    if (!rec.front_face) rec.normal = scale(rec.normal, -1);
+    return true;
 }
 
-// ── Scatter dispatch ───────────────────────────────────────────────────
-inline bool scatter(const Material& m, const Ray& in, const HitRecord& rec,
-                     float3& attenuation, Ray& scattered, RNG& rng) {
-    switch (m.type) {
-    case MAT_LAMBERTIAN: {
-        float3 target = add(rec.p, add(rec.normal, random_in_unit_sphere(rng)));
-        scattered = {rec.p, sub(target, rec.p)};
-        attenuation = m.albedo;
-        return true;
+inline bool Quad::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
+    float denom = dot(normal, r.dir);
+    if (sycl::fabs(denom) < 1e-8f) return false;
+    float t = dot(sub(a, r.orig), normal) / denom;
+    if (t < t_min || t > t_max) return false;
+    float3 p = add(r.orig, scale(r.dir, t));
+    float3 ba = sub(b, a), ca = sub(c, a), pa = sub(p, a);
+    float d00 = dot(ba,ba), d01 = dot(ba,ca), d11 = dot(ca,ca);
+    float d20 = dot(pa,ba), d21 = dot(pa,ca);
+    float den = d00*d11 - d01*d01;
+    if (sycl::fabs(den) < 1e-12f) return false;
+    float u = (d11*d20 - d01*d21)/den, v = (d00*d21 - d01*d20)/den;
+    if (u<0||u>1||v<0||v>1) return false;
+    rec.t = t; rec.p = p;
+    rec.normal = denom<0 ? normal : scale(normal,-1.f);
+    rec.front_face = denom < 0;
+    return true;
+}
+
+// ── Scatter implementations per material type ──────────────────────────
+inline bool Lambertian::scatter(const Ray&, const HitRecord& rec,
+                                 float3& attenuation, Ray& scattered, RNG& rng) const {
+    float3 target = add(rec.p, add(rec.normal, random_in_unit_sphere(rng)));
+    scattered = {rec.p, sub(target, rec.p)};
+    attenuation = albedo;
+    return true;
+}
+
+inline bool Metal::scatter(const Ray& in, const HitRecord& rec,
+                            float3& attenuation, Ray& scattered, RNG& rng) const {
+    float3 reflected = reflect(norm(in.dir), rec.normal);
+    scattered = {rec.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
+    attenuation = albedo;
+    return dot(scattered.dir, rec.normal) > 0;
+}
+
+inline bool Dielectric::scatter(const Ray& in, const HitRecord& rec,
+                                 float3& attenuation, Ray& scattered, RNG& rng) const {
+    attenuation = {1,1,1};
+    float3 outward_n;
+    float eta_ratio, cos;
+    if (dot(in.dir, rec.normal) > 0) {
+        outward_n = scale(rec.normal, -1);
+        eta_ratio = ir;
+        cos = ir * dot(in.dir, rec.normal) / len(in.dir);
+    } else {
+        outward_n = rec.normal;
+        eta_ratio = 1.f / ir;
+        cos = -dot(in.dir, rec.normal) / len(in.dir);
     }
-    case MAT_METAL: {
-        float3 reflected = reflect(norm(in.dir), rec.normal);
-        scattered = {rec.p, add(reflected, scale(random_in_unit_sphere(rng), m.fuzz))};
-        attenuation = m.albedo;
-        return dot(scattered.dir, rec.normal) > 0;
-    }
-    case MAT_DIELECTRIC: {
-        attenuation = {1,1,1};
-        float3 outward_n;
-        float eta_ratio, cos;
-        if (dot(in.dir, rec.normal) > 0) {
-            outward_n = scale(rec.normal, -1);
-            eta_ratio = m.ir;
-            cos = m.ir * dot(in.dir, rec.normal) / len(in.dir);
-        } else {
-            outward_n = rec.normal;
-            eta_ratio = 1.f / m.ir;
-            cos = -dot(in.dir, rec.normal) / len(in.dir);
-        }
-        float3 refracted;
-        if (refract(in.dir, outward_n, eta_ratio, refracted) && rng.next() >= schlick(cos, m.ir))
-            scattered = {rec.p, refracted};
-        else
-            scattered = {rec.p, reflect(norm(in.dir), rec.normal)};
-        return true;
-    }
-    case MAT_DIFFUSE_LIGHT:
-        return false; // light: no scatter
-    }
-    return false;
+    float3 refracted;
+    if (refract(in.dir, outward_n, eta_ratio, refracted) && rng.next() >= schlick(cos, ir))
+        scattered = {rec.p, refracted};
+    else
+        scattered = {rec.p, reflect(norm(in.dir), rec.normal)};
+    return true;
+}
+
+// ── Object dispatch ────────────────────────────────────────────────────
+// visit_rt expands to a chain of if/else-if at compile time, one branch
+// per variant type. No function pointers, no vtables.
+inline bool Object::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
+    bool found = false;
+    visit_rt(hittable, [&](const auto& h) { found = h.hit(r, t_min, t_max, rec); });
+    return found;
+}
+
+inline bool Object::scatter(const Ray& in, const HitRecord& rec,
+                             float3& att, Ray& scattered, RNG& rng) const {
+    bool did_scatter = false;
+    visit_rt(material, [&](const auto& m) {
+        did_scatter = m.scatter(in, rec, att, scattered, rng);
+    });
+    return did_scatter;
+}
+
+inline float3 Object::emit(const HitRecord& rec) const {
+    float3 emitted = {0,0,0};
+    visit_rt(material, [&](const auto& m) { emitted = m.emit(rec); });
+    return emitted;
 }
 
 // ── Trace ──────────────────────────────────────────────────────────────
@@ -122,21 +139,20 @@ inline float3 trace(const Ray& ray, const Object* objs, int count, int bounces, 
         float closest = 1e30f;
         int hit_idx = -1;
         for (int i = 0; i < count; i++) {
-            if (hit(objs[i].geom, r, 0.001f, closest, rec)) {
+            if (objs[i].hit(r, 0.001f, closest, rec)) {
                 closest = rec.t;
                 hit_idx = i;
             }
         }
         if (hit_idx < 0) return {0,0,0};
-        rec.mat = objs[hit_idx].mat;
 
-        // Emissive surface → terminate
-        if (rec.mat.type == MAT_DIFFUSE_LIGHT)
-            return mul(att, rec.mat.emit);
+        float3 emitted = objs[hit_idx].emit(rec);
+        if (emitted.x != 0 || emitted.y != 0 || emitted.z != 0)
+            return mul(att, emitted);
 
         float3 albedo;
         Ray scattered;
-        if (scatter(rec.mat, r, rec, albedo, scattered, rng)) {
+        if (objs[hit_idx].scatter(r, rec, albedo, scattered, rng)) {
             att = mul(att, albedo);
             r = scattered;
         } else {
