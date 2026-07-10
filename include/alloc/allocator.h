@@ -8,7 +8,7 @@
 /// Only allocators matching the given tag are included.
 template <AllocatorTag Tag>
 using Allocator = std::variant<
-    RootAllocator<Tag>,
-    LinearAllocator<Tag>,
-    StackAllocator<Tag>
+    alloc::raw::RootAllocator<Tag>,
+    alloc::raw::LinearAllocator<Tag>,
+    alloc::raw::StackAllocator<Tag>
 >;

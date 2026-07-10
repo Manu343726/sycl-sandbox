@@ -1,6 +1,11 @@
 #pragma once
 #include "math.h"
 #include "types.h"
+#include <alloc/tag.h>
+#include <alloc/buffer.h>
+#include <alloc/host_allocator.h>
+#include <alloc/device_allocator.h>
+#include <alloc/transfer.h>
 
 /// Host-side scene-building helpers for raytracer kernels.
 namespace rt {
@@ -39,16 +44,16 @@ public:
     DeviceBuffer() = default;
 
     DeviceBuffer(sycl::queue *queue, int initial_capacity = 64)
-        : queue_(queue), host_(sycl::malloc_host<T>(initial_capacity, *queue)),
-          capacity_(initial_capacity) {
+        : queue_(queue),
+          host_(alloc::raw::HostAllocator().allocate(initial_capacity * sizeof(T), *queue_)) {
     }
 
     ~DeviceBuffer() {
-        if ( host_ ) {
-            sycl::free(host_, *queue_);
+        if ( host_.data ) {
+            alloc::raw::HostAllocator().deallocate(host_, *queue_);
         }
-        if ( device_ ) {
-            sycl::free(device_, *queue_);
+        if ( device_.data ) {
+            alloc::raw::DeviceAllocator().deallocate(device_, *queue_);
         }
     }
 
@@ -71,28 +76,36 @@ public:
     void push_back(T object) {
         if ( count_ >= capacity_ ) {
             int new_cap = capacity_ * 2;
-            T *new_host = sycl::malloc_host<T>(new_cap, *queue_);
-            for ( int i = 0; i < count_; i++ ) {
-                new_host[i] = std::move(host_[i]);
+            auto new_host = alloc::raw::HostAllocator().allocate(new_cap * sizeof(T), *queue_);
+            if ( !new_host.is_valid() ) {
+                return;
             }
-            sycl::free(host_, *queue_);
+            T *src = static_cast<T *>(host_.data);
+            T *dst = static_cast<T *>(new_host.data);
+            for ( int i = 0; i < count_; i++ ) {
+                dst[i] = std::move(src[i]);
+            }
+            alloc::raw::HostAllocator().deallocate(host_, *queue_);
             host_ = new_host;
             capacity_ = new_cap;
         }
-        host_[count_++] = std::move(object);
+        static_cast<T *>(host_.data)[count_++] = std::move(object);
     }
 
     /// Allocate device memory and copy host contents.
     void transfer_to_device() {
-        if ( device_ ) {
-            sycl::free(device_, *queue_);
+        size_t bytes = count_ * sizeof(T);
+        if ( device_.data ) {
+            alloc::raw::DeviceAllocator().deallocate(device_, *queue_);
         }
-        device_ = sycl::malloc_device<T>(count_, *queue_);
-        queue_->memcpy(device_, host_, count_ * sizeof(T)).wait();
+        device_ = alloc::raw::DeviceAllocator().allocate(bytes, *queue_);
+        alloc::transfer(alloc::raw::Buffer<AllocatorTag::Host> {host_.data, bytes},
+                        alloc::raw::Buffer<AllocatorTag::Device> {device_.data, bytes},
+                        *queue_);
     }
 
     T *device_ptr() const {
-        return device_;
+        return static_cast<T *>(device_.data);
     }
     int size() const {
         return count_;
@@ -100,8 +113,8 @@ public:
 
 private:
     sycl::queue *queue_ = nullptr;
-    T *host_ = nullptr;
-    T *device_ = nullptr;
+    alloc::raw::Buffer<AllocatorTag::Host> host_;
+    alloc::raw::Buffer<AllocatorTag::Device> device_;
     int capacity_ = 0;
     int count_ = 0;
 };

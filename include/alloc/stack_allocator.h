@@ -1,19 +1,17 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <sycl/sycl.hpp>
 #include "buffer.h"
 #include "tag.h"
 
+namespace alloc::raw {
+
 /// Stack allocator — supports push/pop via markers.
-///
-/// Like LinearAllocator but with a marker system that allows rolling back
-/// to a previous point (pop).  Useful for nested scopes where you allocate
-/// and then undo a group of allocations.
 template <AllocatorTag Tag_>
 class StackAllocator {
 public:
     static constexpr AllocatorTag tag = Tag_;
-
     using Marker = size_t;
 
     StackAllocator() = default;
@@ -29,18 +27,14 @@ public:
         uintptr_t aligned = (reinterpret_cast<uintptr_t>(cursor_) + alignment - 1)
                           & ~(alignment - 1);
         size_t padded_mark = aligned - reinterpret_cast<uintptr_t>(pool_.data);
-        if (padded_mark + bytes > pool_.size) {
-            return {};
-        }
+        if (padded_mark + bytes > pool_.size) return {};
         cursor_ = reinterpret_cast<char *>(aligned) + bytes;
         marker_ = padded_mark + bytes;
         return {reinterpret_cast<void *>(aligned), bytes};
     }
 
-    /// Snapshot the current position.
     Marker mark() const { return marker_; }
 
-    /// Roll back to a previous marker (pops allocations).
     void pop(Marker m) {
         marker_ = m;
         cursor_ = static_cast<char *>(pool_.data) + m;
@@ -61,3 +55,5 @@ private:
     char   *cursor_ = nullptr;
     size_t  marker_ = 0;
 };
+
+} // namespace alloc::raw

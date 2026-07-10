@@ -2,6 +2,8 @@
 #include <sycl/sycl.hpp>
 #include "buffer.h"
 
+namespace alloc::raw {
+
 /// Root host allocator — uses sycl::malloc_host.
 struct HostAllocator {
     static constexpr AllocatorTag tag = AllocatorTag::Host;
@@ -15,3 +17,5 @@ struct HostAllocator {
         if (buf.data) sycl::free(buf.data, queue);
     }
 };
+
+} // namespace alloc::raw

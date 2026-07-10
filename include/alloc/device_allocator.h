@@ -2,6 +2,8 @@
 #include <sycl/sycl.hpp>
 #include "buffer.h"
 
+namespace alloc::raw {
+
 /// Root device allocator — uses sycl::malloc_device.
 struct DeviceAllocator {
     static constexpr AllocatorTag tag = AllocatorTag::Device;
@@ -15,3 +17,5 @@ struct DeviceAllocator {
         if (buf.data) sycl::free(buf.data, queue);
     }
 };
+
+} // namespace alloc::raw

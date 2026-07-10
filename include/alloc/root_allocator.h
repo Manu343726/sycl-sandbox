@@ -4,6 +4,8 @@
 #include "device_allocator.h"
 #include "buffer.h"
 
+namespace alloc::raw {
+
 /// Tag-dispatched root allocator: HostAllocator when Tag=Host, DeviceAllocator when Tag=Device.
 template <AllocatorTag Tag>
 struct RootAllocator;
@@ -19,3 +21,5 @@ struct RootAllocator<AllocatorTag::Device> : DeviceAllocator {
     using DeviceAllocator::allocate;
     using DeviceAllocator::deallocate;
 };
+
+} // namespace alloc::raw
