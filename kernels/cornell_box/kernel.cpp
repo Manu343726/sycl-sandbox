@@ -69,8 +69,8 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     g_scene_host[0] = {quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)};
     g_scene_host[1] = {quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)};
     g_scene_host[2] = {quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)};
-    g_scene_host[3] = {quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)};
-    g_scene_host[4] = {quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)};
+    g_scene_host[3] = {quad(0, -2.0f, 0, 3, -2, 2), lambertian(red)};
+    g_scene_host[4] = {quad(0, 2.0f, 0, 3, -2, 2), lambertian(green)};
     g_scene_host[5] = {quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)};
     g_scene_host[6] = {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f),
                        lambertian({0.55f, 0.55f, 0.55f})};
