@@ -125,6 +125,15 @@ using rt::materials::lambertian;
 - **Free factory functions** instead of static methods.
   `sphere(c, r)` returns a `Sphere`, not `Sphere::create(c, r)`.
 
+## Keeping docs in sync
+
+Architecture changes must update the corresponding docs in the same commit:
+- **`docs/architecture.md`** — host, build system, kernel API.
+- **`docs/raytracing.md`** — raytracing library internals.
+- **`README.md`** — build instructions, usage, feature list.
+
+Out-of-date docs are worse than no docs.
+
 ## Code organisation
 
 - One class per file, named after the class (lowercase_snake_case).

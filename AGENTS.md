@@ -2,9 +2,7 @@
 
 Before making changes, read the following files in order:
 
-1. **README.md** — project overview, build instructions, and usage.
-2. **docs/architecture.md** — host architecture, kernel loading, build system.
-3. **docs/raytracing.md** — raytracing library: variant OOP, std::optional,
-   standard params, kernel API, scene helpers.
-4. **docs/coding-guidelines.md** — naming, enum rules, function signatures,
-   documentation style, namespace conventions. These rules should always be followed.
+1. **README.md**: Project overview, build instructions, and usage.
+2. **docs/architecture.md**: Explains the architecture of the sandbox. New features should always follow this architecture.
+3. **docs/raytracing.md**: Explains the architecture of the raytracing kernels and their shared raytracing library. New raytracing features and kernels should always follow this architecture.
+4. **docs/coding-guidelines.md**: Coding style conventions, and development workflow rules. These should always be followed.
