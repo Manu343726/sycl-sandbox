@@ -92,7 +92,7 @@ quad(int primary, float axis_value, float min_s, float max_s, float min_t, float
         return {components[0], components[1], components[2]};
     };
     float3 a = corner(0), b = corner(1), c = corner(2);
-    return Quad(a, sub(b, a), sub(c, a));
+    return Quad(a, sub(c, a), sub(b, a));
 }
 
 } // namespace rt::hittables
