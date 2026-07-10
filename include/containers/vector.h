@@ -134,14 +134,8 @@ public:
     vector(const vector &) = default;
     vector &operator=(const vector &) = default;
 
-    template <bool HostV = (Tag == alloc::Target::Host)>
     void push_back(const T &element) {
-        if constexpr (HostV) {
-            impl_.push_back(&element);
-        } else {
-            static_assert(always_false<vector>::value,
-                          "push_back requires a host vector; build on host then transfer() to device");
-        }
+        impl_.push_back(&element);
     }
 
     containers::Buffer<Tag, T> data() const {
