@@ -198,9 +198,33 @@ inline Lambertian lambertian(float3 albedo);
 
 - Use `// ── section markers ──` sparingly for major sections in long files.
 
+## Clang-format
+
+A `.clang-format` file is checked into the repository root.  Run it
+before committing:
+
+```bash
+clang-format -i src/*.cpp src/*.h include/**/*.h include/**/*.hpp kernels/*/kernel.cpp kernels/*/kernel.h
+```
+
+Key style rules enforced by `.clang-format`:
+- Braces on the same line (Attach style).
+- 4-space indent.
+- 100-column line limit.
+- Spaces inside `if (...)`, `for (...)`, `while (...)`.
+- **`if`, `else`, `for`, `while` without braces are forbidden.**
+- No tabs, spaces only.
+
+If clang-format is not available, at minimum ensure no brace-less
+control flow statements.
+
 ## Formatting
 
-- 4-space indentation.
+- `clang-format` with the provided `.clang-format` file.
+- 4-space indentation, no tabs.
 - Opening brace on the same line for functions, control flow, and classes.
+- **`if`, `else`, `for`, `while` must always use braces** — no single-line
+  unbraced statements.  This is enforced by `.clang-format`
+  (`AllowShortIfStatementsOnASingleLine: Never`).
 - Line length cap at 100 columns (prefer breaks at natural points).
 - Spaces inside braces for initializer lists: `{1, 2, 3}` not `{1,2,3}`.
