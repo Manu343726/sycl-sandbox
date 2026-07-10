@@ -7,11 +7,11 @@
 
 namespace rt {
 
-// ── Object dispatch via visit_rt ───────────────────────────────────────
+// ── Object dispatch via visit ──────────────────────────────────────────
 
 inline std::optional<HitRecord> Object::hit(const Ray &ray, float t_min, float t_max) const {
     std::optional<HitRecord> result;
-    visit_rt(hittable, [&](const auto &h) {
+    visit(hittable, [&](const auto &h) {
         result = h.hit(ray, t_min, t_max);
     });
     return result;
@@ -20,7 +20,7 @@ inline std::optional<HitRecord> Object::hit(const Ray &ray, float t_min, float t
 inline std::optional<ScatterRecord>
 Object::scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
     std::optional<ScatterRecord> result;
-    visit_rt(material, [&](const auto &m) {
+    visit(material, [&](const auto &m) {
         result = m.scatter(incoming_ray, hit, rng);
     });
     return result;
@@ -28,7 +28,7 @@ Object::scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
 
 inline float3 Object::emit(const HitRecord &hit) const {
     float3 emitted = {0, 0, 0};
-    visit_rt(material, [&](const auto &m) {
+    visit(material, [&](const auto &m) {
         emitted = m.emit(hit);
     });
     return emitted;

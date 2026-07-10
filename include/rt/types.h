@@ -24,7 +24,7 @@ using Material = std::variant<materials::Lambertian,
                               materials::DiffuseLight>;
 
 /// A scene Object is a geometry + material pair, stored inline (no pointers).
-/// Dispatch to the active variant type is handled by visit_rt() — a
+/// Dispatch to the active variant type is handled by visit() — a
 /// compile-time if/else-if chain that works on all SYCL backends.
 class Object {
 public:

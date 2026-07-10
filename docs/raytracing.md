@@ -26,7 +26,7 @@ by the library.
 │  │                   sets up camera, launches    ││
 │  │                   parallel_for → trace()      ││
 │  │                    → Object::hit/scatter/emit ││
-│  │                     → visit_rt() dispatch     ││
+│  │                     → visit() dispatch       ││
 │  └──────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────┘
 ```
@@ -103,7 +103,7 @@ in the future.
 ## Variant-based polymorphism
 
 Geometry and material types are stored as `std::variant` with no base classes
-and no virtual methods.  Dispatch is done at compile time via `visit_rt()`
+and no virtual methods.  Dispatch is done at compile time via `visit()``
 — a recursive template that expands to a chain of `if (index == 0) … else if …`
 at compile time, producing no function pointers or vtable lookups.
 
@@ -113,9 +113,9 @@ Material = std::variant<Lambertian, Metal, Dielectric, DiffuseLight>
 Object   { Hittable hittable; Material material; }
 ```
 
-- `Object::hit()` → `visit_rt(hittable, …)` → calls `Sphere::hit()` or `Quad::hit()`
-- `Object::scatter()` → `visit_rt(material, …)` → calls `Lambertian::scatter()` etc.
-- `Object::emit()` → `visit_rt(material, …)` → calls `DiffuseLight::emit()` etc.
+- `Object::hit()` → `visit(hittable, …)` → calls `Sphere::hit()` or `Quad::hit()`
+- `Object::scatter()` → `visit(material, …)` → calls `Lambertian::scatter()` etc.
+- `Object::emit()` → `visit(material, …)` → calls `DiffuseLight::emit()` etc.
 
 This works on any SYCL backend (CPU OpenMP, CUDA) because no vtables or
 function pointers are used.
@@ -184,16 +184,18 @@ internally but hits as a single `Object`.
 ## File structure
 
 ```
+include/
+  variant.h           — visit<>() — generic compile-time variant dispatch
 include/rt/
   math.h              — float3, operators, RNG
   types_fwd.h         — Ray, HitRecord, ScatterRecord
   types.h             — Hittable variant, Material variant, Object class
   helpers.h           — random_in_unit_sphere, reflect, refract, schlick
-  variant.h           — visit_rt<>() — compile-time variant dispatch
+  variant.h           — forward to ../variant.h
   camera.h            — Camera struct, lookat()
   params.h            — rt_std_param enum
   trace.h             — Object::hit/scatter/emit dispatch, trace(), render_main<>()
-    scene.h             — Axis enum, quad_corner, DeviceBuffer
+  scene.h             — Axis enum, quad_corner, DeviceBuffer
   hittables/
     sphere.h          — Sphere class + sphere() factory
     quad.h            — Quad   class + quad()   factory

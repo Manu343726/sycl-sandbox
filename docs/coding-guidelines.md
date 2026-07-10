@@ -132,7 +132,7 @@ CPU) backend and the CUDA GPU backend.  This means:
 - **No virtual functions, no function pointers, no `std::function`** in
   code that runs on the device (inside `parallel_for` or any function it
   calls).  These require vtables or indirect calls that CUDA doesn't support.
-  Use `std::variant` + `visit_rt()` instead (compile-time dispatch).
+  Use `std::variant` + `visit()` instead (compile-time dispatch).
 
 - **No `dynamic_cast`, `typeid`, `std::any`** in device code.
 
