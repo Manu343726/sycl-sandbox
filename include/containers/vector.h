@@ -7,6 +7,7 @@
 #include <alloc/linear_allocator.h>
 #include <alloc/root_allocator.h>
 #include <alloc/transfer.h>
+#include "buffer.h"
 
 namespace containers::raw {
 
@@ -82,7 +83,10 @@ public:
         impl_.push_back(&element);
     }
 
-    alloc::raw::Buffer<Tag> data() const { return impl_.data(); }
+    containers::Buffer<Tag, T> data() const {
+        auto raw = impl_.data();
+        return {static_cast<T *>(raw.data), impl_.size()};
+    }
     size_t size()       const { return impl_.size(); }
     size_t max_size()   const { return impl_.max_size(); }
 
