@@ -14,17 +14,29 @@ static ParamMeta params_meta[] = {
       ParamType::COLOR_RGB, .default_c3 = { 1.f, 1.f, 1.f } },
     { "light_strength","Ceiling light intensity multiplier",
       ParamType::FLOAT, .range = { .f = { 1.f, 50.f, 1.f } }, .default_f = 15.f },
+    { "cam_eye",      "Camera position",
+      ParamType::VEC3, .default_c3 = { 0.f, 1.5f, 4.5f } },
+    { "cam_at",       "Camera look-at target",
+      ParamType::VEC3, .default_c3 = { 0.f, 1.2f, 0.f } },
+    { "cam_fov",      "Vertical field of view (degrees)",
+      ParamType::FLOAT, .range = { .f = { 1.f, 120.f, 1.f } }, .default_f = 35.f },
+    { "cam_aperture","Depth of field aperture size",
+      ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.f },
+    { "cam_up",      "Camera up vector",
+      ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
 };
 
 enum ParamIdx : int {
     P_SPP_FRAME=0, P_MAX_BOUNCES=1,
-    P_LIGHT_COLOR=2, P_LIGHT_STRENGTH=5
+    P_LIGHT_COLOR=2, P_LIGHT_STRENGTH=5,
+    P_CAM_EYE=6, P_CAM_AT=9,
+    P_CAM_FOV=12, P_CAM_APERTURE=13, P_CAM_UP=14
 };
 
 static const char* source_files[] = { "kernel.cpp", nullptr };
 static KernelDesc desc = {
     "cornell_box", "Cornell box scene with quads",
-    4, params_meta, 0, 4096, 1, source_files
+    9, params_meta, 0, 4096, 1, source_files
 };
 
 extern "C" KernelDesc* get_kernel_desc() {
@@ -104,7 +116,9 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
     int bounces = (int)p[P_MAX_BOUNCES];
     float aspect = (float)w / (float)h;
 
-    rt::Camera cam = rt::lookat({0,1.5f,4.5f}, {0,1.2f,0}, {0,1,0}, 35.f, aspect);
+    rt::float3 ce, ca, cu; memcpy(&ce, p + P_CAM_EYE, 12); memcpy(&ca, p + P_CAM_AT, 12); memcpy(&cu, p + P_CAM_UP, 12);
+    float cf = p[P_CAM_FOV];
+    rt::Camera cam = rt::lookat(ce, ca, cu, cf, aspect);
 
     rt::render(q, w, h, cam, g_d_quads, g_num_quads, spp, bounces,
                (float*)accum, si, [](const rt::Quad& qq, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {

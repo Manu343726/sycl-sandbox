@@ -49,6 +49,7 @@ struct OrbitCam {
     float theta     = 1.35f;
     float phi       = 1.05f;
     float dist      = 12.f;
+    float roll      = 0.f;
     float target[3] = { 0.f, 0.f, 0.f };
 };
 
@@ -58,6 +59,22 @@ static void orbit_to_eye(const OrbitCam& o, float eye[3]) {
     eye[0] = o.target[0] + o.dist * cp * st;
     eye[1] = o.target[1] + o.dist * sp;
     eye[2] = o.target[2] + o.dist * cp * ct;
+}
+
+// Build up vector from theta/phi/roll (rotate default up around forward axis)
+static void orbit_up(const OrbitCam& o, float up[3]) {
+    float ct = cosf(o.theta), st = sinf(o.theta);
+    float cp = cosf(o.phi),   sp = sinf(o.phi);
+    // forward = lookat direction (from eye to target)
+    float fwd[3] = { -cp * st, -sp, -cp * ct };
+    // default up
+    float ux = 0.f, uy = 1.f, uz = 0.f;
+    // rotate up around forward by roll
+    float c = cosf(o.roll), s = sinf(o.roll);
+    float dot = fwd[0]*ux + fwd[1]*uy + fwd[2]*uz;
+    up[0] = ux*c + (fwd[1]*uz - fwd[2]*uy)*s + fwd[0]*dot*(1-c);
+    up[1] = uy*c + (fwd[2]*ux - fwd[0]*uz)*s + fwd[1]*dot*(1-c);
+    up[2] = uz*c + (fwd[0]*uy - fwd[1]*ux)*s + fwd[2]*dot*(1-c);
 }
 
 // ── OpenGL texture helpers ─────────────────────────────────────────────
@@ -323,8 +340,10 @@ int main(int argc, char** argv) {
                 ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f", *cx, *cy, *zm);
             } else if (ce && ca && cf) {
                 ImGui::Text("LMB drag = orbit  |  scroll = zoom");
+                ImGui::Text("Ctrl+scroll = aperture  |  Ctrl+Shift+scroll = FOV");
+                ImGui::Text("Ctrl+Alt+scroll = roll  |  WASD = move camera");
                 ImGui::Text("Arrows = orbit  |  Shift+arrows = pan target");
-                ImGui::Text("WASD = move camera  |  Q/E = up/down");
+                ImGui::Text("Q/E = up/down");
                 ImGui::Text("Eye: (%.2f, %.2f, %.2f)", ce[0], ce[1], ce[2]);
                 ImGui::Text("FOV: %.1f\u00b0", *cf);
                 float* cap = find_param(h_params, active_kernel->desc, "cam_aperture");
@@ -363,6 +382,9 @@ int main(int argc, char** argv) {
 
             // ── 3D orbit camera ────────────────────────────────────
             if (ce && ca && cf) {
+                float* cap = find_param(h_params, active_kernel->desc, "cam_aperture");
+                float* cup = find_param(h_params, active_kernel->desc, "cam_up");
+
                 static OrbitCam orbit;
                 static bool     orbit_init = false;
                 if (!orbit_init) {
@@ -384,10 +406,28 @@ int main(int argc, char** argv) {
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     changed = true;
                 }
-                if (!io.WantCaptureMouse && io.MouseWheel != 0.f) {
-                    orbit.dist *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
-                    orbit.dist  = std::max(1.f, std::min(100.f, orbit.dist));
-                    changed = true;
+
+                float mw = io.MouseWheel;
+                if (!io.WantCaptureMouse && mw != 0.f) {
+                    bool ctrl  = io.KeyCtrl;
+                    bool shift = io.KeyShift;
+                    bool alt   = io.KeyAlt;
+                    if (ctrl && alt) {
+                        orbit.roll += mw * 0.05f;
+                        changed = true;
+                    } else if (ctrl && shift && cf) {
+                        *cf += mw * 2.f;
+                        *cf = std::max(1.f, std::min(120.f, *cf));
+                        changed = true;
+                    } else if (ctrl && cap) {
+                        *cap += mw * 0.02f;
+                        *cap = std::max(0.f, std::min(1.f, *cap));
+                        changed = true;
+                    } else {
+                        orbit.dist *= (mw > 0.f) ? 0.9f : 1.1f;
+                        orbit.dist  = std::max(1.f, std::min(100.f, orbit.dist));
+                        changed = true;
+                    }
                 }
 
                 if (!io.WantCaptureKeyboard) {
@@ -442,10 +482,12 @@ int main(int argc, char** argv) {
                 }
 
                 if (changed) {
-                    float eye[3];
+                    float eye[3], up[3];
                     orbit_to_eye(orbit, eye);
+                    orbit_up(orbit, up);
                     ce[0] = eye[0]; ce[1] = eye[1]; ce[2] = eye[2];
                     ca[0] = orbit.target[0]; ca[1] = orbit.target[1]; ca[2] = orbit.target[2];
+                    if (cup) { cup[0] = up[0]; cup[1] = up[1]; cup[2] = up[2]; }
                 }
             }
 

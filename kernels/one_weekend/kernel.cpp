@@ -27,16 +27,19 @@ static ParamMeta params_meta[] = {
       ParamType::FLOAT, .range = { .f = { 1.f, 120.f, 1.f } }, .default_f = 20.f },
     { "cam_aperture","Depth of field aperture size",
       ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.1f },
+    { "cam_up",      "Camera up vector",
+      ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
 };
 
 enum ParamIdx : int { P_NUM_SPHERES=0, P_MAX_BOUNCES=1, P_SPP_FRAME=2,
                       P_GROUND_COLOR=3, P_BACKGROUND=6,
-                      P_CAM_EYE=9, P_CAM_AT=12, P_CAM_FOV=15, P_CAM_APERTURE=16 };
+                      P_CAM_EYE=9, P_CAM_AT=12, P_CAM_FOV=15, P_CAM_APERTURE=16,
+                      P_CAM_UP=17 };
 
 static const char* source_files[] = { "kernel.cpp", "kernel.h", nullptr };
 static KernelDesc desc = {
     "one_weekend", "Raytracing in One Weekend — random spheres",
-    9, params_meta, 0, 4096, 2, source_files
+    10, params_meta, 0, 4096, 2, source_files
 };
 
 extern "C" KernelDesc* get_kernel_desc() {
@@ -105,8 +108,9 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
     memcpy(&cam_at, p + P_CAM_AT, 12);
     float cam_fov = p[P_CAM_FOV];
     float cam_aperture = p[P_CAM_APERTURE];
+    rt::float3 cam_up_vec; memcpy(&cam_up_vec, p + P_CAM_UP, 12);
 
-    rt::Camera cam = rt::lookat(cam_eye, cam_at, {0,1,0}, cam_fov, aspect, 10.f);
+    rt::Camera cam = rt::lookat(cam_eye, cam_at, cam_up_vec, cam_fov, aspect, 10.f);
 
     auto* acc_local = (float*)accum;
     auto* d_sph = g_d_spheres;
