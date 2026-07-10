@@ -167,6 +167,19 @@ write rules, summaries, or examples inline.  Rules live in
 `docs/raytracing.md`.  If a rule needs updating, update the doc file,
 not `AGENTS.md`.
 
+## Always compile before committing
+
+After any code change, run the full build before committing.  The build
+command is:
+
+```bash
+make -C build -j$(nproc)
+```
+
+Do not assume a change is correct because it looks right — compile errors
+and SYCL-specific issues (CUDA portability, device code restrictions) are
+only caught by the compiler.
+
 ## Keeping docs in sync
 
 Architecture changes must update the corresponding docs in the same commit:
