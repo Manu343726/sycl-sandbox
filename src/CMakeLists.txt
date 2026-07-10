@@ -13,31 +13,43 @@ endif()
 add_library(args INTERFACE)
 target_include_directories(args INTERFACE "${args_SOURCE_DIR}")
 
-# ---- ImGui backends helper ----
-# conan imgui provides core as a prebuilt static library (imgui::imgui).
-# Backend .cpp files are fetched from GitHub since the conan package doesn't compile them.
+# ---- ImGui core + backends (with Docking support) ----
 include(FetchContent)
-FetchContent_Declare(imgui_backends
+FetchContent_Declare(imgui_src
     GIT_REPOSITORY  https://github.com/ocornut/imgui.git
-    GIT_TAG         tags/v1.92.8
+    GIT_TAG         docking
     GIT_SHALLOW     TRUE
     SOURCE_SUBDIR   NONE
 )
-FetchContent_GetProperties(imgui_backends)
-if(NOT imgui_backends_POPULATED)
-    FetchContent_Populate(imgui_backends)
+FetchContent_GetProperties(imgui_src)
+if(NOT imgui_src_POPULATED)
+    FetchContent_Populate(imgui_src)
 endif()
 
-set(IMGUI_SRC
-    "${imgui_backends_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
-    "${imgui_backends_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp"
+# Compile imgui core with Docking enabled
+set(IMGUI_CORE_SRC
+    "${imgui_src_SOURCE_DIR}/imgui.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_demo.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_draw.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_tables.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_widgets.cpp"
 )
-add_library(imgui_helper STATIC ${IMGUI_SRC})
+add_library(imgui_core STATIC ${IMGUI_CORE_SRC})
+target_include_directories(imgui_core PUBLIC "${imgui_src_SOURCE_DIR}")
+target_compile_definitions(imgui_core PUBLIC IMGUI_ENABLE_DOCKING)
+target_compile_options(imgui_core PRIVATE -Wno-c99-designator)
+
+# ImGui backends helper
+set(IMGUI_BACKEND_SRC
+    "${imgui_src_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_src_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp"
+)
+add_library(imgui_helper STATIC ${IMGUI_BACKEND_SRC})
 target_include_directories(imgui_helper PUBLIC
-    "${imgui_backends_SOURCE_DIR}"
-    "${imgui_backends_SOURCE_DIR}/backends"
+    "${imgui_src_SOURCE_DIR}"
+    "${imgui_src_SOURCE_DIR}/backends"
 )
-target_link_libraries(imgui_helper PUBLIC glfw imgui::imgui)
+target_link_libraries(imgui_helper PUBLIC glfw imgui_core)
 
 # ---- sandbox executable ----
 add_executable(sandbox

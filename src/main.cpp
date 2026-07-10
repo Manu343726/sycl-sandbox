@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     auto& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
     ImGui::StyleColorsDark();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -251,7 +251,11 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-        // 3. Render full-window background image (before UI windows)
+
+        // 3. Dockspace (full-window, always-on background)
+        ImGui::DockSpaceOverViewport();
+
+        // 4. Render full-window background image (behind all docks)
         {
             auto disp = ImGui::GetIO().DisplaySize;
             ImGui::GetBackgroundDrawList()->AddImage(
