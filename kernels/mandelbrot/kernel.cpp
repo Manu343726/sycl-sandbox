@@ -37,10 +37,6 @@ static KernelDesc desc =
     {"mandelbrot", "Colored Mandelbrot fractal", 4, params_meta, 0, 1, 2, source_files};
 
 extern "C" KernelDesc *get_kernel_desc() {
-    desc.params_buffer_size = 0;
-    for ( int i = 0; i < desc.param_count; i++ ) {
-        desc.params_buffer_size += param_buffer_size(params_meta[i]);
-    }
     return &desc;
 }
 
