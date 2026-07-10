@@ -16,7 +16,7 @@ template <alloc::Target Tag>
 class vector {
 public:
     vector(size_t max_elements, size_t element_size, size_t alignment, sycl::queue &queue)
-        : element_size_(element_size), alignment_(alignment), count_(0) {
+        : queue_(&queue), element_size_(element_size), alignment_(alignment), count_(0) {
         size_t total = max_elements * element_size + alignment;
         auto pool = alloc::raw::RootAllocator<Tag>().allocate(total, queue);
         allocator_ = alloc::raw::LinearAllocator<Tag>(pool);
@@ -45,26 +45,27 @@ public:
     size_t max_size() const { return allocator_.pool().size / element_size_; }
 
     template <alloc::Target TargetTag>
-    vector<TargetTag> transfer(sycl::queue &queue) {
+    vector<TargetTag> transfer() {
         size_t n = count_;
-        vector<TargetTag> result(n, element_size_, alignment_, queue);
-        alloc::raw::transfer(data(), result.allocator_.pool(), queue);
+        vector<TargetTag> result(n, element_size_, alignment_, *queue_);
+        alloc::raw::transfer(data(), result.allocator_.pool(), *queue_);
         result.count_ = n;
-        allocator_.reset_and_free(queue);
+        allocator_.reset_and_free(*queue_);
         count_ = 0;
         return result;
     }
 
-    void discard(sycl::queue &queue) {
-        allocator_.reset_and_free(queue);
+    void discard() {
+        allocator_.reset_and_free(*queue_);
         count_ = 0;
     }
 
 private:
-    alloc::raw::LinearAllocator<Tag> allocator_;
-    size_t element_size_;
-    size_t alignment_;
-    size_t count_;
+    sycl::queue                          *queue_;
+    alloc::raw::LinearAllocator<Tag>      allocator_;
+    size_t                                element_size_;
+    size_t                                alignment_;
+    size_t                                count_;
 };
 
 } // namespace containers::raw
@@ -75,8 +76,8 @@ namespace containers {
 template <alloc::Target Tag, typename T>
 class vector {
 public:
-    vector(size_t max_elements, sycl::queue &queue)
-        : impl_(max_elements, sizeof(T), alignof(T), queue) {
+    vector(size_t max_elements, sycl::queue &queue) : queue_(&queue)
+        , impl_(max_elements, sizeof(T), alignof(T), queue) {
     }
 
     void push_back(const T &element) {
@@ -91,17 +92,18 @@ public:
     size_t max_size()   const { return impl_.max_size(); }
 
     template <alloc::Target TargetTag>
-    vector<TargetTag, T> transfer(sycl::queue &queue) {
-        auto untyped = impl_.template transfer<TargetTag>(queue);
+    vector<TargetTag, T> transfer() {
+        auto untyped = impl_.template transfer<TargetTag>();
         vector<TargetTag, T> result(std::move(untyped));
         return result;
     }
 
-    void discard(sycl::queue &queue) { impl_.discard(queue); }
+    void discard() { impl_.discard(); }
 
 private:
     explicit vector(containers::raw::vector<Tag> &&impl) : impl_(std::move(impl)) {}
-    containers::raw::vector<Tag> impl_;
+    sycl::queue                   *queue_;
+    containers::raw::vector<Tag>   impl_;
 };
 
 } // namespace containers
