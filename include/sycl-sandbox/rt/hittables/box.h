@@ -22,12 +22,15 @@ public:
 
     /// Build an axis-aligned box from a minimum corner and extents.
     Box(float cx, float cy, float cz, float sx, float sy, float sz) {
-        faces[0] = quad(1, cy + sy, cx, cx + sx, cz, cz + sz); // top
-        faces[1] = quad(1, cy, cx, cx + sx, cz, cz + sz);      // bottom
-        faces[2] = quad(2, cz, cx, cx + sx, cy, cy + sy);      // front
-        faces[3] = quad(2, cz + sz, cx, cx + sx, cy, cy + sy); // back
-        faces[4] = quad(0, cx, cz, cz + sz, cy, cy + sy);      // left
-        faces[5] = quad(0, cx + sx, cz, cz + sz, cy, cy + sy); // right
+        float x0 = cx, x1 = cx + sx;
+        float y0 = cy, y1 = cy + sy;
+        float z0 = cz, z1 = cz + sz;
+        faces[0] = Quad({x0, y1, z0}, {sx, 0, 0}, {0, 0, sz}); // top    (+Y)
+        faces[1] = Quad({x0, y0, z0}, {0, 0, sz}, {sx, 0, 0}); // bottom (-Y)
+        faces[2] = Quad({x0, y0, z0}, {0, sy, 0}, {sx, 0, 0}); // front  (-Z)
+        faces[3] = Quad({x0, y0, z1}, {sx, 0, 0}, {0, sy, 0}); // back   (+Z)
+        faces[4] = Quad({x0, y0, z0}, {0, sy, 0}, {0, 0, sz}); // left   (-X)
+        faces[5] = Quad({x1, y0, z0}, {0, 0, sz}, {0, sy, 0}); // right  (+X)
     }
 
     /// Iterate over all six faces and return the closest hit.
