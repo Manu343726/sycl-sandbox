@@ -5,6 +5,7 @@
 #include "variant.h"
 #include "hittables/sphere.h"
 #include "hittables/triangle.h"
+#include "hittables/quad.h"
 #include "materials/lambertian.h"
 #include "materials/metal.h"
 #include "materials/dielectric.h"
@@ -15,7 +16,8 @@ namespace rt {
 
 using Hittable = std::variant<
     hittables::Sphere,
-    hittables::Triangle
+    hittables::Triangle,
+    hittables::Quad
 >;
 
 using Material = std::variant<

@@ -25,7 +25,7 @@ inline float3 quad_corner(Axis primary_axis, float axis_value,
     return {result[0], result[1], result[2]};
 }
 
-/// Add an axis-aligned rectangle as two triangles to an Object array.
+/// Add an axis-aligned rectangle as a single Quad to an Object array.
 inline void add_quad(Object* objects, int& object_count,
                      Axis axis, float axis_value,
                      float min_second, float max_second,
@@ -34,12 +34,10 @@ inline void add_quad(Object* objects, int& object_count,
     float3 p0 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 0);
     float3 p1 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 1);
     float3 p2 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 2);
-    float3 p3 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 3);
-    objects[object_count++] = {hittables::triangle(p0, p1, p2), material};
-    objects[object_count++] = {hittables::triangle(p0, p2, p3), material};
+    objects[object_count++] = {hittables::quad_from_corners(p0, p1, p2), material};
 }
 
-/// Add an axis-aligned box (6 faces, 12 triangles) to an Object array.
+/// Add an axis-aligned box (6 faces, one Quad each) to an Object array.
 inline void add_box(Object* objects, int& object_count,
                     float corner_x, float corner_y, float corner_z,
                     float size_x, float size_y, float size_z,
