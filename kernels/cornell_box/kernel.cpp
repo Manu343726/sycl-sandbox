@@ -4,13 +4,12 @@
 #include "rt/camera.h"
 #include "rt/trace.h"
 #include "rt/params.h"
-#include "rt/hittables/quad.h"
+#include "rt/scene.h"
 #include "rt/materials/lambertian.h"
 #include "rt/materials/diffuse_light.h"
 #include <cstring>
 
 using namespace rt;
-using rt::hittables::quad;
 using rt::materials::lambertian;
 using rt::materials::diffuse_light;
 
@@ -43,21 +42,6 @@ extern "C" KernelDesc* get_kernel_desc(){
 static Object* g_scene_objects = nullptr;
 static int     g_num_objects   = 0;
 
-static float3 compute_corner(int primary_axis, float axis_value,
-                              float min_second_axis, float max_second_axis,
-                              float min_third_axis, float max_third_axis,
-                              int corner_index) {
-    int second_axis = (primary_axis + 1) % 3;
-    int third_axis  = (primary_axis + 2) % 3;
-    float bounds_second[2] = {min_second_axis, max_second_axis};
-    float bounds_third[2]  = {min_third_axis, max_third_axis};
-    float result[3] = {0, 0, 0};
-    result[primary_axis] = axis_value;
-    result[second_axis]  = bounds_second[corner_index & 1];
-    result[third_axis]   = bounds_third[corner_index >> 1];
-    return {result[0], result[1], result[2]};
-}
-
 extern "C" void init_kernel(sycl::queue* queue, int, int,
                             const void* params_buffer, size_t) {
     const float* params = (const float*)params_buffer;
@@ -72,46 +56,24 @@ extern "C" void init_kernel(sycl::queue* queue, int, int,
     float3 white  = {0.73f, 0.73f, 0.73f};
     float3 red    = {0.65f, 0.05f, 0.05f};
     float3 green  = {0.12f, 0.45f, 0.15f};
-    float3 zero   = {0, 0, 0};
     float3 light_emission = scale(light_color, light_strength);
 
-    auto add_quad_as_two_triangles = [&](int primary_axis, float axis_value,
-                                          float min_second_axis, float max_second_axis,
-                                          float min_third_axis, float max_third_axis,
-                                          Material material) {
-        float3 p0 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 0);
-        float3 p1 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 1);
-        float3 p2 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 2);
-        float3 p3 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 3);
-        objects[object_count++] = {quad(p0, p1, p2), material};
-        objects[object_count++] = {quad(p0, p2, p3), material};
-    };
-
-    auto add_box = [&](float corner_x, float corner_y, float corner_z,
-                        float size_x, float size_y, float size_z,
-                        Material material) {
-        add_quad_as_two_triangles(1, corner_y + size_y, corner_x, corner_x + size_x,  corner_z, corner_z + size_z,  material);
-        add_quad_as_two_triangles(1, corner_y,           corner_x, corner_x + size_x,  corner_z, corner_z + size_z,  material);
-        add_quad_as_two_triangles(2, corner_z,           corner_x, corner_x + size_x,  corner_y, corner_y + size_y,  material);
-        add_quad_as_two_triangles(2, corner_z + size_z,  corner_x, corner_x + size_x,  corner_y, corner_y + size_y,  material);
-        add_quad_as_two_triangles(0, corner_x,           corner_z, corner_z + size_z,  corner_y, corner_y + size_y,  material);
-        add_quad_as_two_triangles(0, corner_x + size_x,  corner_z, corner_z + size_z,  corner_y, corner_y + size_y,  material);
-    };
-
     // Room walls (axis: 0=X, 1=Y, 2=Z)
-    add_quad_as_two_triangles(1, 0.0f,   -2, 2, -2, 2, lambertian(white));
-    add_quad_as_two_triangles(1, 3.0f,   -2, 2, -2, 2, lambertian(white));
-    add_quad_as_two_triangles(2, -2.0f,  -2, 2,  0, 3, lambertian(white));
-    add_quad_as_two_triangles(0, -2.0f,  -2, 2,  0, 3, lambertian(red));
-    add_quad_as_two_triangles(0, 2.0f,   -2, 2,  0, 3, lambertian(green));
+    add_quad(objects, object_count, 1, 0.0f,   -2, 2, -2, 2, lambertian(white));
+    add_quad(objects, object_count, 1, 3.0f,   -2, 2, -2, 2, lambertian(white));
+    add_quad(objects, object_count, 2, -2.0f,  -2, 2,  0, 3, lambertian(white));
+    add_quad(objects, object_count, 0, -2.0f,  -2, 2,  0, 3, lambertian(red));
+    add_quad(objects, object_count, 0, 2.0f,   -2, 2,  0, 3, lambertian(green));
 
     // Ceiling light
-    add_quad_as_two_triangles(1, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
+    add_quad(objects, object_count, 1, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
 
     // Tall box
-    add_box(-0.8f, 0.0f, -0.8f,  0.6f, 1.5f, 0.6f, lambertian({0.55f, 0.55f, 0.55f}));
+    add_box(objects, object_count, -0.8f, 0.0f, -0.8f,  0.6f, 1.5f, 0.6f,
+            lambertian({0.55f, 0.55f, 0.55f}));
     // Short box
-    add_box(0.8f, 0.0f, -0.3f,  0.6f, 0.6f, 1.2f, lambertian({0.55f, 0.55f, 0.55f}));
+    add_box(objects, object_count, 0.8f, 0.0f, -0.3f,  0.6f, 0.6f, 1.2f,
+            lambertian({0.55f, 0.55f, 0.55f}));
 
     g_scene_objects = sycl::malloc_device<Object>(object_count, *queue);
     queue->memcpy(g_scene_objects, objects, object_count * sizeof(Object)).wait();
