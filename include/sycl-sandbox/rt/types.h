@@ -35,8 +35,8 @@ public:
     Object(Hittable h, Material m) : hittable(std::move(h)), material(std::move(m)) {
     }
 
-    std::optional<HitRecord> hit(const Ray &r, float t_min, float t_max) const;
-    std::optional<ScatterRecord> scatter(const Ray &in, const HitRecord &rec, RNG &rng) const;
+    Optional<HitRecord> hit(const Ray &r, float t_min, float t_max) const;
+    Optional<ScatterRecord> scatter(const Ray &in, const HitRecord &rec, RNG &rng) const;
     float3 emit(const HitRecord &rec) const;
 };
 

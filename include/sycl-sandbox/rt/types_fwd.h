@@ -1,6 +1,5 @@
 #pragma once
 #include <sycl-sandbox/rt/math.h>
-#include <optional>
 
 /// Forward declarations used by individual hittable/material headers.
 namespace rt {

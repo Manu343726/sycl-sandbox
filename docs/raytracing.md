@@ -120,13 +120,13 @@ Object   { Hittable hittable; Material material; }
 This works on any SYCL backend (CPU OpenMP, CUDA) because no vtables or
 function pointers are used.
 
-## std::optional return values
+## Optional return values
 
 Instead of output-reference parameters + `bool`:
 
 ```cpp
-std::optional<HitRecord>      hit(const Ray&, float, float) const;
-std::optional<ScatterRecord>  scatter(const Ray&, const HitRecord&, RNG&) const;
+Optional<HitRecord>      hit(const Ray&, float, float) const;
+Optional<ScatterRecord>  scatter(const Ray&, const HitRecord&, RNG&) const;
 ```
 
 `ScatterRecord` bundles `attenuation` + `scattered` ray into a single struct.

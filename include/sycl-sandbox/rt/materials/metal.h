@@ -2,7 +2,7 @@
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
-#include <optional>
+#include <sycl-sandbox/optional.h>
 
 /// Metallic (reflective) material: reflects incoming rays with a fuzzy
 /// perturbation controlled by `fuzz`.  fuzz=0 gives a perfect mirror.
@@ -20,14 +20,14 @@ public:
     }
 
     /// Reflects the incoming ray about the surface normal, adding a random
-    /// perturbation scaled by `fuzz`.  Returns std::nullopt if the scattered
+    /// perturbation scaled by `fuzz`.  Returns an empty Optional if the scattered
     /// ray points into the surface (absorption).
-    std::optional<ScatterRecord>
+    Optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
         if ( dot(scattered.dir, hit.normal) <= 0 ) {
-            return std::nullopt;
+            return Optional<ScatterRecord>{};
         }
         return ScatterRecord {albedo, scattered};
     }

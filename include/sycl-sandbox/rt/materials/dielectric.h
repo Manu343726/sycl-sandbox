@@ -2,7 +2,7 @@
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
-#include <optional>
+#include <sycl-sandbox/optional.h>
 
 namespace rt::materials {
 
@@ -15,7 +15,7 @@ public:
     }
 
     /// Refract or reflect the incoming ray using Snell's law + Schlick Fresnel.
-    std::optional<ScatterRecord>
+    Optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         // Determine whether the ray is entering the dielectric or exiting it
         float3 outward_normal;

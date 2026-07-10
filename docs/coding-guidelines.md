@@ -107,7 +107,7 @@ using rt::materials::lambertian;
 
 ## Function signatures
 
-- **Return `std::optional<T>`** instead of taking an output reference
+- **Return `rt::Optional<T>`** instead of taking an output reference
   and returning `bool`.
 
   ```cpp
@@ -115,7 +115,7 @@ using rt::materials::lambertian;
   bool hit(const Ray&, float, float, HitRecord&) const;
 
   // Good
-  std::optional<HitRecord> hit(const Ray&, float, float) const;
+  Optional<HitRecord> hit(const Ray&, float, float) const;
   ```
 
 - **Bundle multiple output values into a struct.**
@@ -237,7 +237,7 @@ Math-heavy functions must be broken into logical sections separated by
 blank lines, each preceded by a `///` or `//` comment explaining the step.
 
 ```cpp
-std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+Optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
     // Compute the quadratic coefficients using the geometric formulation
     float3 oc = sub(ray.orig, center);
     float a = dot(ray.dir, ray.dir);
@@ -247,7 +247,7 @@ std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
     // Solve for t using the reduced quadratic formula
     float discriminant = half_b*half_b - a*c_;
     if (discriminant <= 0) {
-        return std::nullopt;
+        return Optional<HitRecord>{};
     }
     float sqrt_d = sycl::sqrt(discriminant);
     float t = (-half_b - sqrt_d) / a;
@@ -255,7 +255,7 @@ std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
         t = (-half_b + sqrt_d) / a;
     }
     if (t < t_min || t > t_max) {
-        return std::nullopt;
+        return Optional<HitRecord>{};
     }
 
     // Fill the HitRecord with the intersection point and surface normal

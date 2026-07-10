@@ -3,23 +3,22 @@
 #include <sycl-sandbox/rt/camera.h>
 #include <sycl-sandbox/rt/params.h>
 #include <sycl-sandbox/rt/variant.h>
-#include <optional>
 
 namespace rt {
 
 // ── Object dispatch via visit ──────────────────────────────────────────
 
-inline std::optional<HitRecord> Object::hit(const Ray &ray, float t_min, float t_max) const {
-    std::optional<HitRecord> result;
+inline Optional<HitRecord> Object::hit(const Ray &ray, float t_min, float t_max) const {
+    Optional<HitRecord> result;
     visit(hittable, [&](const auto &h) {
         result = h.hit(ray, t_min, t_max);
     });
     return result;
 }
 
-inline std::optional<ScatterRecord>
+inline Optional<ScatterRecord>
 Object::scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
-    std::optional<ScatterRecord> result;
+    Optional<ScatterRecord> result;
     visit(material, [&](const auto &m) {
         result = m.scatter(incoming_ray, hit, rng);
     });
@@ -45,7 +44,7 @@ trace(const Ray &ray, const Object *objects, int num_objects, int max_bounces, R
     // Trace the ray through successive bounces
     for ( int bounce = 0; bounce < max_bounces; bounce++ ) {
         // Find the closest object hit by the ray within [0.001, ∞)
-        std::optional<HitRecord> closest_hit;
+        Optional<HitRecord> closest_hit;
         int hit_index = -1;
 
         for ( int i = 0; i < num_objects; i++ ) {

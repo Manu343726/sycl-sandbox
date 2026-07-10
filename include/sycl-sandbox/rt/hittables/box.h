@@ -2,7 +2,7 @@
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/hittables/quad.h>
-#include <optional>
+#include <sycl-sandbox/optional.h>
 #include <array>
 
 /// Box primitive composed from six Quad faces.
@@ -31,8 +31,8 @@ public:
     }
 
     /// Iterate over all six faces and return the closest hit.
-    std::optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
-        std::optional<HitRecord> closest;
+    Optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        Optional<HitRecord> closest;
         for ( int i = 0; i < 6; i++ ) {
             auto hit = faces[i].hit(ray, t_min, closest ? closest->t : t_max);
             if ( hit ) {

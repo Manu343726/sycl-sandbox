@@ -2,7 +2,7 @@
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
-#include <optional>
+#include <sycl-sandbox/optional.h>
 
 namespace rt::materials {
 
@@ -13,7 +13,7 @@ public:
     explicit Lambertian(float3 a) : albedo(a) {
     }
 
-    std::optional<ScatterRecord> scatter(const Ray &, const HitRecord &rec, RNG &rng) const {
+    Optional<ScatterRecord> scatter(const Ray &, const HitRecord &rec, RNG &rng) const {
         float3 target = add(rec.p, add(rec.normal, random_in_unit_sphere(rng)));
         return ScatterRecord {albedo, Ray {rec.p, sub(target, rec.p)}};
     }

@@ -1,7 +1,7 @@
 #pragma once
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
-#include <optional>
+#include <sycl-sandbox/optional.h>
 
 namespace rt::materials {
 
@@ -12,8 +12,8 @@ public:
     explicit DiffuseLight(float3 e) : emit_color(e) {
     }
 
-    std::optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
-        return std::nullopt;
+    Optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
+        return Optional<ScatterRecord>{};
     }
     float3 emit(const HitRecord &) const {
         return emit_color;
