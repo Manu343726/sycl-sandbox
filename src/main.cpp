@@ -385,7 +385,6 @@ int main(int argc, char **argv) {
         // ---- param controls ----
         if ( active_kernel && h_params ) {
             ImGui::SeparatorText("Parameters");
-            spdlog::trace("[param] rendering {} params", active_kernel->desc.param_count);
             if ( render_param_controls(active_kernel->desc, h_params, false) ) {
                 spdlog::info("[param] param changed, re-init kernel and reset accum");
                 q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
@@ -646,7 +645,6 @@ int main(int argc, char **argv) {
             }
 
             if ( changed ) {
-                spdlog::trace("[cam] camera changed, re-init kernel and reset accum");
                 q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
                 try {
                     call_init_kernel(active_kernel->handle,
