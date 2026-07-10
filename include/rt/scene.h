@@ -35,8 +35,8 @@ inline void add_quad(Object* objects, int& object_count,
     float3 p1 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 1);
     float3 p2 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 2);
     float3 p3 = quad_corner(axis, axis_value, min_second, max_second, min_third, max_third, 3);
-    objects[object_count++] = {hittables::quad(p0, p1, p2), material};
-    objects[object_count++] = {hittables::quad(p0, p2, p3), material};
+    objects[object_count++] = {hittables::triangle(p0, p1, p2), material};
+    objects[object_count++] = {hittables::triangle(p0, p2, p3), material};
 }
 
 /// Add an axis-aligned box (6 faces, 12 triangles) to an Object array.
