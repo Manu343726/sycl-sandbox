@@ -18,10 +18,10 @@ namespace rt::hittables {
 
 class Quad {
 public:
-    float3 base;      ///< Base corner Q.
-    float3 edge_u;    ///< First edge vector U (from Q to the next vertex).
-    float3 edge_v;    ///< Second edge vector V (from Q to the third vertex).
-    float3 normal;    ///< Unit surface normal (pre-computed from cross(U, V)).
+    float3 base;   ///< Base corner Q.
+    float3 edge_u; ///< First edge vector U (from Q to the next vertex).
+    float3 edge_v; ///< Second edge vector V (from Q to the third vertex).
+    float3 normal; ///< Unit surface normal (pre-computed from cross(U, V)).
 
     Quad() = default;
 
@@ -41,11 +41,13 @@ public:
     /// Solves for the hit point on the plane, then checks if it lies within
     /// the parallelogram:  hit_point = Q + α·U + β·V  with α,β ∈ [0,1].
     /// The 2x2 linear system is solved via Cramer's rule.
-    std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+    std::optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         float denom = dot(normal, ray.dir);
-        if (sycl::fabs(denom) < 1e-8f) return std::nullopt;
+        if ( sycl::fabs(denom) < 1e-8f )
+            return std::nullopt;
         float t = dot(sub(base, ray.orig), normal) / denom;
-        if (t < t_min || t > t_max) return std::nullopt;
+        if ( t < t_min || t > t_max )
+            return std::nullopt;
         float3 hit_point = add(ray.orig, scale(ray.dir, t));
         float3 pa = sub(hit_point, base);
 
@@ -54,14 +56,17 @@ public:
         //   [edge_v·edge_u  edge_v·edge_v] [β]   [pa·edge_v]
         float d00 = dot(edge_u, edge_u), d01 = dot(edge_u, edge_v);
         float d11 = dot(edge_v, edge_v), d20 = dot(pa, edge_u), d21 = dot(pa, edge_v);
-        float denominator = d00*d11 - d01*d01;
-        if (sycl::fabs(denominator) < 1e-12f) return std::nullopt;
-        float alpha = (d11*d20 - d01*d21) / denominator;
-        float beta  = (d00*d21 - d01*d20) / denominator;
-        if (alpha < 0 || alpha > 1 || beta < 0 || beta > 1) return std::nullopt;
+        float denominator = d00 * d11 - d01 * d01;
+        if ( sycl::fabs(denominator) < 1e-12f )
+            return std::nullopt;
+        float alpha = (d11 * d20 - d01 * d21) / denominator;
+        float beta = (d00 * d21 - d01 * d20) / denominator;
+        if ( alpha < 0 || alpha > 1 || beta < 0 || beta > 1 )
+            return std::nullopt;
         HitRecord rec;
-        rec.t = t; rec.p = hit_point;
-        rec.normal = denom<0 ? normal : scale(normal, -1.f);
+        rec.t = t;
+        rec.p = hit_point;
+        rec.normal = denom < 0 ? normal : scale(normal, -1.f);
         rec.front_face = denom < 0;
         return rec;
     }

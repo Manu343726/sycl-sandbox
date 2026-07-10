@@ -11,10 +11,11 @@ namespace rt::hittables {
 class Sphere {
 public:
     float3 center; ///< Sphere centre in world space.
-    float  radius; ///< Sphere radius.
+    float radius;  ///< Sphere radius.
 
     Sphere() = default;
-    Sphere(float3 center_, float radius_) : center(center_), radius(radius_) {}
+    Sphere(float3 center_, float radius_) : center(center_), radius(radius_) {
+    }
 
     /// Ray-sphere intersection using the quadratic formula.
     ///
@@ -25,23 +26,27 @@ public:
     /// dividing by a instead of 2a in the quadratic formula.
     ///
     /// @returns HitRecord if the ray hits the sphere within [t_min, t_max].
-    std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+    std::optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         float3 oc = sub(ray.orig, center);
         float a = dot(ray.dir, ray.dir);
         float half_b = dot(oc, ray.dir);
         float c_ = dot(oc, oc) - radius * radius;
-        float discriminant = half_b*half_b - a*c_;
-        if (discriminant <= 0) return std::nullopt;
+        float discriminant = half_b * half_b - a * c_;
+        if ( discriminant <= 0 )
+            return std::nullopt;
         float sqrt_d = sycl::sqrt(discriminant);
         float t = (-half_b - sqrt_d) / a;
-        if (t < t_min || t > t_max) t = (-half_b + sqrt_d) / a;
-        if (t < t_min || t > t_max) return std::nullopt;
+        if ( t < t_min || t > t_max )
+            t = (-half_b + sqrt_d) / a;
+        if ( t < t_min || t > t_max )
+            return std::nullopt;
         HitRecord rec;
         rec.t = t;
         rec.p = add(ray.orig, scale(ray.dir, t));
         rec.normal = scale(sub(rec.p, center), 1.f / radius);
         rec.front_face = dot(ray.dir, rec.normal) < 0;
-        if (!rec.front_face) rec.normal = scale(rec.normal, -1);
+        if ( !rec.front_face )
+            rec.normal = scale(rec.normal, -1);
         return rec;
     }
 };

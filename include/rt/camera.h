@@ -21,8 +21,8 @@ struct Camera {
 /// @param vfov_deg   Vertical field of view in degrees.
 /// @param aspect     Width / height ratio of the output image.
 /// @param focus_dist Distance from the camera to the focal plane (default 1).
-inline Camera lookat(float3 from, float3 at, float3 up,
-                     float vfov_deg, float aspect, float focus_dist = 1.f) {
+inline Camera
+lookat(float3 from, float3 at, float3 up, float vfov_deg, float aspect, float focus_dist = 1.f) {
     float theta = vfov_deg * 3.14159265f / 180.f;
     float h = sycl::tan(theta / 2.f);
     float vh = 2.f * h;
@@ -33,11 +33,11 @@ inline Camera lookat(float3 from, float3 at, float3 up,
     float3 vv = cross(ww, uu);
 
     Camera c;
-    c.origin     = from;
+    c.origin = from;
     c.horizontal = scale(uu, vw * focus_dist);
-    c.vertical   = scale(vv, vh * focus_dist);
-    c.lower_left = sub(sub(sub(from, scale(c.horizontal, 0.5f)),
-                            scale(c.vertical, 0.5f)), scale(ww, focus_dist));
+    c.vertical = scale(vv, vh * focus_dist);
+    c.lower_left = sub(sub(sub(from, scale(c.horizontal, 0.5f)), scale(c.vertical, 0.5f)),
+                       scale(ww, focus_dist));
     return c;
 }
 

@@ -17,7 +17,8 @@ public:
     float refractive_index; ///< Index of refraction (>1 for denser media).
 
     Dielectric() = default;
-    explicit Dielectric(float index) : refractive_index(index) {}
+    explicit Dielectric(float index) : refractive_index(index) {
+    }
 
     /// Refracts or reflects the incoming ray.
     ///
@@ -35,18 +36,18 @@ public:
     /// If the discriminant is negative, total internal reflection occurs.
     /// Otherwise the Schlick approximation determines the reflection
     /// probability; a random sample decides between refraction and reflection.
-    std::optional<ScatterRecord> scatter(const Ray& incoming_ray, const HitRecord& hit,
-                                          RNG& rng) const {
+    std::optional<ScatterRecord>
+    scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         float3 outward_normal;
         float eta_ratio;
         float cos_theta_i;
 
-        if (dot(incoming_ray.dir, hit.normal) > 0) {
+        if ( dot(incoming_ray.dir, hit.normal) > 0 ) {
             // Ray is exiting the dielectric
             outward_normal = scale(hit.normal, -1);
             eta_ratio = refractive_index;
-            cos_theta_i = refractive_index * dot(incoming_ray.dir, hit.normal)
-                          / len(incoming_ray.dir);
+            cos_theta_i =
+                refractive_index * dot(incoming_ray.dir, hit.normal) / len(incoming_ray.dir);
         } else {
             // Ray is entering the dielectric
             outward_normal = hit.normal;
@@ -55,15 +56,18 @@ public:
         }
 
         float3 refracted_direction;
-        if (refract(incoming_ray.dir, outward_normal, eta_ratio, refracted_direction)
-            && rng.next() >= schlick(cos_theta_i, refractive_index)) {
-            return ScatterRecord{{1,1,1}, Ray{hit.p, refracted_direction}};
+        if ( refract(incoming_ray.dir, outward_normal, eta_ratio, refracted_direction) &&
+             rng.next() >= schlick(cos_theta_i, refractive_index) ) {
+            return ScatterRecord {{1, 1, 1}, Ray {hit.p, refracted_direction}};
         } else {
-            return ScatterRecord{{1,1,1}, Ray{hit.p, reflect(norm(incoming_ray.dir), hit.normal)}};
+            return ScatterRecord {{1, 1, 1},
+                                  Ray {hit.p, reflect(norm(incoming_ray.dir), hit.normal)}};
         }
     }
 
-    float3 emit(const HitRecord&) const { return {0,0,0}; }
+    float3 emit(const HitRecord &) const {
+        return {0, 0, 0};
+    }
 };
 
 inline Dielectric dielectric(float refractive_index) {

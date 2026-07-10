@@ -8,24 +8,22 @@
 
 namespace fs = std::filesystem;
 
-SceneRegistry::SceneRegistry(std::string scenes_dir)
-    : scenes_dir_(std::move(scenes_dir)) {
+SceneRegistry::SceneRegistry(std::string scenes_dir) : scenes_dir_(std::move(scenes_dir)) {
     rescan();
 }
 
 void SceneRegistry::rescan() {
     scenes_.clear();
-    if (!fs::is_directory(scenes_dir_)) {
+    if ( !fs::is_directory(scenes_dir_) ) {
         spdlog::error("[scenes] directory not found: {}", scenes_dir_);
         return;
     }
-    for (auto& entry : fs::directory_iterator(scenes_dir_)) {
-        if (entry.path().extension() == ".yaml" ||
-            entry.path().extension() == ".yml") {
+    for ( auto &entry : fs::directory_iterator(scenes_dir_) ) {
+        if ( entry.path().extension() == ".yaml" || entry.path().extension() == ".yml" ) {
             SceneDef def;
             def.yaml_path = entry.path().string();
             load_yaml(def.yaml_path, def);
-            if (!def.name.empty() && !def.kernel.empty())
+            if ( !def.name.empty() && !def.kernel.empty() )
                 scenes_.push_back(std::move(def));
             else
                 spdlog::warn("[scenes] skipping {} (missing name/kernel)", def.yaml_path);
@@ -34,105 +32,115 @@ void SceneRegistry::rescan() {
     spdlog::info("[scenes] loaded {} scene(s)", scenes_.size());
 }
 
-const SceneDef* SceneRegistry::find(const std::string& name) const {
-    for (auto& s : scenes_)
-        if (s.name == name) return &s;
+const SceneDef *SceneRegistry::find(const std::string &name) const {
+    for ( auto &s : scenes_ )
+        if ( s.name == name )
+            return &s;
     return nullptr;
 }
 
-void SceneRegistry::load_yaml(const std::string& path, SceneDef& def) {
+void SceneRegistry::load_yaml(const std::string &path, SceneDef &def) {
     try {
         YAML::Node root = YAML::LoadFile(path);
-        def.name   = root["name"].as<std::string>("");
+        def.name = root["name"].as<std::string>("");
         def.kernel = root["kernel"].as<std::string>("");
 
         auto params_node = root["params"];
-        if (params_node) {
+        if ( params_node ) {
             // We store raw floats, but we need the kernel's ParamMeta to
             // know how to interpret them. That happens in apply_params().
             // Here we just remember that overrides exist and will be
             // resolved when apply_params is called with the kernel desc.
             def.has_overrides = true;
         }
-    } catch (const std::exception& e) {
+    } catch ( const std::exception &e ) {
         spdlog::error("[scenes] YAML error {}: {}", path, e.what());
     }
 }
 
-void SceneRegistry::apply_params(const SceneDef& scene,
-                                 const KernelDesc& desc,
-                                 float* out_buffer,
+void SceneRegistry::apply_params(const SceneDef &scene,
+                                 const KernelDesc &desc,
+                                 float *out_buffer,
                                  size_t buffer_size) const {
     // 1. Fill buffer with kernel defaults
-    for (int i = 0; i < desc.param_count; i++) {
-        const auto& p = desc.params[i];
-        auto* dst = reinterpret_cast<char*>(out_buffer) + p.buffer_offset;
-        switch (p.type) {
-        case ParamType::FLOAT:
-            std::memcpy(dst, &p.default_f, 4); break;
-        case ParamType::INT:
-        case ParamType::ENUM: {
-            float v = (float)p.default_i;
-            std::memcpy(dst, &v, 4); break;
-        }
-        case ParamType::BOOL: {
-            float v = p.default_b ? 1.0f : 0.0f;
-            std::memcpy(dst, &v, 4); break;
-        }
-        case ParamType::COLOR_RGB:
-            std::memcpy(dst, &p.default_c3, 12); break;
-        case ParamType::COLOR_RGBA:
-            std::memcpy(dst, &p.default_c4, 16); break;
-        case ParamType::VEC3:
-            std::memcpy(dst, &p.default_c3, 12); break;
+    for ( int i = 0; i < desc.param_count; i++ ) {
+        const auto &p = desc.params[i];
+        auto *dst = reinterpret_cast<char *>(out_buffer) + p.buffer_offset;
+        switch ( p.type ) {
+            case ParamType::FLOAT:
+                std::memcpy(dst, &p.default_f, 4);
+                break;
+            case ParamType::INT:
+            case ParamType::ENUM: {
+                float v = (float)p.default_i;
+                std::memcpy(dst, &v, 4);
+                break;
+            }
+            case ParamType::BOOL: {
+                float v = p.default_b ? 1.0f : 0.0f;
+                std::memcpy(dst, &v, 4);
+                break;
+            }
+            case ParamType::COLOR_RGB:
+                std::memcpy(dst, &p.default_c3, 12);
+                break;
+            case ParamType::COLOR_RGBA:
+                std::memcpy(dst, &p.default_c4, 16);
+                break;
+            case ParamType::VEC3:
+                std::memcpy(dst, &p.default_c3, 12);
+                break;
         }
     }
 
     // 2. Overlay YAML values
-    if (!scene.has_overrides) return;
+    if ( !scene.has_overrides )
+        return;
     try {
         YAML::Node root = YAML::LoadFile(scene.yaml_path);
         auto params_node = root["params"];
-        if (!params_node) return;
+        if ( !params_node )
+            return;
 
-        for (int i = 0; i < desc.param_count; i++) {
-            const auto& p = desc.params[i];
+        for ( int i = 0; i < desc.param_count; i++ ) {
+            const auto &p = desc.params[i];
             auto val = params_node[p.name];
-            if (!val) continue;
+            if ( !val )
+                continue;
 
-            auto* dst = reinterpret_cast<char*>(out_buffer) + p.buffer_offset;
-            switch (p.type) {
-            case ParamType::FLOAT:
-                *reinterpret_cast<float*>(dst) = val.as<float>();
-                break;
-            case ParamType::INT:
-            case ParamType::ENUM:
-                *reinterpret_cast<float*>(dst) = (float)val.as<int32_t>();
-                break;
-            case ParamType::BOOL:
-                *reinterpret_cast<float*>(dst) = val.as<bool>() ? 1.0f : 0.0f;
-                break;
-            case ParamType::COLOR_RGB: {
-                auto v = val.as<std::vector<float>>();
-                if (v.size() >= 3)
-                    std::memcpy(dst, v.data(), 12);
-                break;
-            }
-            case ParamType::COLOR_RGBA: {
-                auto v = val.as<std::vector<float>>();
-                if (v.size() >= 4)
-                    std::memcpy(dst, v.data(), 16);
-                break;
-            }
-            case ParamType::VEC3: {
-                auto v = val.as<std::vector<float>>();
-                if (v.size() >= 3)
-                    std::memcpy(dst, v.data(), 12);
-                break;
-            }
+            auto *dst = reinterpret_cast<char *>(out_buffer) + p.buffer_offset;
+            switch ( p.type ) {
+                case ParamType::FLOAT:
+                    *reinterpret_cast<float *>(dst) = val.as<float>();
+                    break;
+                case ParamType::INT:
+                case ParamType::ENUM:
+                    *reinterpret_cast<float *>(dst) = (float)val.as<int32_t>();
+                    break;
+                case ParamType::BOOL:
+                    *reinterpret_cast<float *>(dst) = val.as<bool>() ? 1.0f : 0.0f;
+                    break;
+                case ParamType::COLOR_RGB: {
+                    auto v = val.as<std::vector<float>>();
+                    if ( v.size() >= 3 )
+                        std::memcpy(dst, v.data(), 12);
+                    break;
+                }
+                case ParamType::COLOR_RGBA: {
+                    auto v = val.as<std::vector<float>>();
+                    if ( v.size() >= 4 )
+                        std::memcpy(dst, v.data(), 16);
+                    break;
+                }
+                case ParamType::VEC3: {
+                    auto v = val.as<std::vector<float>>();
+                    if ( v.size() >= 3 )
+                        std::memcpy(dst, v.data(), 12);
+                    break;
+                }
             }
         }
-    } catch (const std::exception& e) {
+    } catch ( const std::exception &e ) {
         spdlog::error("[scenes] error applying overrides: {}", e.what());
     }
 }

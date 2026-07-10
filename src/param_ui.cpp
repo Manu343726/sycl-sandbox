@@ -3,78 +3,80 @@
 #include <cstdio>
 #include <cstring>
 
-static bool render_one(const ParamMeta& p, float* data) {
+static bool render_one(const ParamMeta &p, float *data) {
     bool changed = false;
 
-    switch (p.type) {
-    case ParamType::FLOAT: {
-        auto* v = reinterpret_cast<float*>(data);
-        if (p.range.f.min_f <= p.range.f.max_f) {
-            changed = ImGui::SliderFloat(p.name, v,
-                                         p.range.f.min_f, p.range.f.max_f);
-        } else {
-            float step  = p.range.f.step_f > 0.f ? p.range.f.step_f : 0.1f;
-            float step2 = step * 10.f;
-            changed = ImGui::InputFloat(p.name, v, step, step2, "%.4f");
+    switch ( p.type ) {
+        case ParamType::FLOAT: {
+            auto *v = reinterpret_cast<float *>(data);
+            if ( p.range.f.min_f <= p.range.f.max_f ) {
+                changed = ImGui::SliderFloat(p.name, v, p.range.f.min_f, p.range.f.max_f);
+            } else {
+                float step = p.range.f.step_f > 0.f ? p.range.f.step_f : 0.1f;
+                float step2 = step * 10.f;
+                changed = ImGui::InputFloat(p.name, v, step, step2, "%.4f");
+            }
+            break;
         }
-        break;
-    }
-    case ParamType::INT: {
-        int32_t v = (int32_t)*data;
-        if (p.range.i.min_i <= p.range.i.max_i) {
-            changed = ImGui::SliderInt(p.name, &v,
-                                       p.range.i.min_i, p.range.i.max_i);
-        } else {
-            changed = ImGui::InputInt(p.name, &v,
-                                      p.range.i.step_i ? p.range.i.step_i : 1);
+        case ParamType::INT: {
+            int32_t v = (int32_t)*data;
+            if ( p.range.i.min_i <= p.range.i.max_i ) {
+                changed = ImGui::SliderInt(p.name, &v, p.range.i.min_i, p.range.i.max_i);
+            } else {
+                changed = ImGui::InputInt(p.name, &v, p.range.i.step_i ? p.range.i.step_i : 1);
+            }
+            if ( changed )
+                *data = (float)v;
+            break;
         }
-        if (changed) *data = (float)v;
-        break;
-    }
-    case ParamType::COLOR_RGB:
-        changed = ImGui::ColorEdit3(p.name, data,
-                                    ImGuiColorEditFlags_NoInputs |
-                                    ImGuiColorEditFlags_PickerHueWheel);
-        break;
-    case ParamType::COLOR_RGBA:
-        changed = ImGui::ColorEdit4(p.name, data,
-                                    ImGuiColorEditFlags_NoInputs |
-                                    ImGuiColorEditFlags_PickerHueWheel);
-        break;
-    case ParamType::VEC3:
-        changed = ImGui::InputFloat3(p.name, data, "%.3f");
-        break;
-    case ParamType::BOOL: {
-        bool v = *data != 0.0f;
-        changed = ImGui::Checkbox(p.name, &v);
-        if (changed) *data = v ? 1.0f : 0.0f;
-        break;
-    }
-    case ParamType::ENUM: {
-        int32_t v = (int32_t)*data;
-        if (p.enum_labels && p.enum_count > 0)
-            changed = ImGui::Combo(p.name, &v, p.enum_labels, p.enum_count);
-        if (changed) *data = (float)v;
-        break;
-    }
+        case ParamType::COLOR_RGB:
+            changed = ImGui::ColorEdit3(p.name,
+                                        data,
+                                        ImGuiColorEditFlags_NoInputs |
+                                            ImGuiColorEditFlags_PickerHueWheel);
+            break;
+        case ParamType::COLOR_RGBA:
+            changed = ImGui::ColorEdit4(p.name,
+                                        data,
+                                        ImGuiColorEditFlags_NoInputs |
+                                            ImGuiColorEditFlags_PickerHueWheel);
+            break;
+        case ParamType::VEC3:
+            changed = ImGui::InputFloat3(p.name, data, "%.3f");
+            break;
+        case ParamType::BOOL: {
+            bool v = *data != 0.0f;
+            changed = ImGui::Checkbox(p.name, &v);
+            if ( changed )
+                *data = v ? 1.0f : 0.0f;
+            break;
+        }
+        case ParamType::ENUM: {
+            int32_t v = (int32_t)*data;
+            if ( p.enum_labels && p.enum_count > 0 )
+                changed = ImGui::Combo(p.name, &v, p.enum_labels, p.enum_count);
+            if ( changed )
+                *data = (float)v;
+            break;
+        }
     }
 
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+    if ( ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) )
         ImGui::SetTooltip("%s", p.description ? p.description : "");
     return changed;
 }
 
-bool render_param_controls(const KernelDesc& desc, float* params, bool read_only) {
+bool render_param_controls(const KernelDesc &desc, float *params, bool read_only) {
     bool any_changed = false;
-    for (int i = 0; i < desc.param_count; i++) {
-        const auto& p = desc.params[i];
+    for ( int i = 0; i < desc.param_count; i++ ) {
+        const auto &p = desc.params[i];
 
-        if (read_only) {
+        if ( read_only ) {
             ImGui::BeginDisabled();
             render_one(p, params + p.buffer_offset / sizeof(float));
             ImGui::EndDisabled();
         } else {
-            if (render_one(p, params + p.buffer_offset / sizeof(float)))
+            if ( render_one(p, params + p.buffer_offset / sizeof(float)) )
                 any_changed = true;
         }
     }
