@@ -14,6 +14,7 @@
 #include <args.hxx>
 
 #include <sycl/sycl.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <dlfcn.h>
 #include <cstdio>
@@ -48,6 +49,7 @@ static void call_render_kernel(void *handle,
                                int sample);
 static float *find_param(float *params, const KernelDesc &desc, const char *name);
 static void init_std_params(float *buf, size_t buf_size);
+static void apply_yaml_std_params(const SceneDef &scene, float *buf, size_t buf_size);
 
 // ── GLFW error callback ────────────────────────────────────────────────
 static void glfw_error_cb(int error, const char *desc) {
@@ -252,8 +254,9 @@ int main(int argc, char **argv) {
             auto sz = active_kernel->desc.params_buffer_size;
             h_params = (float *)calloc(sz, 1);
             spdlog::info("[startup] apply_params...");
-            scenes.apply_params(*active_scene, active_kernel->desc, h_params, sz);
             init_std_params(h_params, sz);
+            apply_yaml_std_params(*active_scene, h_params, sz);
+            scenes.apply_params(*active_scene, active_kernel->desc, h_params, sz);
             spdlog::info("[startup] alloc d_params...");
             d_params = sycl::malloc_host<float>(sz / 4, q);
             spdlog::info("[startup] upload params...");
@@ -298,8 +301,9 @@ int main(int argc, char **argv) {
                     free(h_params);
                     auto sz = new_kh->desc.params_buffer_size;
                     h_params = (float *)calloc(sz, 1);
-                    scenes.apply_params(*active_scene, new_kh->desc, h_params, sz);
                     init_std_params(h_params, sz);
+                    apply_yaml_std_params(*active_scene, h_params, sz);
+                    scenes.apply_params(*active_scene, new_kh->desc, h_params, sz);
                     if ( d_params ) {
                         sycl::free(d_params, q);
                     }
@@ -365,8 +369,9 @@ int main(int argc, char **argv) {
                             free(h_params);
                             auto sz = active_kernel->desc.params_buffer_size;
                             h_params = (float *)calloc(sz, 1);
-                            scenes.apply_params(s, active_kernel->desc, h_params, sz);
                             init_std_params(h_params, sz);
+                            apply_yaml_std_params(s, h_params, sz);
+                            scenes.apply_params(s, active_kernel->desc, h_params, sz);
                             if ( d_params ) {
                                 sycl::free(d_params, q);
                             }
@@ -809,6 +814,43 @@ static void init_std_params(float *buf, size_t buf_size) {
     buf[RT_CAM_UP + 0] = 0;
     buf[RT_CAM_UP + 1] = 1;
     buf[RT_CAM_UP + 2] = 0;
+}
+
+/// Apply YAML overrides for standard params (cam_eye, cam_at, cam_fov, etc.)
+static void apply_yaml_std_params(const SceneDef &scene, float *buf, size_t buf_size) {
+    if ( buf_size < RT_NUM_STD_PARAMS * sizeof(float) || !scene.has_overrides ) {
+        return;
+    }
+    try {
+        YAML::Node root = YAML::LoadFile(scene.yaml_path);
+        auto params = root["params"];
+        if ( !params ) {
+            return;
+        }
+        auto vec3 = [&](const char *key, int base) {
+            auto n = params[key];
+            if ( n && n.size() >= 3 ) {
+                buf[base + 0] = n[0].as<float>();
+                buf[base + 1] = n[1].as<float>();
+                buf[base + 2] = n[2].as<float>();
+            }
+        };
+        auto scalar = [&](const char *key, int idx) {
+            auto n = params[key];
+            if ( n ) {
+                buf[idx] = n.as<float>();
+            }
+        };
+        scalar("spp_frame", RT_SPP_FRAME);
+        scalar("max_bounces", RT_MAX_BOUNCES);
+        vec3("cam_eye", RT_CAM_EYE);
+        vec3("cam_at", RT_CAM_AT);
+        scalar("cam_fov", RT_CAM_FOV);
+        scalar("cam_aperture", RT_CAM_APERTURE);
+        vec3("cam_up", RT_CAM_UP);
+    } catch ( const std::exception &e ) {
+        spdlog::error("[scenes] error applying YAML std params: {}", e.what());
+    }
 }
 
 static void recreate_render_buffers(sycl::queue &q,
