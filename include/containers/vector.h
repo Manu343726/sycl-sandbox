@@ -12,6 +12,9 @@
 namespace containers::raw {
 
 /// Untyped vector<Tag> — fixed-max-length buffer on LinearAllocator.
+///
+/// RAII: destructor frees the pool.  Move transfers ownership (source empties).
+/// Copy allocates a new pool and copies elements.
 template <alloc::Target Tag>
 class vector {
 public:
@@ -22,11 +25,56 @@ public:
         allocator_ = alloc::raw::LinearAllocator<Tag>(pool);
     }
 
-    ~vector() = default;
-    vector(vector &&) = default;
-    vector &operator=(vector &&) = default;
-    vector(const vector &) = delete;
-    vector &operator=(const vector &) = delete;
+    ~vector() {
+        allocator_.reset_and_free(*queue_);
+    }
+
+    vector(vector &&other) noexcept
+        : queue_(other.queue_),
+          allocator_(std::move(other.allocator_)),
+          element_size_(other.element_size_),
+          alignment_(other.alignment_),
+          count_(other.count_) {
+        other.queue_ = nullptr;
+        other.count_ = 0;
+    }
+
+    vector &operator=(vector &&other) noexcept {
+        if (this != &other) {
+            allocator_.reset_and_free(*queue_);
+            queue_        = other.queue_;
+            allocator_    = std::move(other.allocator_);
+            element_size_ = other.element_size_;
+            alignment_    = other.alignment_;
+            count_        = other.count_;
+            other.queue_  = nullptr;
+            other.count_  = 0;
+        }
+        return *this;
+    }
+
+    vector(const vector &other)
+        : queue_(other.queue_),
+          element_size_(other.element_size_),
+          alignment_(other.alignment_),
+          count_(other.count_) {
+        size_t total = other.max_size() * element_size_ + alignment_;
+        auto pool = alloc::raw::RootAllocator<Tag>().allocate(total, *queue_);
+        allocator_ = alloc::raw::LinearAllocator<Tag>(pool);
+        if (count_ > 0) {
+            alloc::raw::Buffer<Tag> src = other.data();
+            alloc::raw::Buffer<Tag> dst = data();
+            std::memcpy(dst.data, src.data, src.size);
+        }
+    }
+
+    vector &operator=(const vector &other) {
+        if (this != &other) {
+            vector tmp(other);
+            *this = std::move(tmp);
+        }
+        return *this;
+    }
 
     void push_back(const void *element) {
         auto buf = allocator_.allocate(element_size_, alignment_);
@@ -55,17 +103,12 @@ public:
         return result;
     }
 
-    void discard() {
-        allocator_.reset_and_free(*queue_);
-        count_ = 0;
-    }
-
 private:
-    sycl::queue                          *queue_;
+    sycl::queue                          *queue_      = nullptr;
     alloc::raw::LinearAllocator<Tag>      allocator_;
-    size_t                                element_size_;
-    size_t                                alignment_;
-    size_t                                count_;
+    size_t                                element_size_ = 0;
+    size_t                                alignment_    = 0;
+    size_t                                count_        = 0;
 };
 
 } // namespace containers::raw
@@ -73,12 +116,20 @@ private:
 namespace containers {
 
 /// Typed vector<Tag, T> — type-safe wrapper around raw::vector.
+///
+/// RAII: destructor, move, copy all delegate to the raw vector.
 template <alloc::Target Tag, typename T>
 class vector {
 public:
     vector(size_t max_elements, sycl::queue &queue)
         : impl_(max_elements, sizeof(T), alignof(T), queue) {
     }
+
+    ~vector() = default;
+    vector(vector &&) = default;
+    vector &operator=(vector &&) = default;
+    vector(const vector &) = default;
+    vector &operator=(const vector &) = default;
 
     void push_back(const T &element) {
         impl_.push_back(&element);
@@ -98,11 +149,9 @@ public:
         return result;
     }
 
-    void discard() { impl_.discard(); }
-
 private:
     explicit vector(containers::raw::vector<Tag> &&impl) : impl_(std::move(impl)) {}
-    containers::raw::vector<Tag>   impl_;
+    containers::raw::vector<Tag> impl_;
 };
 
 } // namespace containers
