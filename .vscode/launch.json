@@ -6,6 +6,17 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/src/sandbox",
+            "args": ["--log-level", "trace"],
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "preLaunchTask": "build release"
+        },
+        {
+            "name": "Run (Release, info)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/src/sandbox",
             "args": [],
             "cwd": "${workspaceFolder}",
             "environment": [],

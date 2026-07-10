@@ -129,6 +129,8 @@ int main(int argc, char **argv) {
     // ---- CLI args ----
     args::ArgumentParser parser("sycl-sandbox");
     args::ValueFlag<std::string> backend_arg(parser, "cpu|gpu", "SYCL backend", {'b', "backend"});
+    args::ValueFlag<std::string> log_level_arg(parser, "trace|debug|info|warn|error",
+                                               "spdlog log level", {'l', "log-level"});
     try {
         parser.ParseCLI(argc, argv);
     } catch ( const args::Help & ) {
@@ -145,6 +147,15 @@ int main(int argc, char **argv) {
         spdlog::error("backend must be 'cpu' or 'gpu', got '{}'", backend);
         return 1;
     }
+
+    std::string log_level = log_level_arg ? log_level_arg.Get() : "info";
+    auto sl = spdlog::level::from_str(log_level);
+    if ( sl == spdlog::level::off && log_level != "off" ) {
+        spdlog::error("invalid log level '{}'", log_level);
+        return 1;
+    }
+    spdlog::set_level(sl);
+    spdlog::info("log level set to {}", log_level);
 
     // ---- GLFW window ----
     glfwSetErrorCallback(glfw_error_cb);
