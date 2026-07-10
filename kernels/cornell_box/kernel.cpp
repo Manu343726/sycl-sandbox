@@ -1,13 +1,13 @@
-#include <sandbox_api.h>
-#include <rt/math.h>
-#include <rt/types.h>
-#include <rt/trace.h>
-#include <rt/params.h>
-#include <rt/scene.h>
-#include <rt/hittables/quad.h>
-#include <rt/hittables/box.h>
-#include <rt/materials/lambertian.h>
-#include <rt/materials/diffuse_light.h>
+#include <sycl-sandbox/sandbox_api.h>
+#include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/types.h>
+#include <sycl-sandbox/rt/trace.h>
+#include <sycl-sandbox/rt/params.h>
+#include <sycl-sandbox/rt/scene.h>
+#include <sycl-sandbox/rt/hittables/quad.h>
+#include <sycl-sandbox/rt/hittables/box.h>
+#include <sycl-sandbox/rt/materials/lambertian.h>
+#include <sycl-sandbox/rt/materials/diffuse_light.h>
 #include <cstring>
 
 using namespace rt;

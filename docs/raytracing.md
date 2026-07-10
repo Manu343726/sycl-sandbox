@@ -2,7 +2,7 @@
 
 ## Overview
 
-The shared `include/rt/` library provides a complete raytracing pipeline that
+The shared `include/sycl-sandbox/rt/` library provides a complete raytracing pipeline that
 any kernel can use.  A raytracer kernel is just a normal kernel that happens
 to include `rt/` headers and call `rt::render_main()` from its
 `render_kernel()`.  The kernel owns only its scene geometry and material
@@ -20,7 +20,7 @@ by the library.
 │  shutdown_kernel() → free scene memory           │
 │                                                  │
 │  ┌──────────────────────────────────────────────┐│
-│  │  include/rt/ (shared library)                 ││
+│  │  include/sycl-sandbox/rt/ (shared library)    ││
 │  │                                               ││
 │  │  render_main() → reads standard params,       ││
 │  │                   sets up camera, launches    ││
@@ -39,13 +39,13 @@ fixed `rt_std_param` indices and fills defaults via `init_std_params()`.
 Kernels only declare their own kernel-specific params.
 
 ```cpp
-#include "rt/types.h"        // Object, Hittable, Material
-#include "rt/trace.h"        // rt::render_main()
-#include "rt/params.h"       // rt_std_param enum (implicit)
-#include "rt/scene.h"        // Axis, quad_corner, DeviceBuffer
-#include "rt/hittables/quad.h"
-#include "rt/materials/lambertian.h"
-#include "rt/materials/diffuse_light.h"
+#include <sycl-sandbox/rt/types.h>      // Object, Hittable, Material
+#include <sycl-sandbox/rt/trace.h>      // rt::render_main()
+#include <sycl-sandbox/rt/params.h>     // rt_std_param enum (implicit)
+#include <sycl-sandbox/rt/scene.h>      // Axis, quad_corner, DeviceBuffer
+#include <sycl-sandbox/rt/hittables/quad.h>
+#include <sycl-sandbox/rt/materials/lambertian.h>
+#include <sycl-sandbox/rt/materials/diffuse_light.h>
 
 using namespace rt;
 using rt::materials::lambertian;
@@ -184,14 +184,14 @@ internally but hits as a single `Object`.
 ## File structure
 
 ```
-include/
+include/sycl-sandbox/
   variant.h           — visit<>() — generic compile-time variant dispatch
-include/rt/
+  rt/
   math.h              — float3, operators, RNG
   types_fwd.h         — Ray, HitRecord, ScatterRecord
   types.h             — Hittable variant, Material variant, Object class
   helpers.h           — random_in_unit_sphere, reflect, refract, schlick
-  variant.h           — forward to ../variant.h
+  variant.h           — forward to sycl-sandbox/variant.h
   camera.h            — Camera struct, lookat()
   params.h            — rt_std_param enum
   trace.h             — Object::hit/scatter/emit dispatch, trace(), render_main<>()

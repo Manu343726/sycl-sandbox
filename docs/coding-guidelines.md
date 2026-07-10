@@ -160,19 +160,19 @@ that `generic` silently accepts.
 
 ## Fully qualified includes
 
-All includes must use the full path from the repository root (`include/`).  Use
-angle brackets, never quotes with relative paths:
+All project includes use `<sycl-sandbox/...>` with the root at `include/sycl-sandbox/`.
+Use angle brackets, never quotes with relative paths:
 
 ```cpp
 // Bad
 #include "buffer.h"
-#include "../buffer.h"
+#include "rt/trace.h"
 #include "../alloc/buffer.h"
 
 // Good
-#include <alloc/buffer.h>
-#include <rt/trace.h>
-#include <containers/vector.h>
+#include <sycl-sandbox/alloc/buffer.h>
+#include <sycl-sandbox/rt/trace.h>
+#include <sycl-sandbox/containers/vector.h>
 ```
 
 The only exceptions are generated/config files co-located with the source.

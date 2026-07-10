@@ -180,3 +180,38 @@ PTX for GPU execution.  The file ships with CUDA at
 ```bash
 sudo ln -sf /opt/cuda/nvvm/libdevice/libdevice.10.bc /opt/cuda/lib64/libdevice.10.bc
 ```
+
+### Tracy profiler integration
+
+CPU-side profiling zones and GPU kernel timeline tracing are available via
+[Tracy](https://github.com/wolfpld/tracy), gated behind the `TRACY_PROFILER`
+CMake option:
+
+```bash
+cmake --preset conan-release -DTRACY_PROFILER=ON
+cmake --build build -j$(nproc)
+```
+
+When enabled:
+
+- **TracyClient** is fetched via `FetchContent` and linked into the `sandbox`
+  executable.  Host-side CPU zones appear in the Tracy timeline automatically.
+- **GPU kernel execution** is captured via Tracy's CUPTI hooks — AdaptiveCpp's
+  CUDA backend calls `cudaLaunchKernel` etc., which Tracy intercepts.  No
+  changes to kernel `.so` files are needed.
+- The `profiling.h` wrapper header (`include/sycl-sandbox/profiling.h`) provides
+  `PROF_ZONE_SCOPED`, `PROF_ZONE_SCOPED_N`, `PROF_FRAME_MARK`, and
+  `PROF_FRAME_MARK_N` macros that compile to Tracy calls when `TRACY_ENABLE` is
+  defined, or to no-ops otherwise.
+
+To build the Tracy profiler server (standalone UI):
+
+```bash
+cmake --build build --target tracy-server
+./build/profiler/bin/tracy-profiler
+```
+
+The server is built as an isolated `ExternalProject` to avoid conflicts with
+Tracy's internal dependency tree.  Conan provides capstone, freetype, curl,
+pugixml, nlohmann_json, and zstd; Tracy's CPM handles the remaining small
+dependencies (md4c, base64, tidy, usearch, PPQSort).

@@ -1,0 +1,50 @@
+{
+    "version": 3,
+    "vendor": {
+        "conan": {}
+    },
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 15,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "conan-debug",
+            "displayName": "'conan-debug' config",
+            "description": "'conan-debug' configure using 'Unix Makefiles' generator",
+            "generator": "Unix Makefiles",
+            "cacheVariables": {
+                "CMAKE_POLICY_DEFAULT_CMP0091": "NEW",
+                "CMAKE_BUILD_TYPE": "Debug"
+            },
+            "environment": {
+                "PATH": "/home/manu343726/.conan2/p/ninja30e87f1e92502/p/bin:/home/manu343726/.conan2/p/cmake622573da4c472/p/bin:$penv{PATH}"
+            },
+            "cmakeExecutable": "/home/manu343726/.conan2/p/cmake622573da4c472/p/bin/cmake",
+            "toolchainFile": "conan_toolchain.cmake",
+            "binaryDir": "/home/manu343726/Projects/sycl-sandbox/build_debug"
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "conan-debug",
+            "configurePreset": "conan-debug",
+            "jobs": 16
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "conan-debug",
+            "configurePreset": "conan-debug",
+            "execution": {
+                "jobs": 16
+            },
+            "environment": {
+                "PATH": "/home/manu343726/.conan2/p/b/adapt9b8bf41fb83f8/p/bin:$penv{PATH}",
+                "LD_LIBRARY_PATH": "/home/manu343726/.conan2/p/b/adapt9b8bf41fb83f8/p/lib:$penv{LD_LIBRARY_PATH}",
+                "DYLD_LIBRARY_PATH": "/home/manu343726/.conan2/p/b/adapt9b8bf41fb83f8/p/lib:$penv{DYLD_LIBRARY_PATH}"
+            }
+        }
+    ]
+}

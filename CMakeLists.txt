@@ -35,6 +35,28 @@ find_package(glfw3 REQUIRED)
 find_package(imgui REQUIRED)
 find_package(OpenGL REQUIRED)
 
+# ------------------------------------------------------------------ Tracy profiler
+option(TRACY_PROFILER "Enable Tracy profiler integration (CPU zones + GPU timeline)" OFF)
+
+if(TRACY_PROFILER)
+    include(FetchContent)
+    FetchContent_Declare(tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG        master
+        GIT_SHALLOW    TRUE
+        GIT_PROGRESS   TRUE
+    )
+    set(TRACY_ENABLE  ON  CACHE BOOL "" FORCE)
+    set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(tracy)
+
+    set_target_properties(TracyClient PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+    )
+
+    add_subdirectory(profiler)
+endif()
+
 # ------------------------------------------------------------------ targets
 add_subdirectory(src)
 add_subdirectory(kernels)

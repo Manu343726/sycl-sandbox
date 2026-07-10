@@ -27,6 +27,7 @@ Interactive GPU/CPU rendering sandbox with hot-reloadable SYCL kernels. Built wi
 - [yaml-cpp](https://github.com/jbeder/yaml-cpp) — scene config files
 - [spdlog](https://github.com/gabime/spdlog) — logging
 - [args](https://github.com/Taywee/args) — CLI argument parsing
+- [Tracy](https://github.com/wolfpld/tracy) — profiler (optional, `-DTRACY_PROFILER=ON`)
 - OpenGL 3.3+
 
 ## Build
@@ -38,6 +39,13 @@ conan install . -of build --build missing
 # Build Release
 cmake --preset conan-release -B build
 make -C build -j$(nproc)
+
+# Build with Tracy profiler support
+cmake --preset conan-release -B build -DTRACY_PROFILER=ON
+make -C build -j$(nproc)
+
+# Build the Tracy server UI (standalone profiler application)
+make -C build tracy-server
 
 # Build Debug (for debugging with gdb)
 conan install . -of build_debug -s build_type=Debug --build missing
@@ -101,11 +109,15 @@ The camera controls only appear when the active kernel exposes the relevant para
 │   ├── scene_registry.cpp   # YAML scene parser
 │   ├── param_ui.cpp         # ImGui parameter controls
 │   └── watcher.cpp          # Inotify source file watcher
-├── include/                 # Shared headers
+├── include/sycl-sandbox/    # Shared headers (kernel + host)
 │   ├── sandbox_api.h        # Kernel API definition
-│   └── param_types.h        # Parameter metadata types
+│   ├── param_types.h        # Parameter metadata types
+│   ├── profiling.h          # Tracy profiling wrapper macros
+│   └── rt/                  # Raytracing library
+├── profiler/                # Tracy server build (ExternalProject)
+│   └── CMakeLists.txt
+├── docs/                    # Architecture and coding guidelines
 └── build/                   # Build output (Release)
-└── build_debug/             # Build output (Debug)
 ```
 
 ## Adding a new kernel

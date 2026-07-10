@@ -1,3 +1,4 @@
+#include <sycl-sandbox/profiling.h>
 #include <sandbox_api.h>
 #include "watcher.h"
 #include "kernel_library.h"
@@ -295,6 +296,7 @@ int main(int argc, char **argv) {
         }
 
         // 2. ImGui frame
+        PROF_ZONE_SCOPED_N("ImGui frame");
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -642,6 +644,7 @@ int main(int argc, char **argv) {
 
         // Only update display when rendering happened or on first frame
         if ( rendered || current_spp == 0 ) {
+            PROF_ZONE_SCOPED_N("Display upload");
             try {
                 q.memcpy(h_accum, d_accum, pixel_count * 4 * sizeof(float)).wait();
             } catch ( const std::exception &e ) {
@@ -692,6 +695,7 @@ int main(int argc, char **argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+        PROF_FRAME_MARK;
     }
 
     // ---- cleanup ----
@@ -712,6 +716,7 @@ int main(int argc, char **argv) {
 // ── kernel dispatch helpers ────────────────────────────────────────────
 static void
 call_init_kernel(void *handle, sycl::queue &q, int w, int h, const void *params, size_t sz) {
+    PROF_ZONE_SCOPED;
     using fn_t = void (*)(sycl::queue *, int, int, const void *, size_t);
     auto *fn = reinterpret_cast<fn_t>(dlsym(handle, "init_kernel"));
     if ( fn ) {
@@ -728,6 +733,7 @@ static void call_render_kernel(void *handle,
                                const void *params,
                                void *accum,
                                int sample) {
+    PROF_ZONE_SCOPED;
     using fn_t = void (*)(sycl::queue *, int, int, const void *, void *, int);
     auto *fn = reinterpret_cast<fn_t>(dlsym(handle, "render_kernel"));
     if ( fn ) {
@@ -765,7 +771,8 @@ static void recreate_render_buffers(sycl::queue &q,
                                     float *&h_accum,
                                     size_t &pixel_count,
                                     int w,
-                                    int h) {
+                                     int h) {
+    PROF_ZONE_SCOPED;
     spdlog::debug("[buf] recreate {}x{}", w, h);
     if ( tex ) {
         spdlog::trace("[buf] delete tex");

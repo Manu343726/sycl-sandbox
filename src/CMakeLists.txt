@@ -125,3 +125,8 @@ target_link_libraries(sandbox PRIVATE
     OpenGL::GL
     ${CMAKE_DL_LIBS}
 )
+
+if(TRACY_PROFILER)
+    target_compile_definitions(sandbox PRIVATE TRACY_ENABLE)
+    target_link_libraries(sandbox PRIVATE TracyClient)
+endif()

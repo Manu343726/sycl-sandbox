@@ -1,14 +1,14 @@
-#include <sandbox_api.h>
+#include <sycl-sandbox/sandbox_api.h>
 #include "kernel.h"
-#include <rt/math.h>
-#include <rt/types.h>
-#include <rt/camera.h>
-#include <rt/trace.h>
-#include <rt/params.h>
-#include <rt/hittables/sphere.h>
-#include <rt/materials/lambertian.h>
-#include <rt/materials/metal.h>
-#include <rt/materials/dielectric.h>
+#include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/types.h>
+#include <sycl-sandbox/rt/camera.h>
+#include <sycl-sandbox/rt/trace.h>
+#include <sycl-sandbox/rt/params.h>
+#include <sycl-sandbox/rt/hittables/sphere.h>
+#include <sycl-sandbox/rt/materials/lambertian.h>
+#include <sycl-sandbox/rt/materials/metal.h>
+#include <sycl-sandbox/rt/materials/dielectric.h>
 #include <cstdlib>
 #include <cstring>
 

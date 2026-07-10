@@ -1,3 +1,3 @@
 #pragma once
-#include <rt/math.h>
-#include <rt/types.h>
+#include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/types.h>
