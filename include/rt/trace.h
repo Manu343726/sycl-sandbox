@@ -1,24 +1,11 @@
 #pragma once
 #include "types.h"
 #include "camera.h"
+#include "params.h"
 
 namespace rt {
 
 // ── helpers ────────────────────────────────────────────────────────────
-inline float3 random_hemi(RNG& r, float3 n) {
-    float u1 = r.next(), u2 = r.next();
-    float rr = sycl::sqrt(u1);
-    float theta = 2.f * 3.14159265f * u2;
-    float x = rr * sycl::cos(theta);
-    float y = rr * sycl::sin(theta);
-    float z = sycl::sqrt(1.f - u1);
-    float3 up = {0,1,0};
-    if (sycl::fabs(n.y) > 0.9f) up = (float3){1,0,0};
-    float3 u = norm(cross(up, n));
-    float3 v = cross(n, u);
-    return add(add(scale(u, x), scale(v, y)), scale(n, z));
-}
-
 inline float3 random_in_unit_sphere(RNG& r) {
     for (int i = 0; i < 100; i++) {
         float3 p = {2*r.next()-1, 2*r.next()-1, 2*r.next()-1};
@@ -57,8 +44,7 @@ inline bool hit_sphere(const Sphere& s, const Ray& r, float t_min, float t_max, 
     float t = (-b - sycl::sqrt(d)) / a;
     if (t < t_min || t > t_max) t = (-b + sycl::sqrt(d)) / a;
     if (t < t_min || t > t_max) return false;
-    rec.t = t;
-    rec.p = add(r.orig, scale(r.dir, t));
+    rec.t = t; rec.p = add(r.orig, scale(r.dir, t));
     rec.normal = scale(sub(rec.p, s.center), 1.f / s.radius);
     rec.front_face = dot(r.dir, rec.normal) < 0;
     if (!rec.front_face) rec.normal = scale(rec.normal, -1);
@@ -136,12 +122,10 @@ float3 trace(const Ray& ray, const PrimT* prims, int count,
             float reflect_prob;
             if (refract(r.dir, outward_n, eta, refracted))
                 reflect_prob = schlick(cos, rec.ir);
-            else
-                reflect_prob = 1.f;
+            else reflect_prob = 1.f;
             if (rng.next() < reflect_prob)
                 r = {rec.p, reflect(norm(r.dir), rec.normal)};
-            else
-                r = {rec.p, refracted};
+            else r = {rec.p, refracted};
             att = mul(att, rec.albedo);
             break;
         }
@@ -152,11 +136,25 @@ float3 trace(const Ray& ray, const PrimT* prims, int count,
     return {0,0,0};
 }
 
-// ── shared render loop ────────────────────────────────────────────────
-template <typename PrimT, typename HitFn>
-void render(sycl::queue* q, int w, int h, const Camera& cam,
-            const PrimT* d_prims, int count, int spp, int bounces,
-            float* accum, int sample_index, HitFn&& hit_fn) {
+// ── generic render_kernel body ─────────────────────────────────────────
+// Reads standard params (spp, bounces, camera) from the params buffer,
+// sets up the camera, runs the trace loop with aperture DoF, and
+// accumulates.  `bg_fn` is called on miss rays: float3 bg(const Ray&);
+template <typename PrimT, typename HitFn, typename BgFn>
+void render_main(sycl::queue* q, int w, int h,
+                 const float* p, float* accum, int si,
+                 const PrimT* d_prims, int count,
+                 HitFn&& hit_fn, BgFn&& bg_fn) {
+    int spp     = (int)p[RT_SPP_FRAME];
+    int bounces = (int)p[RT_MAX_BOUNCES];
+    float3 ce; memcpy(&ce, p + RT_CAM_EYE, 12);
+    float3 ca; memcpy(&ca, p + RT_CAM_AT, 12);
+    float3 cu; memcpy(&cu, p + RT_CAM_UP, 12);
+    float fov = p[RT_CAM_FOV];
+    float aperture = p[RT_CAM_APERTURE];
+    float aspect = (float)w / (float)h;
+
+    Camera cam = lookat(ce, ca, cu, fov, aspect);
 
     q->parallel_for(sycl::range<2>{(size_t)h, (size_t)w},
                     [=](sycl::item<2> it) {
@@ -164,16 +162,28 @@ void render(sycl::queue* q, int w, int h, const Camera& cam,
 
         for (int s = 0; s < spp; s++) {
             RNG rng{ (uint32_t)(idx * 6364136223846793005ull
-                                + (uint64_t)(sample_index * 2654435761u) + s) };
+                                + (uint64_t)(si * 2654435761u) + s) };
+
             float u = (x + rng.next()) / (float)w;
             float v = (y + rng.next()) / (float)h;
 
+            // Depth of field: jitter the origin
+            float3 ro = cam.origin;
+            if (aperture > 0.f) {
+                float3 jit = scale(random_in_unit_sphere(rng), aperture * 0.5f);
+                ro.x += jit.x; ro.y += jit.y;
+            }
+
             Ray ray;
-            ray.orig = cam.origin;
+            ray.orig = ro;
             ray.dir  = norm(sub(add(add(cam.lower_left,
-                        scale(cam.horizontal, u)), scale(cam.vertical, v)), cam.origin));
+                        scale(cam.horizontal, u)), scale(cam.vertical, v)), ro));
 
             float3 col = trace(ray, d_prims, count, hit_fn, bounces, rng);
+
+            // Background for miss rays (col == 0)
+            if (col.x == 0.f && col.y == 0.f && col.z == 0.f)
+                col = bg_fn(ray);
 
             int base = idx * 4;
             accum[base + 0] += col.x;

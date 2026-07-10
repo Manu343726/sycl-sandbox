@@ -3,17 +3,16 @@
 #include "rt/types.h"
 #include "rt/camera.h"
 #include "rt/trace.h"
+#include "rt/params.h"
 #include <cstring>
 
+// Standard params (0-12) + kernel-specific (13+)
 static ParamMeta params_meta[] = {
+    // ── standard rt params (order fixed by rt_std_param) ────────────
     { "spp_frame",    "Samples per frame",
       ParamType::INT,  .range = { .i = { 1, 64, 1 } },  .default_i = 1 },
     { "max_bounces",  "Maximum ray path depth",
       ParamType::INT,  .range = { .i = { 1, 100, 1 } }, .default_i = 10 },
-    { "light_color",  "Ceiling light color",
-      ParamType::COLOR_RGB, .default_c3 = { 1.f, 1.f, 1.f } },
-    { "light_strength","Ceiling light intensity multiplier",
-      ParamType::FLOAT, .range = { .f = { 1.f, 50.f, 1.f } }, .default_f = 15.f },
     { "cam_eye",      "Camera position",
       ParamType::VEC3, .default_c3 = { 0.f, 1.5f, 4.5f } },
     { "cam_at",       "Camera look-at target",
@@ -22,15 +21,19 @@ static ParamMeta params_meta[] = {
       ParamType::FLOAT, .range = { .f = { 1.f, 120.f, 1.f } }, .default_f = 35.f },
     { "cam_aperture","Depth of field aperture size",
       ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.f },
-    { "cam_up",      "Camera up vector",
+    { "cam_up",       "Camera up vector",
       ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
+    // ── kernel-specific params (index 13+) ──────────────────────────
+    { "light_color",  "Ceiling light color",
+      ParamType::COLOR_RGB, .default_c3 = { 1.f, 1.f, 1.f } },
+    { "light_strength","Ceiling light intensity multiplier",
+      ParamType::FLOAT, .range = { .f = { 1.f, 50.f, 1.f } }, .default_f = 15.f },
 };
 
+// idx beyond standard
 enum ParamIdx : int {
-    P_SPP_FRAME=0, P_MAX_BOUNCES=1,
-    P_LIGHT_COLOR=2, P_LIGHT_STRENGTH=5,
-    P_CAM_EYE=6, P_CAM_AT=9,
-    P_CAM_FOV=12, P_CAM_APERTURE=13, P_CAM_UP=14
+    P_LIGHT_COLOR = RT_NUM_STD_PARAMS,       // 13
+    P_LIGHT_STRENGTH = P_LIGHT_COLOR + 3,    // 16 (COLOR_RGB takes 3 floats)
 };
 
 static const char* source_files[] = { "kernel.cpp", nullptr };
@@ -112,18 +115,15 @@ extern "C" void init_kernel(sycl::queue* q, int, int,
 extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                const void* params, void* accum, int si) {
     auto* p = (const float*)params;
-    int spp = (int)p[P_SPP_FRAME];
-    int bounces = (int)p[P_MAX_BOUNCES];
-    float aspect = (float)w / (float)h;
 
-    rt::float3 ce, ca, cu; memcpy(&ce, p + P_CAM_EYE, 12); memcpy(&ca, p + P_CAM_AT, 12); memcpy(&cu, p + P_CAM_UP, 12);
-    float cf = p[P_CAM_FOV];
-    rt::Camera cam = rt::lookat(ce, ca, cu, cf, aspect);
-
-    rt::render(q, w, h, cam, g_d_quads, g_num_quads, spp, bounces,
-               (float*)accum, si, [](const rt::Quad& qq, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
-                   return rt::hit_quad(qq, rr, mn, mx, rec);
-               });
+    rt::render_main(q, w, h, p, (float*)accum, si,
+                    g_d_quads, g_num_quads,
+                    [](const rt::Quad& qq, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
+                        return rt::hit_quad(qq, rr, mn, mx, rec);
+                    },
+                    [](const rt::Ray&) -> rt::float3 {
+                        return {0,0,0};
+                    });
 }
 
 extern "C" void shutdown_kernel(sycl::queue* q) {

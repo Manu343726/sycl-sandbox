@@ -4,21 +4,18 @@
 #include "rt/types.h"
 #include "rt/camera.h"
 #include "rt/trace.h"
+#include "rt/params.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 
+// Standard params (0-12) + kernel-specific (13+)
 static ParamMeta params_meta[] = {
-    { "num_spheres",  "Number of random small spheres",
-      ParamType::INT,  .range = { .i = { 0, 500, 1 } }, .default_i = 11 },
-    { "max_bounces",  "Maximum ray path depth",
-      ParamType::INT,  .range = { .i = { 1, 100, 1 } }, .default_i = 10 },
+    // ── standard rt params (order fixed by rt_std_param) ────────────
     { "spp_frame",    "Samples per frame",
       ParamType::INT,  .range = { .i = { 1, 64, 1 } },  .default_i = 1 },
-    { "ground_color", "Ground sphere albedo",
-      ParamType::COLOR_RGB, .default_c3 = { 0.5f, 0.5f, 0.5f } },
-    { "background",   "Sky colour",
-      ParamType::COLOR_RGB, .default_c3 = { 0.5f, 0.7f, 1.0f } },
+    { "max_bounces",  "Maximum ray path depth",
+      ParamType::INT,  .range = { .i = { 1, 100, 1 } }, .default_i = 10 },
     { "cam_eye",      "Camera position",
       ParamType::VEC3, .default_c3 = { 13.f, 2.f, 3.f } },
     { "cam_at",       "Camera look-at target",
@@ -27,14 +24,22 @@ static ParamMeta params_meta[] = {
       ParamType::FLOAT, .range = { .f = { 1.f, 120.f, 1.f } }, .default_f = 20.f },
     { "cam_aperture","Depth of field aperture size",
       ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.1f },
-    { "cam_up",      "Camera up vector",
+    { "cam_up",       "Camera up vector",
       ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
+    // ── kernel-specific params (index 13+) ──────────────────────────
+    { "num_spheres",  "Number of random small spheres",
+      ParamType::INT,  .range = { .i = { 0, 500, 1 } }, .default_i = 11 },
+    { "ground_color", "Ground sphere albedo",
+      ParamType::COLOR_RGB, .default_c3 = { 0.5f, 0.5f, 0.5f } },
+    { "background",   "Sky colour",
+      ParamType::COLOR_RGB, .default_c3 = { 0.5f, 0.7f, 1.0f } },
 };
 
-enum ParamIdx : int { P_NUM_SPHERES=0, P_MAX_BOUNCES=1, P_SPP_FRAME=2,
-                      P_GROUND_COLOR=3, P_BACKGROUND=6,
-                      P_CAM_EYE=9, P_CAM_AT=12, P_CAM_FOV=15, P_CAM_APERTURE=16,
-                      P_CAM_UP=17 };
+enum ParamIdx : int {
+    P_NUM_SPHERES = RT_NUM_STD_PARAMS,       // 13
+    P_GROUND_COLOR = P_NUM_SPHERES + 1,      // 14
+    P_BACKGROUND = P_GROUND_COLOR + 1,       // 17 (COLOR_RGB is 3 floats)
+};
 
 static const char* source_files[] = { "kernel.cpp", "kernel.h", nullptr };
 static KernelDesc desc = {
@@ -49,7 +54,7 @@ extern "C" KernelDesc* get_kernel_desc() {
     return &desc;
 }
 
-// ── per-instance device state ───────────────────────────────────────────
+// ── per-instance state ─────────────────────────────────────────────────
 static rt::Sphere*  g_d_spheres = nullptr;
 static int           g_num_spheres = 0;
 static rt::float3    g_background = {0.5f, 0.7f, 1.0f};
@@ -77,8 +82,7 @@ static rt::Sphere* build_random_spheres(int n, rt::float3 gc) {
     return s;
 }
 
-// ── init ────────────────────────────────────────────────────────────────
-extern "C" void init_kernel(sycl::queue* q, int w, int h,
+extern "C" void init_kernel(sycl::queue* q, int, int,
                              const void* params, size_t) {
     auto* p = (const float*)params;
     int n = (int)p[P_NUM_SPHERES];
@@ -94,68 +98,20 @@ extern "C" void init_kernel(sycl::queue* q, int w, int h,
     delete[] hs;
 }
 
-// ── render ──────────────────────────────────────────────────────────────
 extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                const void* params, void* accum, int si) {
     auto* p = (const float*)params;
-    int spp = (int)p[P_SPP_FRAME];
-    int bounces = (int)p[P_MAX_BOUNCES];
     rt::float3 bg = g_background;
-    float aspect = (float)w / (float)h;
 
-    rt::float3 cam_eye, cam_at;
-    memcpy(&cam_eye, p + P_CAM_EYE, 12);
-    memcpy(&cam_at, p + P_CAM_AT, 12);
-    float cam_fov = p[P_CAM_FOV];
-    float cam_aperture = p[P_CAM_APERTURE];
-    rt::float3 cam_up_vec; memcpy(&cam_up_vec, p + P_CAM_UP, 12);
-
-    rt::Camera cam = rt::lookat(cam_eye, cam_at, cam_up_vec, cam_fov, aspect, 10.f);
-
-    auto* acc_local = (float*)accum;
-    auto* d_sph = g_d_spheres;
-    int   nsph = g_num_spheres;
-
-    q->parallel_for(sycl::range<2>{(size_t)h, (size_t)w},
-                    [=](sycl::item<2> it) {
-        int x = it[1], y = it[0], idx = y * w + x;
-
-        for (int s = 0; s < spp; s++) {
-            rt::RNG rng{ (uint32_t)(idx * 6364136223846793005ull
-                                    + (uint64_t)(si * 2654435761u)) };
-
-            float u = (x + rng.next()) / (float)w;
-            float v_ = (y + rng.next()) / (float)h;
-
-            rt::float3 ro = cam.origin;
-            if (cam_aperture > 0.f) {
-                rt::float3 jit = rt::scale(rt::random_in_unit_sphere(rng), cam_aperture * 0.5f);
-                ro.x += jit.x; ro.y += jit.y;
-            }
-
-            rt::Ray ray;
-            ray.orig = ro;
-            ray.dir  = rt::norm(rt::sub(rt::add(rt::add(cam.lower_left,
-                        rt::scale(cam.horizontal, u)), rt::scale(cam.vertical, v_)), ro));
-
-            rt::float3 col = rt::trace(ray, d_sph, nsph,
-                [](const rt::Sphere& sp, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
-                    return rt::hit_sphere(sp, rr, mn, mx, rec);
-                }, bounces, rng);
-
-            // Background gradient
-            if (col.x == 0.f && col.y == 0.f && col.z == 0.f) {
-                float t = 0.5f * (ray.dir.y + 1.f);
-                col = rt::lerp({1,1,1}, bg, t);
-            }
-
-            int base = idx * 4;
-            acc_local[base + 0] += col.x;
-            acc_local[base + 1] += col.y;
-            acc_local[base + 2] += col.z;
-            acc_local[base + 3] += 1;
-        }
-    }).wait();
+    rt::render_main(q, w, h, p, (float*)accum, si,
+                    g_d_spheres, g_num_spheres,
+                    [](const rt::Sphere& sp, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
+                        return rt::hit_sphere(sp, rr, mn, mx, rec);
+                    },
+                    [bg](const rt::Ray& ray) -> rt::float3 {
+                        float t = 0.5f * (ray.dir.y + 1.f);
+                        return rt::lerp({1,1,1}, bg, t);
+                    });
 }
 
 extern "C" void shutdown_kernel(sycl::queue* q) {
