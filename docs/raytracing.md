@@ -153,16 +153,21 @@ ignores everything beyond.  Kernel-specific params use a plain anonymous
 
 ## Scene building helpers
 
-`rt/scene.h` provides `add()` which appends a single `Object` (hittable + material)
-to a plain array.  The hittable factories live in their respective headers:
+`rt/scene.h` provides `add(objects, count, object)` which appends a single
+`Object` (hittable + material) to a plain array.  The hittable factories live
+in their respective headers — there are **no** `add_quad`/`add_box` helpers:
 
 ```cpp
 add(objects, count, {hittables::quad(axis, value, …), material});   // one face
 add(objects, count, {hittables::box(cx, cy, cz, sx, sy, sz), material});  // box
 ```
 
-Axis-aligned `quad()` takes the primary axis as a bare int (`0` = X, `1` = Y,
-`2` = Z).  `quad_corner()` is still available for low-level corner computation.
+`quad()` takes the primary axis as a bare int (`0` = X, `1` = Y, `2` = Z),
+not the `Axis` enum.  `quad_corner()` is still available for low-level
+corner computation.
+
+`Box` is a first-class hittable — it is implemented as six `Quad` faces
+internally but hits as a single `Object`.
 
 ## File structure
 
