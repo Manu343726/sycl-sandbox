@@ -6,9 +6,6 @@
 /// Spherical geometry primitive.
 ///
 /// Factory:  rt::hittables::sphere(center, radius) -> Sphere
-///
-/// Example:
-///   Object obj = {sphere({0,0,0}, 1.0f), lambertian({0.8f,0.2f,0.2f})};
 namespace rt::hittables {
 
 class Sphere {
@@ -17,24 +14,33 @@ public:
     float  radius; ///< Sphere radius.
 
     Sphere() = default;
-    Sphere(float3 c, float r) : center(c), radius(r) {}
+    Sphere(float3 center_, float radius_) : center(center_), radius(radius_) {}
 
-    /// Ray-sphere intersection test.
+    /// Ray-sphere intersection using the quadratic formula.
+    ///
+    /// Solves ‖ray.origin + t·ray.direction − sphere.center‖² = sphere.radius²
+    /// for t.  This expands to a·t² + b·t + c = 0 where:
+    ///   a = ‖dir‖²,  b = 2·dot(oc, dir),  c = ‖oc‖² − r²
+    /// The conventional factor of 2 in b is omitted and compensated by
+    /// dividing by a instead of 2a in the quadratic formula.
+    ///
     /// @returns HitRecord if the ray hits the sphere within [t_min, t_max].
-    std::optional<HitRecord> hit(const Ray& r, float t_min, float t_max) const {
-        float3 oc = sub(r.orig, center);
-        float a = dot(r.dir, r.dir);
-        float b = dot(oc, r.dir);
+    std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+        float3 oc = sub(ray.orig, center);
+        float a = dot(ray.dir, ray.dir);
+        float half_b = dot(oc, ray.dir);
         float c_ = dot(oc, oc) - radius * radius;
-        float d = b*b - a*c_;
-        if (d <= 0) return std::nullopt;
-        float t = (-b - sycl::sqrt(d)) / a;
-        if (t < t_min || t > t_max) t = (-b + sycl::sqrt(d)) / a;
+        float discriminant = half_b*half_b - a*c_;
+        if (discriminant <= 0) return std::nullopt;
+        float sqrt_d = sycl::sqrt(discriminant);
+        float t = (-half_b - sqrt_d) / a;
+        if (t < t_min || t > t_max) t = (-half_b + sqrt_d) / a;
         if (t < t_min || t > t_max) return std::nullopt;
         HitRecord rec;
-        rec.t = t; rec.p = add(r.orig, scale(r.dir, t));
+        rec.t = t;
+        rec.p = add(ray.orig, scale(ray.dir, t));
         rec.normal = scale(sub(rec.p, center), 1.f / radius);
-        rec.front_face = dot(r.dir, rec.normal) < 0;
+        rec.front_face = dot(ray.dir, rec.normal) < 0;
         if (!rec.front_face) rec.normal = scale(rec.normal, -1);
         return rec;
     }

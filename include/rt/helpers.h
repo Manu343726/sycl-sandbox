@@ -8,32 +8,36 @@ namespace rt {
 ///
 /// Uses rejection sampling: generate points in the bounding cube (-1..1)³
 /// and keep those with length² < 1.  Expected ~52% acceptance rate.
-inline float3 random_in_unit_sphere(RNG& r) {
+inline float3 random_in_unit_sphere(RNG& rng) {
     for (int i = 0; i < 100; i++) {
-        float3 p = {2*r.next()-1, 2*r.next()-1, 2*r.next()-1};
-        if (len2(p) < 1) return p;
+        float3 candidate = {2*rng.next()-1, 2*rng.next()-1, 2*rng.next()-1};
+        if (len2(candidate) < 1) return candidate;
     }
     return {0,0,1};
 }
 
-/// Reflect vector `v` about the surface normal `n`.
+/// Reflect vector `incident` about the surface normal `normal`.
 ///
-/// Uses the formula:  reflected = v - 2*(v·n)*n
+/// Formula:  reflected = incident − 2·(incident·normal)·normal
 /// This is the standard reflection from a perfectly smooth surface.
-inline float3 reflect(float3 v, float3 n) { return sub(v, scale(n, 2*dot(v,n))); }
+inline float3 reflect(float3 incident, float3 normal) {
+    return sub(incident, scale(normal, 2*dot(incident, normal)));
+}
 
-/// Refract vector `v` across the interface with normal `n` and relative
-/// index of refraction `eta` (η = n_outgoing / n_incident).
+/// Refract vector `incident` across the interface with normal `surface_normal`
+/// and relative index of refraction `eta` (η = n_outgoing / n_incident).
 ///
 /// Uses Snell's law:  η·sin(θ₁) = sin(θ₂)
 /// Returns false if total internal reflection occurs (cos(θ₂)² < 0).
-/// The output `out` is only valid when true is returned.
-inline bool refract(float3 v, float3 n, float eta, float3& out) {
-    float3 uv = norm(v);
-    float dt = dot(uv, n);
-    float discriminant = 1 - eta*eta*(1 - dt*dt);
+/// The output `out_direction` is only valid when true is returned.
+inline bool refract(float3 incident, float3 surface_normal, float eta,
+                     float3& out_direction) {
+    float3 unit_incident = norm(incident);
+    float cos_theta_i = dot(unit_incident, surface_normal);
+    float discriminant = 1 - eta*eta*(1 - cos_theta_i*cos_theta_i);
     if (discriminant <= 0) return false;  // total internal reflection
-    out = sub(scale(sub(uv, scale(n, dt)), eta), scale(n, sycl::sqrt(discriminant)));
+    out_direction = sub(scale(sub(unit_incident, scale(surface_normal, cos_theta_i)), eta),
+                        scale(surface_normal, sycl::sqrt(discriminant)));
     return true;
 }
 
@@ -43,12 +47,13 @@ inline bool refract(float3 v, float3 n, float eta, float3& out) {
 /// as a function of the cosine of the incident angle and the refractive
 /// index ratio.  Much cheaper than computing the full Fresnel equations.
 ///
-/// @param c   Cosine of the angle between the incident direction and the normal.
-/// @param ir  Relative index of refraction (η₂ / η₁).
-inline float schlick(float c, float ir) {
-    float r0 = (1-ir)/(1+ir);
+/// @param cosine    Cosine of the angle between the incident direction and
+///                  the surface normal.
+/// @param refractive_index  Relative index of refraction (η₂ / η₁).
+inline float schlick(float cosine, float refractive_index) {
+    float r0 = (1-refractive_index)/(1+refractive_index);
     r0 *= r0;
-    return r0 + (1-r0)*sycl::pow(1-c, 5);
+    return r0 + (1-r0)*sycl::pow(1-cosine, 5);
 }
 
 } // namespace rt

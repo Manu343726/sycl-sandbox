@@ -4,19 +4,28 @@
 #include "../helpers.h"
 #include <optional>
 
+/// Metallic (reflective) material: reflects incoming rays with a fuzzy
+/// perturbation controlled by `fuzz`.  fuzz=0 gives a perfect mirror.
+///
+/// Factory:  rt::materials::metal(albedo, fuzz) -> Metal
 namespace rt::materials {
 
 class Metal {
 public:
-    float3 albedo;
-    float  fuzz;
-    Metal() = default;
-    Metal(float3 a, float f) : albedo(a), fuzz(f) {}
+    float3 albedo; ///< Surface colour.
+    float  fuzz;   ///< Roughness: 0 = perfect mirror, 1 = very rough.
 
-    std::optional<ScatterRecord> scatter(const Ray& in, const HitRecord& rec, RNG& rng) const {
-        float3 reflected = reflect(norm(in.dir), rec.normal);
-        Ray scattered{rec.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
-        if (dot(scattered.dir, rec.normal) <= 0) return std::nullopt;
+    Metal() = default;
+    Metal(float3 albedo_, float fuzz_amount) : albedo(albedo_), fuzz(fuzz_amount) {}
+
+    /// Reflects the incoming ray about the surface normal, adding a random
+    /// perturbation scaled by `fuzz`.  Returns std::nullopt if the scattered
+    /// ray points into the surface (absorption).
+    std::optional<ScatterRecord> scatter(const Ray& incoming_ray, const HitRecord& hit,
+                                          RNG& rng) const {
+        float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
+        Ray scattered{hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
+        if (dot(scattered.dir, hit.normal) <= 0) return std::nullopt;
         return ScatterRecord{albedo, scattered};
     }
 

@@ -46,7 +46,12 @@ static void glfw_error_cb(int error, const char* desc) {
     spdlog::error("GLFW {}: {}", error, desc);
 }
 
-// ── orbit camera (for 3D scenes like one_weekend) ──────────────────────
+// ── orbit camera (for 3D scenes) ──────────────────────────────────────
+// Spherical coordinate convention:
+//   theta = azimuth (horizontal angle around the Y axis)
+//   phi   = elevation (vertical angle from the XZ plane)
+//   dist  = distance from the camera to the look-at target
+//   roll  = rotation of the up vector around the forward (lookat) axis
 struct OrbitCam {
     float theta     = 1.35f;
     float phi       = 1.05f;
@@ -55,28 +60,39 @@ struct OrbitCam {
     float target[3] = { 0.f, 0.f, 0.f };
 };
 
-static void orbit_to_eye(const OrbitCam& o, float eye[3]) {
-    float ct = cosf(o.theta), st = sinf(o.theta);
-    float cp = cosf(o.phi),   sp = sinf(o.phi);
-    eye[0] = o.target[0] + o.dist * cp * st;
-    eye[1] = o.target[1] + o.dist * sp;
-    eye[2] = o.target[2] + o.dist * cp * ct;
+/// Convert spherical orbit coordinates to a Cartesian eye position.
+///
+///   eye = target + dist · (cos(phi)·sin(theta),  sin(phi),  cos(phi)·cos(theta))
+///
+/// This places the camera on a sphere of radius `dist` centred on the target,
+/// with `theta` as azimuth and `phi` as elevation.
+static void orbit_to_eye(const OrbitCam& orbit, float eye[3]) {
+    float cos_theta = cosf(orbit.theta), sin_theta = sinf(orbit.theta);
+    float cos_phi   = cosf(orbit.phi),   sin_phi   = sinf(orbit.phi);
+    eye[0] = orbit.target[0] + orbit.dist * cos_phi * sin_theta;
+    eye[1] = orbit.target[1] + orbit.dist * sin_phi;
+    eye[2] = orbit.target[2] + orbit.dist * cos_phi * cos_theta;
 }
 
-// Build up vector from theta/phi/roll (rotate default up around forward axis)
-static void orbit_up(const OrbitCam& o, float up[3]) {
-    float ct = cosf(o.theta), st = sinf(o.theta);
-    float cp = cosf(o.phi),   sp = sinf(o.phi);
-    // forward = lookat direction (from eye to target)
-    float fwd[3] = { -cp * st, -sp, -cp * ct };
-    // default up
-    float ux = 0.f, uy = 1.f, uz = 0.f;
-    // rotate up around forward by roll
-    float c = cosf(o.roll), s = sinf(o.roll);
-    float dot = fwd[0]*ux + fwd[1]*uy + fwd[2]*uz;
-    up[0] = ux*c + (fwd[1]*uz - fwd[2]*uy)*s + fwd[0]*dot*(1-c);
-    up[1] = uy*c + (fwd[2]*ux - fwd[0]*uz)*s + fwd[1]*dot*(1-c);
-    up[2] = uz*c + (fwd[0]*uy - fwd[1]*ux)*s + fwd[2]*dot*(1-c);
+/// Rotate the default up vector {0,1,0} around the forward (lookat) axis
+/// by the camera's roll angle, using Rodrigues' rotation formula.
+///
+///   up_rotated = up · cos(roll) + (forward × up) · sin(roll)
+///                + forward · (forward · up) · (1 − cos(roll))
+///
+/// The forward direction points from the camera toward the target
+/// (in the orbit frame: forward = -lookat_direction_in_camera_frame).
+static void orbit_up(const OrbitCam& orbit, float up[3]) {
+    float cos_theta = cosf(orbit.theta), sin_theta = sinf(orbit.theta);
+    float cos_phi   = cosf(orbit.phi),   sin_phi   = sinf(orbit.phi);
+    float forward[3] = { -cos_phi * sin_theta, -sin_phi, -cos_phi * cos_theta };
+    float default_up[3] = { 0.f, 1.f, 0.f };
+    float cos_roll = cosf(orbit.roll), sin_roll = sinf(orbit.roll);
+    float dot_product = forward[0]*default_up[0] + forward[1]*default_up[1] + forward[2]*default_up[2];
+    // Rodrigues' rotation:  up_rotated = up * cos(r) + (forward × up) * sin(r) + forward * (forward·up) * (1-cos(r))
+    up[0] = default_up[0]*cos_roll + (forward[1]*default_up[2] - forward[2]*default_up[1])*sin_roll + forward[0]*dot_product*(1-cos_roll);
+    up[1] = default_up[1]*cos_roll + (forward[2]*default_up[0] - forward[0]*default_up[2])*sin_roll + forward[1]*dot_product*(1-cos_roll);
+    up[2] = default_up[2]*cos_roll + (forward[0]*default_up[1] - forward[1]*default_up[0])*sin_roll + forward[2]*dot_product*(1-cos_roll);
 }
 
 // ── OpenGL texture helpers ─────────────────────────────────────────────
@@ -337,33 +353,32 @@ int main(int argc, char** argv) {
         // ── camera info & controls ──────────────────────────────────
         bool has_std_params = active_kernel && h_params &&
             active_kernel->desc.params_buffer_size >= RT_NUM_STD_PARAMS * sizeof(float);
-        float* ce  = has_std_params ? h_params + RT_CAM_EYE     : nullptr;
-        float* ca  = has_std_params ? h_params + RT_CAM_AT      : nullptr;
-        float* cf  = has_std_params ? h_params + RT_CAM_FOV     : nullptr;
-        float* cap = has_std_params ? h_params + RT_CAM_APERTURE: nullptr;
-        float* cup = has_std_params ? h_params + RT_CAM_UP      : nullptr;
+        float* camera_eye_ptr  = has_std_params ? h_params + RT_CAM_EYE     : nullptr;
+        float* camera_at_ptr   = has_std_params ? h_params + RT_CAM_AT      : nullptr;
+        float* fov_ptr         = has_std_params ? h_params + RT_CAM_FOV     : nullptr;
+        float* aperture_ptr    = has_std_params ? h_params + RT_CAM_APERTURE: nullptr;
+        float* camera_up_ptr   = has_std_params ? h_params + RT_CAM_UP      : nullptr;
         bool   has_2d = false;
 
         if (active_kernel && h_params) {
             ImGui::SeparatorText("Camera");
-            float* cx = find_param(h_params, active_kernel->desc, "center_x");
-            float* cy = find_param(h_params, active_kernel->desc, "center_y");
-            float* zm = find_param(h_params, active_kernel->desc, "zoom");
+            float* center_x_ptr = find_param(h_params, active_kernel->desc, "center_x");
+            float* center_y_ptr = find_param(h_params, active_kernel->desc, "center_y");
+            float* zoom_ptr     = find_param(h_params, active_kernel->desc, "zoom");
 
-            if (cx && cy && zm) {
+            if (center_x_ptr && center_y_ptr && zoom_ptr) {
                 has_2d = true;
                 ImGui::Text("LMB drag = pan  |  scroll = zoom  |  arrows = pan");
-                ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f", *cx, *cy, *zm);
-            } else if (ce && ca && cf) {
+                ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f", *center_x_ptr, *center_y_ptr, *zoom_ptr);
+            } else if (camera_eye_ptr && camera_at_ptr && fov_ptr) {
                 ImGui::Text("LMB drag = orbit  |  scroll = zoom");
                 ImGui::Text("Ctrl+scroll = aperture  |  Ctrl+Shift+scroll = FOV");
                 ImGui::Text("Ctrl+Alt+scroll = roll  |  WASD = move camera");
                 ImGui::Text("Arrows = orbit  |  Shift+arrows = pan target");
                 ImGui::Text("Q/E = up/down");
-                ImGui::Text("Eye: (%.2f, %.2f, %.2f)", ce[0], ce[1], ce[2]);
-                ImGui::Text("FOV: %.1f\u00b0", *cf);
-                float* cap = h_params + RT_CAM_APERTURE;
-                ImGui::Text("Aperture: %.3f", *cap);
+                ImGui::Text("Eye: (%.2f, %.2f, %.2f)", camera_eye_ptr[0], camera_eye_ptr[1], camera_eye_ptr[2]);
+                ImGui::Text("FOV: %.1f\u00b0", *fov_ptr);
+                ImGui::Text("Aperture: %.3f", *aperture_ptr);
             }
         }
 
@@ -371,39 +386,39 @@ int main(int argc, char** argv) {
 
         // ---- camera controls (2D pan / 3D orbit) ----
         if (active_kernel && h_params) {
-            float* cx2 = has_2d ? find_param(h_params, active_kernel->desc, "center_x") : nullptr;
-            float* cy2 = has_2d ? find_param(h_params, active_kernel->desc, "center_y") : nullptr;
-            float* zm2 = has_2d ? find_param(h_params, active_kernel->desc, "zoom")     : nullptr;
+            float* center_x_ptr_ctrl = has_2d ? find_param(h_params, active_kernel->desc, "center_x") : nullptr;
+            float* center_y_ptr_ctrl = has_2d ? find_param(h_params, active_kernel->desc, "center_y") : nullptr;
+            float* zoom_ptr_ctrl     = has_2d ? find_param(h_params, active_kernel->desc, "zoom")     : nullptr;
 
             bool changed = false;
 
             // ── 2D camera (center + zoom) ──────────────────────────
-            if (cx2 && cy2 && zm2) {
+            if (center_x_ptr_ctrl && center_y_ptr_ctrl && zoom_ptr_ctrl) {
                 if (!io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                    auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                    *cx2 -= d.x / WIDTH * *zm2 * ((float)WIDTH / HEIGHT);
-                    *cy2 += d.y / HEIGHT * *zm2;
+                    auto delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                    *center_x_ptr_ctrl -= delta.x / WIDTH * *zoom_ptr_ctrl * ((float)WIDTH / HEIGHT);
+                    *center_y_ptr_ctrl += delta.y / HEIGHT * *zoom_ptr_ctrl;
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     changed = true;
                 }
                 if (!io.WantCaptureMouse && io.MouseWheel != 0.f) {
-                    *zm2 *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
-                    *zm2 = (*zm2 < 0.001f) ? 0.001f : (*zm2 > 1000.f ? 1000.f : *zm2);
+                    *zoom_ptr_ctrl *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
+                    *zoom_ptr_ctrl = (*zoom_ptr_ctrl < 0.001f) ? 0.001f : (*zoom_ptr_ctrl > 1000.f ? 1000.f : *zoom_ptr_ctrl);
                     changed = true;
                 }
             }
 
             // ── 3D orbit camera ────────────────────────────────────
-            if (ce && ca && cf) {
+            if (camera_eye_ptr && camera_at_ptr && fov_ptr) {
 
                 static OrbitCam orbit;
                 static bool     orbit_init = false;
                 if (!orbit_init) {
-                    float dx = ce[0] - ca[0], dy = ce[1] - ca[1], dz = ce[2] - ca[2];
+                    float dx = camera_eye_ptr[0] - camera_at_ptr[0], dy = camera_eye_ptr[1] - camera_at_ptr[1], dz = camera_eye_ptr[2] - camera_at_ptr[2];
                     orbit.dist = sqrtf(dx*dx + dy*dy + dz*dz);
                     orbit.theta = atan2f(dx, dz);
                     orbit.phi   = asinf(dy / orbit.dist);
-                    orbit.target[0] = ca[0]; orbit.target[1] = ca[1]; orbit.target[2] = ca[2];
+                    orbit.target[0] = camera_at_ptr[0]; orbit.target[1] = camera_at_ptr[1]; orbit.target[2] = camera_at_ptr[2];
                     orbit.theta  = std::fmod(orbit.theta, 2.f * 3.14159265f);
                     orbit.phi    = std::max(-1.5f, std::min(1.5f, orbit.phi));
                     orbit_init = true;
@@ -418,24 +433,24 @@ int main(int argc, char** argv) {
                     changed = true;
                 }
 
-                float mw = io.MouseWheel;
-                if (!io.WantCaptureMouse && mw != 0.f) {
+                float mouse_wheel = io.MouseWheel;
+                if (!io.WantCaptureMouse && mouse_wheel != 0.f) {
                     bool ctrl  = io.KeyCtrl;
                     bool shift = io.KeyShift;
                     bool alt   = io.KeyAlt;
                     if (ctrl && alt) {
-                        orbit.roll += mw * 0.05f;
+                        orbit.roll += mouse_wheel * 0.05f;
                         changed = true;
-                    } else if (ctrl && shift && cf) {
-                        *cf += mw * 2.f;
-                        *cf = std::max(1.f, std::min(120.f, *cf));
+                    } else if (ctrl && shift && fov_ptr) {
+                        *fov_ptr += mouse_wheel * 2.f;
+                        *fov_ptr = std::max(1.f, std::min(120.f, *fov_ptr));
                         changed = true;
-                    } else if (ctrl && cap) {
-                        *cap += mw * 0.02f;
-                        *cap = std::max(0.f, std::min(1.f, *cap));
+                    } else if (ctrl && aperture_ptr) {
+                        *aperture_ptr += mouse_wheel * 0.02f;
+                        *aperture_ptr = std::max(0.f, std::min(1.f, *aperture_ptr));
                         changed = true;
                     } else {
-                        orbit.dist *= (mw > 0.f) ? 0.9f : 1.1f;
+                        orbit.dist *= (mouse_wheel > 0.f) ? 0.9f : 1.1f;
                         orbit.dist  = std::max(1.f, std::min(100.f, orbit.dist));
                         changed = true;
                     }
@@ -496,9 +511,9 @@ int main(int argc, char** argv) {
                     float eye[3], up[3];
                     orbit_to_eye(orbit, eye);
                     orbit_up(orbit, up);
-                    ce[0] = eye[0]; ce[1] = eye[1]; ce[2] = eye[2];
-                    ca[0] = orbit.target[0]; ca[1] = orbit.target[1]; ca[2] = orbit.target[2];
-                    if (cup) { cup[0] = up[0]; cup[1] = up[1]; cup[2] = up[2]; }
+                    camera_eye_ptr[0] = eye[0]; camera_eye_ptr[1] = eye[1]; camera_eye_ptr[2] = eye[2];
+                    camera_at_ptr[0] = orbit.target[0]; camera_at_ptr[1] = orbit.target[1]; camera_at_ptr[2] = orbit.target[2];
+                    if (camera_up_ptr) { camera_up_ptr[0] = up[0]; camera_up_ptr[1] = up[1]; camera_up_ptr[2] = up[2]; }
                 }
             }
 
@@ -544,18 +559,21 @@ int main(int argc, char** argv) {
             float inv_spp = 1.f / std::max(current_spp, 1);
             for (size_t i = 0; i < pixel_count; i++) {
                 size_t src = i * 4, dst = i * 4;
-                float r = h_accum[src + 0] * inv_spp;
-                float g = h_accum[src + 1] * inv_spp;
-                float b = h_accum[src + 2] * inv_spp;
-                r = r / (1.f + r);
-                g = g / (1.f + g);
-                b = b / (1.f + b);
-                r = powf(r, 1.f / 2.2f);
-                g = powf(g, 1.f / 2.2f);
-                b = powf(b, 1.f / 2.2f);
-                display[dst + 0] = (uint8_t)(r * 255.f);
-                display[dst + 1] = (uint8_t)(g * 255.f);
-                display[dst + 2] = (uint8_t)(b * 255.f);
+                // Divide accumulated colour by the number of samples (average)
+                float red   = h_accum[src + 0] * inv_spp;
+                float green = h_accum[src + 1] * inv_spp;
+                float blue  = h_accum[src + 2] * inv_spp;
+                // Reinhard tone mapping:  maps [0, ∞) to [0, 1)
+                red   = red   / (1.f + red);
+                green = green / (1.f + green);
+                blue  = blue  / (1.f + blue);
+                // Gamma correction for sRGB output (gamma ≈ 2.2)
+                red   = powf(red,   1.f / 2.2f);
+                green = powf(green, 1.f / 2.2f);
+                blue  = powf(blue,  1.f / 2.2f);
+                display[dst + 0] = (uint8_t)(red * 255.f);
+                display[dst + 1] = (uint8_t)(green * 255.f);
+                display[dst + 2] = (uint8_t)(blue * 255.f);
                 display[dst + 3] = 255;
             }
 

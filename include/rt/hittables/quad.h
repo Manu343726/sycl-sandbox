@@ -5,13 +5,12 @@
 
 /// Quadrilateral / parallelogram geometry primitive.
 ///
-/// Defined by three points Q, U, V where the four corners are
-/// Q, Q+U, Q+V, Q+U+V  (a parallelogram).
+/// Defined by a base corner Q and two edge vectors U, V.
+/// The four vertices are Q, Q+U, Q+V, and Q+U+V.
 ///
-/// Factory:  rt::hittables::quad(q, u, v) -> Quad
-///
-/// You can also use the alternative form with three corner points:
-///   quad(a, b, c) where b = a+U, c = a+V.
+/// Factories:
+///   rt::hittables::quad(q, u, v)              — from base + edge vectors
+///   rt::hittables::quad_from_corners(a, b, c)  — from three corner points
 ///
 /// Example:
 ///   Object face = {quad({0,0,0}, {2,0,0}, {0,3,0}), material};
@@ -19,43 +18,49 @@ namespace rt::hittables {
 
 class Quad {
 public:
-    float3 q;       ///< Base corner.
-    float3 u, v;    ///< Edge vectors from Q.
-    float3 normal;  ///< Unit surface normal (pre-computed).
+    float3 base;      ///< Base corner Q.
+    float3 edge_u;    ///< First edge vector U (from Q to the next vertex).
+    float3 edge_v;    ///< Second edge vector V (from Q to the third vertex).
+    float3 normal;    ///< Unit surface normal (pre-computed from cross(U, V)).
 
     Quad() = default;
 
     /// Construct from base corner Q and two edge vectors U, V.
-    Quad(float3 q_, float3 u_, float3 v_)
-        : q(q_), u(u_), v(v_) {
-        normal = norm(cross(u, v));
+    Quad(float3 base_, float3 edge_u_, float3 edge_v_)
+        : base(base_), edge_u(edge_u_), edge_v(edge_v_) {
+        normal = norm(cross(edge_u, edge_v));
     }
 
-    /// Construct from three corner points: a, b, c.
-    /// b = a + U,  c = a + V  ⇒  U = b - a,  V = c - a.
+    /// Construct from three corner points: a, b, c where b = a+U and c = a+V.
     static Quad from_corners(float3 a, float3 b, float3 c) {
         return Quad(a, sub(b, a), sub(c, a));
     }
 
-    /// Ray-quad intersection.  Returns HitRecord on hit.
-    std::optional<HitRecord> hit(const Ray& r, float t_min, float t_max) const {
-        float denom = dot(normal, r.dir);
+    /// Ray-quad intersection.
+    ///
+    /// Solves for the hit point on the plane, then checks if it lies within
+    /// the parallelogram:  hit_point = Q + α·U + β·V  with α,β ∈ [0,1].
+    /// The 2x2 linear system is solved via Cramer's rule.
+    std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+        float denom = dot(normal, ray.dir);
         if (sycl::fabs(denom) < 1e-8f) return std::nullopt;
-        float t = dot(sub(q, r.orig), normal) / denom;
+        float t = dot(sub(base, ray.orig), normal) / denom;
         if (t < t_min || t > t_max) return std::nullopt;
-        float3 p = add(r.orig, scale(r.dir, t));
-        float3 pa = sub(p, q);
-        // Solve pa = α*u + β*v
-        float d00 = dot(u, u), d01 = dot(u, v), d11 = dot(v, v);
-        float d20 = dot(pa, u), d21 = dot(pa, v);
-        float den = d00*d11 - d01*d01;
-        if (sycl::fabs(den) < 1e-12f) return std::nullopt;
-        float alpha = (d11*d20 - d01*d21) / den;
-        float beta  = (d00*d21 - d01*d20) / den;
-        if (alpha < 0 || alpha > 1 || beta < 0 || beta > 1)
-            return std::nullopt;
+        float3 hit_point = add(ray.orig, scale(ray.dir, t));
+        float3 pa = sub(hit_point, base);
+
+        // Solve pa = α·edge_u + β·edge_v  using Cramer's rule:
+        //   [edge_u·edge_u  edge_u·edge_v] [α] = [pa·edge_u]
+        //   [edge_v·edge_u  edge_v·edge_v] [β]   [pa·edge_v]
+        float d00 = dot(edge_u, edge_u), d01 = dot(edge_u, edge_v);
+        float d11 = dot(edge_v, edge_v), d20 = dot(pa, edge_u), d21 = dot(pa, edge_v);
+        float denominator = d00*d11 - d01*d01;
+        if (sycl::fabs(denominator) < 1e-12f) return std::nullopt;
+        float alpha = (d11*d20 - d01*d21) / denominator;
+        float beta  = (d00*d21 - d01*d20) / denominator;
+        if (alpha < 0 || alpha > 1 || beta < 0 || beta > 1) return std::nullopt;
         HitRecord rec;
-        rec.t = t; rec.p = p;
+        rec.t = t; rec.p = hit_point;
         rec.normal = denom<0 ? normal : scale(normal, -1.f);
         rec.front_face = denom < 0;
         return rec;
@@ -63,8 +68,8 @@ public:
 };
 
 /// Creates a Quad from base corner Q and two edge vectors U, V.
-inline Quad quad(float3 q, float3 u, float3 v) {
-    return Quad(q, u, v);
+inline Quad quad(float3 base, float3 edge_u, float3 edge_v) {
+    return Quad(base, edge_u, edge_v);
 }
 
 /// Creates a Quad from three corner points (a, b, c).
