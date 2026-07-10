@@ -13,12 +13,11 @@
 namespace containers::raw {
 
 /// Untyped vector<Tag> — fixed-max-length buffer on LinearAllocator.
-///
-/// RAII: destructor frees the pool.  Move transfers ownership (source empties).
-/// Copy allocates a new pool and copies elements.
 template <alloc::Target Tag>
 class vector {
 public:
+    vector() = default;
+
     vector(size_t max_elements, size_t element_size, size_t alignment, sycl::queue &queue)
         : queue_(&queue), element_size_(element_size), alignment_(alignment), count_(0) {
         size_t total = max_elements * element_size + alignment;
@@ -27,7 +26,7 @@ public:
     }
 
     ~vector() {
-        allocator_.reset_and_free(*queue_);
+        if (queue_) allocator_.reset_and_free(*queue_);
     }
 
     vector(vector &&other) noexcept
@@ -67,19 +66,14 @@ public:
         }
     }
 
-
-
     template <bool HostV = (Tag == alloc::Target::Host)>
     void push_back(const void *element) {
-        if constexpr (HostV) {
-            auto buf = allocator_.allocate(element_size_, alignment_);
-            if (!buf.is_valid()) return;
-            alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
-            count_++;
-        } else {
-            static_assert(always_false<vector>::value,
-                          "push_back requires a host vector; build on host then transfer() to device");
-        }
+        static_assert(HostV,
+                      "push_back requires a host vector; build on host then transfer() to device");
+        auto buf = allocator_.allocate(element_size_, alignment_);
+        if (!buf.is_valid()) return;
+        alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
+        count_++;
     }
 
     alloc::raw::Buffer<Tag> data() const {
@@ -88,6 +82,9 @@ public:
         return view;
     }
 
+    alloc::raw::Buffer<Tag> raw_pool() const { return allocator_.pool(); }
+
+    void set_count(size_t n) { count_ = n; }
     size_t size()     const { return count_; }
     size_t max_size() const { return allocator_.pool().size / element_size_; }
 
@@ -95,8 +92,10 @@ public:
     vector<TargetTag> transfer() {
         size_t n = count_;
         vector<TargetTag> result(n, element_size_, alignment_, *queue_);
-        alloc::raw::transfer(data(), result.allocator_.pool(), *queue_);
-        result.count_ = n;
+        auto dst = result.raw_pool();
+        dst.size = n * element_size_;
+        alloc::raw::transfer(data(), dst, *queue_);
+        result.set_count(n);
         allocator_.reset_and_free(*queue_);
         count_ = 0;
         return result;
@@ -115,11 +114,11 @@ private:
 namespace containers {
 
 /// Typed vector<Tag, T> — type-safe wrapper around raw::vector.
-///
-/// RAII: destructor, move, copy all delegate to the raw vector.
 template <alloc::Target Tag, typename T>
 class vector {
 public:
+    vector() = default;
+
     vector(size_t max_elements, sycl::queue &queue)
         : impl_(max_elements, sizeof(T), alignof(T), queue) {
         static_assert(std::is_trivially_copyable_v<T>,
@@ -150,8 +149,10 @@ public:
         return result;
     }
 
-private:
+    /// Move from a raw vector (used by transfer).
     explicit vector(containers::raw::vector<Tag> &&impl) : impl_(std::move(impl)) {}
+
+private:
     containers::raw::vector<Tag> impl_;
 };
 

@@ -8,6 +8,8 @@
 #include <sycl-sandbox/rt/hittables/box.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/diffuse_light.h>
+#include <sycl-sandbox/containers/vector.h>
+
 #include <cstring>
 
 using namespace rt;
@@ -41,7 +43,8 @@ extern "C" KernelDesc *get_kernel_desc() {
     return &desc;
 }
 
-static DeviceBuffer<Object> g_scene;
+static containers::vector<alloc::Target::Host, Object> g_scene;
+static containers::vector<alloc::Target::Device, Object> g_device_scene;
 
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
@@ -50,7 +53,7 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     memcpy(&light_color, params + std_offset + PARAM_LIGHT_COLOR, 12);
     float light_strength = params[std_offset + PARAM_LIGHT_STRENGTH];
 
-    g_scene = DeviceBuffer<Object>(queue, 64);
+    g_scene = containers::vector<alloc::Target::Host, Object>(8, *queue);
 
     float3 white = {0.73f, 0.73f, 0.73f};
     float3 red = {0.65f, 0.05f, 0.05f};
@@ -72,7 +75,7 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     g_scene.push_back(
         {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f), lambertian({0.55f, 0.55f, 0.55f})});
 
-    g_scene.transfer_to_device();
+    g_device_scene = g_scene.template transfer<alloc::Target::Device>();
 }
 
 extern "C" void render_kernel(sycl::queue *queue,
@@ -82,19 +85,21 @@ extern "C" void render_kernel(sycl::queue *queue,
                               void *accum_buffer,
                               int sample_index) {
     const float *params = (const float *)params_buffer;
+    auto buf = g_device_scene.data();
     render_main(queue,
                 width,
                 height,
                 params,
                 (float *)accum_buffer,
                 sample_index,
-                g_scene.device_ptr(),
-                g_scene.size(),
+                buf.data,
+                static_cast<int>(buf.count),
                 [](const Ray &) -> float3 {
                     return {0, 0, 0};
                 });
 }
 
 extern "C" void shutdown_kernel(sycl::queue *queue) {
-    g_scene = DeviceBuffer<Object>();
+    g_scene = containers::vector<alloc::Target::Host, Object>(0, *queue);
+    g_device_scene = containers::vector<alloc::Target::Device, Object>(0, *queue);
 }
