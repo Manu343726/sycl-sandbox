@@ -16,7 +16,7 @@ template <AllocatorTag Tag>
 class vector {
 public:
     vector(size_t max_elements, size_t element_size, size_t alignment, sycl::queue &queue)
-        : element_size_(element_size), count_(0) {
+        : element_size_(element_size), alignment_(alignment), count_(0) {
         size_t total = max_elements * element_size + alignment;
         auto pool = RootAllocator<Tag>().allocate(total, queue);
         allocator_ = LinearAllocator<Tag>(pool);
@@ -29,7 +29,7 @@ public:
     vector &operator=(const vector &) = delete;
 
     void push_back(const void *element) {
-        auto buf = allocator_.allocate(element_size_);
+        auto buf = allocator_.allocate(element_size_, alignment_);
         if (!buf.is_valid()) return;
         std::memcpy(buf.data, element, element_size_);
         count_++;
@@ -47,8 +47,7 @@ public:
     template <AllocatorTag TargetTag>
     vector<TargetTag> transfer(sycl::queue &queue) {
         size_t n = count_;
-        size_t elem_sz = element_size_;
-        vector<TargetTag> result(n, elem_sz, elem_sz, queue);
+        vector<TargetTag> result(n, element_size_, alignment_, queue);
         ::transfer(data(), result.allocator_.pool(), queue);
         result.count_ = n;
         allocator_.reset_and_free(queue);
@@ -64,6 +63,7 @@ public:
 private:
     LinearAllocator<Tag> allocator_;
     size_t element_size_;
+    size_t alignment_;
     size_t count_;
 };
 

@@ -25,14 +25,16 @@ public:
     StackAllocator(StackAllocator &&) = default;
     StackAllocator &operator=(StackAllocator &&) = default;
 
-    Buffer<Tag_> allocate(size_t bytes) {
-        if (marker_ + bytes > pool_.size) {
+    Buffer<Tag_> allocate(size_t bytes, size_t alignment = 1) {
+        uintptr_t aligned = (reinterpret_cast<uintptr_t>(cursor_) + alignment - 1)
+                          & ~(alignment - 1);
+        size_t padded_mark = aligned - reinterpret_cast<uintptr_t>(pool_.data);
+        if (padded_mark + bytes > pool_.size) {
             return {};
         }
-        void *p = cursor_;
-        cursor_  += bytes;
-        marker_  += bytes;
-        return {p, bytes};
+        cursor_ = reinterpret_cast<char *>(aligned) + bytes;
+        marker_ = padded_mark + bytes;
+        return {reinterpret_cast<void *>(aligned), bytes};
     }
 
     /// Snapshot the current position.

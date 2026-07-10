@@ -40,14 +40,17 @@ public:
         // deallocating the pool (typically via reset_and_free).
     }
 
-    Buffer<Tag_> allocate(size_t bytes) {
-        if (offset_ + bytes > pool_.size) {
+    Buffer<Tag_> allocate(size_t bytes, size_t alignment = 1) {
+        // Align cursor to requested alignment
+        uintptr_t aligned = (reinterpret_cast<uintptr_t>(cursor_) + alignment - 1)
+                          & ~(alignment - 1);
+        size_t padded_offset = aligned - reinterpret_cast<uintptr_t>(pool_.data);
+        if (padded_offset + bytes > pool_.size) {
             return {};   // OOM
         }
-        void *p = cursor_;
-        cursor_       += bytes;
-        offset_       += bytes;
-        return {p, bytes};
+        cursor_ = reinterpret_cast<char *>(aligned) + bytes;
+        offset_ = padded_offset + bytes;
+        return {reinterpret_cast<void *>(aligned), bytes};
     }
 
     /// Reset cursor without freeing the pool.
