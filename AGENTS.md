@@ -3,9 +3,10 @@
 Before making changes, read the following files in order:
 
 1. **README.md** — project overview, build instructions, and usage.
-2. **docs/architecture.md** — how the raytracing system works (variant-based
-   polymorphism, std::optional pattern, standard param layout, file structure).
-3. **docs/coding-guidelines.md** — naming, enum rules, function signatures,
+2. **docs/architecture.md** — host architecture, kernel loading, build system.
+3. **docs/raytracing.md** — raytracing library: variant OOP, std::optional,
+   standard params, kernel API, scene helpers.
+4. **docs/coding-guidelines.md** — naming, enum rules, function signatures,
    documentation style, namespace conventions.
 
 ## Key rules to follow
