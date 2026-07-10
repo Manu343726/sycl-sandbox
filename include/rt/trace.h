@@ -3,35 +3,22 @@
 #include "camera.h"
 #include "params.h"
 #include "variant.h"
+#include <optional>
 
-/// Top-level raytracing pipeline: Object dispatch, path tracing, and the
-/// generic render_main() entry point called by every raytracer kernel.
-///
-/// Typical usage in a kernel's render_kernel():
-///
-///   render_main(queue, width, height, params, accum, sample_index,
-///               g_scene_objects, g_num_objects,
-///               [](const Ray& ray) -> float3 {
-///                   return sky_gradient(ray);  // background on miss
-///               });
-///
 namespace rt {
 
 // ── Object dispatch via visit_rt ───────────────────────────────────────
 
-inline bool Object::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
-    bool found = false;
-    visit_rt(hittable, [&](const auto& h) { found = h.hit(r, t_min, t_max, rec); });
-    return found;
+inline std::optional<HitRecord> Object::hit(const Ray& r, float t_min, float t_max) const {
+    std::optional<HitRecord> result;
+    visit_rt(hittable, [&](const auto& h) { result = h.hit(r, t_min, t_max); });
+    return result;
 }
 
-inline bool Object::scatter(const Ray& in, const HitRecord& rec,
-                             float3& att, Ray& scattered, RNG& rng) const {
-    bool did_scatter = false;
-    visit_rt(material, [&](const auto& m) {
-        did_scatter = m.scatter(in, rec, att, scattered, rng);
-    });
-    return did_scatter;
+inline std::optional<ScatterRecord> Object::scatter(const Ray& in, const HitRecord& rec, RNG& rng) const {
+    std::optional<ScatterRecord> result;
+    visit_rt(material, [&](const auto& m) { result = m.scatter(in, rec, rng); });
+    return result;
 }
 
 inline float3 Object::emit(const HitRecord& rec) const {
@@ -42,68 +29,36 @@ inline float3 Object::emit(const HitRecord& rec) const {
 
 // ── Path tracing ───────────────────────────────────────────────────────
 
-/// Traces a single ray path through the scene, accumulating colour through
-/// bounces.  Returns the final radiance for this ray.
-///
-/// @param ray      Initial ray (from camera through a pixel).
-/// @param objects  Flat array of scene objects.
-/// @param count    Number of objects.
-/// @param bounces  Maximum number of ray bounces (path depth).
-/// @param rng      Per-pixel RNG state.
+/// Traces a single ray path through the scene, accumulating colour through bounces.
 inline float3 trace(const Ray& ray, const Object* objects, int count,
                     int bounces, RNG& rng) {
     float3 attenuation = {1,1,1};
     Ray r = ray;
     for (int b = 0; b < bounces; b++) {
-        HitRecord rec;
-        float closest = 1e30f;
-        int hit_index = -1;
-
-        for (int i = 0; i < count; i++) {
-            if (objects[i].hit(r, 0.001f, closest, rec)) {
-                closest = rec.t;
-                hit_index = i;
-            }
+        auto hit = objects[0].hit(r, 0.001f, 1e30f);
+        int hit_index = 0;
+        for (int i = 1; i < count; i++) {
+            auto candidate = objects[i].hit(r, 0.001f,
+                hit ? hit->t : 1e30f);
+            if (candidate) { hit = candidate; hit_index = i; }
         }
-        if (hit_index < 0) return {0,0,0};
+        if (!hit) return {0,0,0};
 
-        // Emissive surface → terminate and return emitted light
-        float3 emitted = objects[hit_index].emit(rec);
+        float3 emitted = objects[hit_index].emit(*hit);
         if (emitted.x != 0 || emitted.y != 0 || emitted.z != 0)
             return mul(attenuation, emitted);
 
-        // Scatter (reflection / refraction)
-        float3 albedo;
-        Ray scattered;
-        if (objects[hit_index].scatter(r, rec, albedo, scattered, rng)) {
-            attenuation = mul(attenuation, albedo);
-            r = scattered;
-        } else {
-            return {0,0,0};
-        }
+        auto scattered = objects[hit_index].scatter(r, *hit, rng);
+        if (!scattered) return {0,0,0};
+
+        attenuation = mul(attenuation, scattered->attenuation);
+        r = scattered->scattered;
     }
     return {0,0,0};
 }
 
 // ── Render entry point ─────────────────────────────────────────────────
 
-/// Generic render_kernel body used by all raytracer kernels.
-///
-/// Reads the standard camera/render parameters from the params buffer,
-/// sets up the camera frustum, and launches the SYCL parallel_for that
-/// traces rays for every pixel.
-///
-/// @tparam BgFn  Callable `float3(const Ray&)` returning the background
-///               colour when a ray misses all objects.
-///
-/// @param q       SYCL queue.
-/// @param w,h     Image dimensions.
-/// @param p       Flat float array of kernel parameters (layout per rt_std_param).
-/// @param accum   Accumulation buffer (float4 per pixel).
-/// @param si      Current sample index (used for RNG seeding).
-/// @param d_objs  Device-side array of scene Objects.
-/// @param count   Number of objects in the scene.
-/// @param bg_fn   Background function for miss rays.
 template <typename BgFn>
 void render_main(sycl::queue* q, int w, int h,
                  const float* p, float* accum, int si,
@@ -147,7 +102,6 @@ void render_main(sycl::queue* q, int w, int h,
 
             float3 colour = trace(ray, d_objs, count, max_bounces, rng);
 
-            // Background on complete miss
             if (colour.x == 0.f && colour.y == 0.f && colour.z == 0.f)
                 colour = bg_fn(ray);
 

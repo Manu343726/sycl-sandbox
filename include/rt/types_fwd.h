@@ -1,5 +1,6 @@
 #pragma once
 #include "math.h"
+#include <optional>
 
 /// Forward declarations used by individual hittable/material headers.
 namespace rt {
@@ -13,6 +14,12 @@ struct HitRecord {
     float3 normal;     ///< Surface normal at intersection (pointing outward).
     float  t;          ///< Distance along the ray where the hit occurred.
     bool   front_face; ///< True if the ray hit from outside the surface.
+};
+
+/// Record returned by Material::scatter() when scattering occurs.
+struct ScatterRecord {
+    float3 attenuation;  ///< Colour attenuation (albedo × path throughput).
+    Ray    scattered;    ///< New ray direction after scattering.
 };
 
 } // namespace rt
