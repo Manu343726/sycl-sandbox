@@ -2,22 +2,21 @@
 
 ## Naming
 
-### No prefixes — use namespaces
+### No prefixes (Hungarian notation)
 
 Never use `m_`, `g_`, `s_`, `k` prefixes for members, globals, statics,
-or constants.  Group related names in namespaces instead.
+or constants.  Use descriptive names without encoding scope in the name.
 
 ```cpp
 // Bad
-int g_num_objects;
+int g_object_count;
 float m_speed;
 static float s_cache;
 
 // Good
-namespace {
-    int num_objects;
-}
+int object_count;
 float speed;
+static float cache;
 ```
 
 ### No prefixes for function or type names — use namespaces
