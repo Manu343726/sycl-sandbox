@@ -76,8 +76,8 @@ namespace containers {
 template <alloc::Target Tag, typename T>
 class vector {
 public:
-    vector(size_t max_elements, sycl::queue &queue) : queue_(&queue)
-        , impl_(max_elements, sizeof(T), alignof(T), queue) {
+    vector(size_t max_elements, sycl::queue &queue)
+        : impl_(max_elements, sizeof(T), alignof(T), queue) {
     }
 
     void push_back(const T &element) {
@@ -102,7 +102,6 @@ public:
 
 private:
     explicit vector(containers::raw::vector<Tag> &&impl) : impl_(std::move(impl)) {}
-    sycl::queue                   *queue_;
     containers::raw::vector<Tag>   impl_;
 };
 
