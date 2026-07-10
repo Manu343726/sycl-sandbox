@@ -99,8 +99,8 @@ public:
             alloc::raw::DeviceAllocator().deallocate(device_, *queue_);
         }
         device_ = alloc::raw::DeviceAllocator().allocate(bytes, *queue_);
-        alloc::transfer(alloc::raw::Buffer<alloc::Target::Host> {host_.data, bytes},
-                        alloc::raw::Buffer<alloc::Target::Device> {device_.data, bytes},
+        alloc::raw::transfer(alloc::raw::Buffer<alloc::Target::Host> {host_.data, bytes},
+                              alloc::raw::Buffer<alloc::Target::Device> {device_.data, bytes},
                         *queue_);
     }
 

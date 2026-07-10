@@ -48,7 +48,7 @@ public:
     vector<TargetTag> transfer(sycl::queue &queue) {
         size_t n = count_;
         vector<TargetTag> result(n, element_size_, alignment_, queue);
-        alloc::transfer(data(), result.allocator_.pool(), queue);
+        alloc::raw::transfer(data(), result.allocator_.pool(), queue);
         result.count_ = n;
         allocator_.reset_and_free(queue);
         count_ = 0;
