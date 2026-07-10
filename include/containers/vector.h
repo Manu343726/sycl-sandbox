@@ -3,6 +3,8 @@
 #include <cstring>
 #include <type_traits>
 #include <sycl/sycl.hpp>
+
+template <typename> struct always_false : std::false_type {};
 #include <alloc/buffer.h>
 #include <alloc/tag.h>
 #include <alloc/linear_allocator.h>
@@ -69,15 +71,17 @@ public:
 
 
 
-    template <bool HostV = (Tag == alloc::Target::Host),
-              typename = std::enable_if_t<HostV>>
+    template <bool HostV = (Tag == alloc::Target::Host)>
     void push_back(const void *element) {
-        static_assert(HostV,
-                      "push_back requires a host vector; build on host then transfer() to device");
-        auto buf = allocator_.allocate(element_size_, alignment_);
-        if (!buf.is_valid()) return;
-        alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
-        count_++;
+        if constexpr (HostV) {
+            auto buf = allocator_.allocate(element_size_, alignment_);
+            if (!buf.is_valid()) return;
+            alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
+            count_++;
+        } else {
+            static_assert(always_false<vector>::value,
+                          "push_back requires a host vector; build on host then transfer() to device");
+        }
     }
 
     alloc::raw::Buffer<Tag> data() const {
@@ -130,12 +134,14 @@ public:
     vector(const vector &) = default;
     vector &operator=(const vector &) = default;
 
-    template <bool HostV = (Tag == alloc::Target::Host),
-              typename = std::enable_if_t<HostV>>
+    template <bool HostV = (Tag == alloc::Target::Host)>
     void push_back(const T &element) {
-        static_assert(HostV,
-                      "push_back requires a host vector; build on host then transfer() to device");
-        impl_.push_back(&element);
+        if constexpr (HostV) {
+            impl_.push_back(&element);
+        } else {
+            static_assert(always_false<vector>::value,
+                          "push_back requires a host vector; build on host then transfer() to device");
+        }
     }
 
     containers::Buffer<Tag, T> data() const {
