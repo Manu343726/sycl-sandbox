@@ -1,7 +1,6 @@
 #include "sandbox_api.h"
 #include "rt/math.h"
 #include "rt/types.h"
-#include "rt/camera.h"
 #include "rt/trace.h"
 #include "rt/params.h"
 #include "rt/scene.h"
@@ -45,7 +44,6 @@ extern "C" KernelDesc *get_kernel_desc() {
 static Object *g_scene_objects = nullptr;
 static int g_num_objects = 0;
 
-/// Build four corners of an axis-aligned rectangle and add it as a Quad.
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
     int std_offset = RT_NUM_STD_PARAMS;
