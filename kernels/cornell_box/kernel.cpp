@@ -6,6 +6,7 @@
 #include "rt/params.h"
 #include "rt/scene.h"
 #include "rt/hittables/quad.h"
+#include "rt/hittables/box.h"
 #include "rt/materials/lambertian.h"
 #include "rt/materials/diffuse_light.h"
 #include <cstring>
@@ -13,7 +14,6 @@
 using namespace rt;
 using rt::materials::lambertian;
 using rt::materials::diffuse_light;
-using rt::Axis;
 
 static ParamMeta params_meta[] = {
     {"light_color", "Ceiling light color", ParamType::COLOR_RGB, .default_c3 = {1, 1, 1}},
@@ -66,38 +66,22 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     float3 green = {0.12f, 0.45f, 0.15f};
     float3 light_emission = scale(light_color, light_strength);
 
-    auto add_quad_at = [&](Axis primary,
-                           float value,
-                           float min_s,
-                           float max_s,
-                           float min_t,
-                           float max_t,
-                           Material material) {
-        float3 p0 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 0);
-        float3 p1 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 1);
-        float3 p2 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 2);
-        add(objects, object_count, {hittables::quad_from_corners(p0, p1, p2), std::move(material)});
-    };
+    using hittables::quad;
+    using hittables::box;
 
-    auto add_box_at =
-        [&](float cx, float cy, float cz, float sx, float sy, float sz, Material material) {
-            add_quad_at(Axis::Y, cy + sy, cx, cx + sx, cz, cz + sz, material);
-            add_quad_at(Axis::Y, cy, cx, cx + sx, cz, cz + sz, material);
-            add_quad_at(Axis::Z, cz, cx, cx + sx, cy, cy + sy, material);
-            add_quad_at(Axis::Z, cz + sz, cx, cx + sx, cy, cy + sy, material);
-            add_quad_at(Axis::X, cx, cz, cz + sz, cy, cy + sy, material);
-            add_quad_at(Axis::X, cx + sx, cz, cz + sz, cy, cy + sy, material);
-        };
+    add(objects, object_count, {quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)});
+    add(objects, object_count, {quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)});
+    add(objects, object_count, {quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)});
+    add(objects, object_count, {quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)});
+    add(objects, object_count, {quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)});
+    add(objects, object_count, {quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)});
 
-    add_quad_at(Axis::Y, 0.0f, -2, 2, -2, 2, lambertian(white));
-    add_quad_at(Axis::Y, 3.0f, -2, 2, -2, 2, lambertian(white));
-    add_quad_at(Axis::Z, -2.0f, -2, 2, 0, 3, lambertian(white));
-    add_quad_at(Axis::X, -2.0f, -2, 2, 0, 3, lambertian(red));
-    add_quad_at(Axis::X, 2.0f, -2, 2, 0, 3, lambertian(green));
-    add_quad_at(Axis::Y, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
-
-    add_box_at(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f, lambertian({0.55f, 0.55f, 0.55f}));
-    add_box_at(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f, lambertian({0.55f, 0.55f, 0.55f}));
+    add(objects,
+        object_count,
+        {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f), lambertian({0.55f, 0.55f, 0.55f})});
+    add(objects,
+        object_count,
+        {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f), lambertian({0.55f, 0.55f, 0.55f})});
 
     g_scene_objects = sycl::malloc_device<Object>(object_count, *queue);
     queue->memcpy(g_scene_objects, objects, object_count * sizeof(Object)).wait();

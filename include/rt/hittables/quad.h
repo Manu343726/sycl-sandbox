@@ -79,4 +79,20 @@ inline Quad quad_from_corners(float3 a, float3 b, float3 c) {
     return Quad::from_corners(a, b, c);
 }
 
+/// Creates an axis-aligned Quad from bounds.
+/// @param primary  The fixed axis (0=X, 1=Y, 2=Z).
+inline Quad
+quad(int primary, float axis_value, float min_s, float max_s, float min_t, float max_t) {
+    int second = (primary + 1) % 3, third = (primary + 2) % 3;
+    auto corner = [&](int index) -> float3 {
+        float components[3] = {0, 0, 0};
+        components[primary] = axis_value;
+        components[second] = (index & 1) ? max_s : min_s;
+        components[third] = (index >> 1) ? max_t : min_t;
+        return {components[0], components[1], components[2]};
+    };
+    float3 a = corner(0), b = corner(1), c = corner(2);
+    return Quad(a, sub(b, a), sub(c, a));
+}
+
 } // namespace rt::hittables

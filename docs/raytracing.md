@@ -42,7 +42,7 @@ Kernels only declare their own kernel-specific params.
 #include "rt/types.h"        // Object, Hittable, Material
 #include "rt/trace.h"        // rt::render_main()
 #include "rt/params.h"       // rt_std_param enum (implicit)
-#include "rt/scene.h"        // add_quad, add_box, Axis
+#include "rt/scene.h"        // Axis, quad_corner, add()
 #include "rt/hittables/quad.h"
 #include "rt/materials/lambertian.h"
 #include "rt/materials/diffuse_light.h"
@@ -84,6 +84,21 @@ extern "C" void render_kernel(sycl::queue* queue, int w, int h,
 
 extern "C" void shutdown_kernel(sycl::queue* queue) { … }
 ```
+
+## Primitive composition
+
+Primitives can be composed from other primitives.  For example, `Box` is
+implemented as six `Quad` faces internally — the `Box::hit()` method
+iterates over all six faces and returns the closest intersection.  This
+avoids proliferating custom geometry helpers (like `add_quad`/`add_box`)
+— just construct the primitive directly and add it as a single `Object`:
+
+```cpp
+add(objects, count, {hittables::box(cx, cy, cz, sx, sy, sz), material});
+```
+
+The same composition principle can be extended to other compound primitives
+in the future.
 
 ## Variant-based polymorphism
 
@@ -138,15 +153,16 @@ ignores everything beyond.  Kernel-specific params use a plain anonymous
 
 ## Scene building helpers
 
-`rt/scene.h` provides host-side helpers for constructing axis-aligned geometry:
+`rt/scene.h` provides `add()` which appends a single `Object` (hittable + material)
+to a plain array.  The hittable factories live in their respective headers:
 
 ```cpp
-quad_corner(Axis::Y, 3.0f, -2, 2, -2, 2, 0);         // one corner
-add_quad(objects, count, Axis::X, -2.0f, -2, 2, 0, 3, material);  // one face
-add_box(objects, count, cx, cy, cz, sx, sy, sz, material);  // six faces
+add(objects, count, {hittables::quad(axis, value, …), material});   // one face
+add(objects, count, {hittables::box(cx, cy, cz, sx, sy, sz), material});  // box
 ```
 
-The `Axis` enum class (`X`/`Y`/`Z`) replaces bare `0`/`1`/`2`.
+Axis-aligned `quad()` takes the primary axis as a bare int (`0` = X, `1` = Y,
+`2` = Z).  `quad_corner()` is still available for low-level corner computation.
 
 ## File structure
 
@@ -160,10 +176,11 @@ include/rt/
   camera.h            — Camera struct, lookat()
   params.h            — rt_std_param enum
   trace.h             — Object::hit/scatter/emit dispatch, trace(), render_main<>()
-  scene.h             — Axis enum, quad_corner, add_quad, add_box
+   scene.h             — Axis enum, quad_corner, add()
   hittables/
     sphere.h          — Sphere class + sphere() factory
     quad.h            — Quad   class + quad()   factory
+    box.h             — Box    class + box()    factory
   materials/
     lambertian.h      — Lambertian  + lambertian()
     metal.h           — Metal       + metal()
