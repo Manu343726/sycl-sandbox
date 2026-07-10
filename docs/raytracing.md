@@ -31,77 +31,7 @@ by the library.
 └──────────────────────────────────────────────────┘
 ```
 
-## Kernel API in depth
-
-### The four `extern "C"` functions
-
-Every kernel, raytracing or not, must implement these.  The host calls them
-via `dlsym`:
-
-```cpp
-extern "C" KernelDesc* get_kernel_desc();
-extern "C" void        init_kernel(sycl::queue*, int w, int h,
-                                   const void* params, size_t params_size);
-extern "C" void        render_kernel(sycl::queue*, int w, int h,
-                                     const void* params,
-                                     void* accum_buffer, int sample_index);
-extern "C" void        shutdown_kernel(sycl::queue*);
-```
-
-#### `get_kernel_desc()`
-
-Return a `KernelDesc` containing:
-- `name`, `description` — human-readable.
-- `param_count`, `params` — the `ParamMeta[]` array describing every parameter.
-- `params_buffer_size` — computed by summing `param_buffer_size()` for each param.
-- `max_spp` — how many samples per pixel this kernel benefits from.
-  `1` means single-frame (Mandelbrot), `4096` means progressive (raytracers).
-- `source_count`, `sources` — source files to watch for hot-reload.
-
-The host uses this metadata to build the ImGui controls and validate the
-params buffer size.
-
-#### `init_kernel()`
-
-Called when the scene is first selected, after params have been uploaded to
-device memory.  Typical actions:
-1. Read kernel-specific params from the float buffer.
-2. Build scene geometry on the host using `new` + factory functions.
-3. Upload geometry to device via `sycl::malloc_device` + `memcpy`.
-4. Store device pointers in global statics.
-
-Since `d_params` is allocated with `sycl::malloc_host` (accessible from both
-host and device), `init_kernel()` reads params directly without a device
-transfer.
-
-#### `render_kernel()`
-
-Called every frame.  For raytracers, this is typically a one-liner:
-
-```cpp
-extern "C" void render_kernel(sycl::queue* queue, int width, int height,
-                               const void* params, void* accum, int sample_index) {
-    const float* p = (const float*)params;
-    rt::render_main(queue, width, height, p, (float*)accum, sample_index,
-                    g_scene_objects, g_num_objects,
-                    [](const Ray& ray) -> float3 {
-                        return background_colour(ray);  // custom per-kernel
-                    });
-}
-```
-
-The kernel only provides:
-- The `Object[]` array (its scene).
-- A background function for rays that miss everything.
-- Its kernel-specific parameter descriptions (standard params + extras).
-
-`rt::render_main()` handles everything else.
-
-#### `shutdown_kernel()`
-
-Free device memory allocated in `init_kernel()`.
-
-### Anatomy of a minimal raytracer kernel
+## Anatomy of a minimal raytracer kernel
 
 ```cpp
 #include "rt/types.h"        // Object, Hittable, Material

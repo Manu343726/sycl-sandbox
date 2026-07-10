@@ -65,29 +65,88 @@ Dynamically generates ImGui controls from `ParamMeta[]`.  Supported types:
 bool values are read/written as `float` in the buffer (cast on access) so
 that the kernel's `(int)p[idx]` pattern works correctly.
 
-## Kernels
+## Kernel API
 
-Each kernel is a shared library (`kernels/<name>/kernel.cpp`) that exposes
-four `extern "C"` functions:
+Every kernel is a shared library (`kernels/<name>/kernel.cpp`) that exposes
+four `extern "C"` functions.  The host calls them via `dlsym`:
 
-| Function            | Called when       | Purpose                                              |
-|---------------------|-------------------|------------------------------------------------------|
-| `get_kernel_desc()` | `.so` first loaded| Return a `KernelDesc` with param metadata and limits |
-| `init_kernel()`     | Scene selected    | Build geometry, upload to device memory              |
-| `render_kernel()`   | Every frame       | Read params, accumulate one frame of samples         |
-| `shutdown_kernel()` | Scene changed     | Free device memory                                   |
+```cpp
+extern "C" KernelDesc* get_kernel_desc();
+extern "C" void        init_kernel(sycl::queue*, int w, int h,
+                                   const void* params, size_t params_size);
+extern "C" void        render_kernel(sycl::queue*, int w, int h,
+                                     const void* params,
+                                     void* accum_buffer, int sample_index);
+extern "C" void        shutdown_kernel(sycl::queue*);
+```
 
-The host calls these via `dlsym`.  The params buffer (`h_params`/`d_params`)
-is `sycl::malloc_host` — accessible from both host and device — so
-`init_kernel()` can read params directly on the host without a device transfer.
+### `get_kernel_desc()`
 
-Three kernels exist:
-- **mandelbrot** — Mandelbrot fractal (no raytracing, single frame, `max_spp=1`).
-- **one_weekend** — Random spheres with lambertian/metal/dielectric materials.
-- **cornell_box** — Cornell box with emissive light and two boxes.
+Return a `KernelDesc` containing:
+- `name`, `description` — human-readable identifiers.
+- `param_count`, `params` — the `ParamMeta[]` array describing every parameter.
+- `params_buffer_size` — computed by summing `param_buffer_size()` for each param.
+- `max_spp` — how many samples per pixel this kernel benefits from.
+  `1` means single-frame (Mandelbrot), `4096` means progressive (raytracers).
+- `source_count`, `sources` — source files to watch for hot-reload.
 
-All raytracing kernels use the shared `include/rt/` library (see
-[docs/raytracing.md](raytracing.md) for the raytracing architecture).
+The host uses this metadata to build the ImGui parameter controls and validate
+the params buffer size.  This function is the only way the host knows what
+parameters a kernel expects.
+
+### `init_kernel()`
+
+Called when the scene is selected, after params have been uploaded to device
+memory.  Typical actions:
+1. Read kernel-specific params from the float buffer.
+2. Build scene geometry on the host (allocate with `new`).
+3. Upload geometry to device via `sycl::malloc_device` + `memcpy`.
+4. Store device pointers in static globals for later use in `render_kernel()`.
+
+The params buffer (`d_params`) is allocated with `sycl::malloc_host` —
+accessible from both host and device — so `init_kernel()` reads params
+directly on the host without a device transfer.
+
+### `render_kernel()`
+
+Called every frame.  The kernel reads its params (SPP, bounces, camera, etc.),
+computes one frame of samples, and accumulates into `accum_buffer` (a
+`float4` array: RGBA, one element per pixel).
+
+For raytracers this is typically a one-liner delegating to the shared library:
+
+```cpp
+extern "C" void render_kernel(sycl::queue* queue, int w, int h,
+                               const void* params, void* accum, int si) {
+    rt::render_main(queue, w, h, (const float*)params, (float*)accum, si,
+                    g_scene_objects, g_num_objects,
+                    [](const rt::Ray& ray) -> rt::float3 {
+                        return background_colour(ray);
+                    });
+}
+```
+
+The kernel only provides its scene (`Object[]`) and a background function.
+The shared library handles camera setup, ray generation, path tracing,
+and accumulation (see [docs/raytracing.md](raytracing.md)).
+
+For non-raytracing kernels (e.g. Mandelbrot), `render_kernel()` implements
+its own computation directly.
+
+### `shutdown_kernel()`
+
+Free device memory allocated in `init_kernel()`.
+
+### Available kernels
+
+| Kernel       | Type        | `max_spp` | Description                              |
+|--------------|-------------|-----------|------------------------------------------|
+| mandelbrot   | Fractal     | 1         | Coloured Mandelbrot set, single-frame    |
+| one_weekend  | Raytracing  | 4096      | Random spheres with realistic materials  |
+| cornell_box  | Raytracing  | 4096      | Cornell box with emissive light          |
+
+Raytracing kernels use the shared `include/rt/` library; the Mandelbrot
+kernel is self-contained.
 
 ## Build system
 
