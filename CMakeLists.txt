@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sycl-sandbox LANGUAGES CXX)
+project(sycl-sandbox LANGUAGES C CXX)
 
 # ── CUDA libdevice symlink ──────────────────────────────────────────────
 # AdaptiveCpp's SSCP JIT needs libdevice.10.bc to compile kernels to PTX.

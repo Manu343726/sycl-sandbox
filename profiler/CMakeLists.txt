@@ -59,7 +59,7 @@ endforeach()
 
 # ── ExternalProject ──────────────────────────────────────────────────────────
 ExternalProject_Add(tracy_server
-    SOURCE_DIR "${tracy_SOURCE_DIR}"
+    SOURCE_DIR "${tracy_SOURCE_DIR}/profiler"
     BINARY_DIR "${TRACY_PROFILER_BUILD_DIR}"
     INSTALL_DIR "${TRACY_PROFILER_INSTALL_DIR}"
 
@@ -79,6 +79,7 @@ ExternalProject_Add(tracy_server
         # Tracy options
         -DTRACY_STATIC=OFF
         -DNO_FILESELECTOR=ON
+        -DCMAKE_CXX_FLAGS=-DTRACY_NO_FILESELECTOR
         # Pass through compiler settings
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}

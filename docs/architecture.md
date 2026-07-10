@@ -204,14 +204,18 @@ When enabled:
   `PROF_FRAME_MARK_N` macros that compile to Tracy calls when `TRACY_ENABLE` is
   defined, or to no-ops otherwise.
 
-To build the Tracy profiler server (standalone UI):
+To build and run the Tracy profiler server (standalone UI):
 
 ```bash
 cmake --build build --target tracy-server
-./build/profiler/bin/tracy-profiler
+./build/profiler/bin/bin/tracy-profiler
 ```
 
-The server is built as an isolated `ExternalProject` to avoid conflicts with
-Tracy's internal dependency tree.  Conan provides capstone, freetype, curl,
-pugixml, nlohmann_json, and zstd; Tracy's CPM handles the remaining small
+Or use the VS Code tasks **"build tracy-server"** and **"launch tracy-server"**
+from the command palette.
+
+The server is built as an isolated `ExternalProject` from the `profiler/`
+subdirectory of the Tracy source to avoid conflicts with Tracy's internal
+dependency tree.  Conan provides capstone, freetype, curl, pugixml,
+nlohmann_json, and zstd; Tracy's CPM handles the remaining small
 dependencies (md4c, base64, tidy, usearch, PPQSort).

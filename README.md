@@ -45,7 +45,7 @@ cmake --preset conan-release -B build -DTRACY_PROFILER=ON
 make -C build -j$(nproc)
 
 # Build the Tracy server UI (standalone profiler application)
-make -C build tracy-server
+cmake --build build --target tracy-server
 
 # Build Debug (for debugging with gdb)
 conan install . -of build_debug -s build_type=Debug --build missing
