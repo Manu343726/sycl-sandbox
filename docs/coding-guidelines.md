@@ -168,19 +168,6 @@ write rules, summaries, or examples inline.  Rules live in
 `docs/raytracing.md`.  If a rule needs updating, update the doc file,
 not `AGENTS.md`.
 
-## Run clang-format
-
-Always run clang-format after any code change, before committing:
-
-```bash
-clang-format -i src/*.cpp include/rt/**/*.h include/rt/hittables/*.h \
-                include/rt/materials/*.h kernels/*/kernel.cpp
-```
-
-The CI equivalent `make format` can be set up as a phony target.  If
-clang-format is not available, at minimum ensure `InsertBraces` and
-`AllowShortIfStatementsOnASingleLine` are respected by hand.
-
 ## Keeping docs in sync
 
 Architecture changes must update the corresponding docs in the same commit:
@@ -252,33 +239,24 @@ inline Lambertian lambertian(float3 albedo);
 
 - Use `// ── section markers ──` sparingly for major sections in long files.
 
-## Clang-format
+## Formatting
 
 A `.clang-format` file is checked into the repository root.  Run it
-before committing:
+before every commit:
 
 ```bash
-clang-format -i src/*.cpp src/*.h include/**/*.h include/**/*.hpp kernels/*/kernel.cpp kernels/*/kernel.h
+clang-format -i src/*.cpp include/rt/**/*.h include/rt/hittables/*.h \
+                include/rt/materials/*.h kernels/*/kernel.cpp
 ```
 
-Key style rules enforced by `.clang-format`:
+Key rules, all enforced by `.clang-format` (`InsertBraces`, `AllowShortIfStatementsOnASingleLine`, etc.):
+
 - Braces on the same line (Attach style).
-- 4-space indent.
+- 4-space indentation, no tabs.
 - 100-column line limit.
 - Spaces inside `if (...)`, `for (...)`, `while (...)`.
 - **`if`, `else`, `for`, `while` without braces are forbidden.**
-- No tabs, spaces only.
+- Spaces inside braces for initializer lists: `{1, 2, 3}` not `{1,2,3}`.
 
 If clang-format is not available, at minimum ensure no brace-less
 control flow statements.
-
-## Formatting
-
-- `clang-format` with the provided `.clang-format` file.
-- 4-space indentation, no tabs.
-- Opening brace on the same line for functions, control flow, and classes.
-- **`if`, `else`, `for`, `while` must always use braces** — no single-line
-  unbraced statements.  This is enforced by `.clang-format`
-  (`AllowShortIfStatementsOnASingleLine: Never`).
-- Line length cap at 100 columns (prefer breaks at natural points).
-- Spaces inside braces for initializer lists: `{1, 2, 3}` not `{1,2,3}`.
