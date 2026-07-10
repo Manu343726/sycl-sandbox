@@ -22,6 +22,7 @@ static ParamMeta params_meta[] = {
     {"num_spheres",
      "Number of random small spheres",
      ParamType::INT,
+     .buffer_offset = RT_NUM_STD_PARAMS * sizeof(float),
      .range = {.i = {0, 500, 1}},
      .default_i = 11},
     {"ground_color",
@@ -46,13 +47,6 @@ static KernelDesc desc = {"one_weekend",
                           2,
                           (const char *[]) {"kernel.cpp", "kernel.h", nullptr}};
 extern "C" KernelDesc *get_kernel_desc() {
-    uint32_t offset = RT_NUM_STD_PARAMS * sizeof(float);
-    for ( int i = 0; i < desc.param_count; i++ ) {
-        params_meta[i].buffer_offset = offset;
-        params_meta[i].buffer_size = param_buffer_size(params_meta[i]);
-        offset += params_meta[i].buffer_size;
-    }
-    desc.params_buffer_size = offset;
     return &desc;
 }
 

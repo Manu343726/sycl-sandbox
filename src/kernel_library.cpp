@@ -66,8 +66,21 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
     kh->path = ver_so;
     kh->desc = *get_desc();
 
-    // buffer_offset, buffer_size, and params_buffer_size are already set by
-    // the kernel's get_kernel_desc() — trust them as-is.
+    // Fill buffer_offset (if not set by kernel) and buffer_size from metadata.
+    // The kernel only needs to set the first param's buffer_offset if non-zero
+    // (e.g. raytracing kernels skip RT_NUM_STD_PARAMS floats at the start).
+    {
+        uint32_t offset = 0;
+        for ( int i = 0; i < kh->desc.param_count; i++ ) {
+            auto &p = const_cast<ParamMeta &>(kh->desc.params[i]);
+            if ( p.buffer_offset == 0 ) {
+                p.buffer_offset = offset;
+            }
+            p.buffer_size = param_buffer_size(p);
+            offset = p.buffer_offset + p.buffer_size;
+        }
+        kh->desc.params_buffer_size = offset;
+    }
 
     // Store the handle, activate it
     auto *ptr = kh.get();

@@ -16,7 +16,11 @@ using rt::materials::lambertian;
 using rt::materials::diffuse_light;
 
 static ParamMeta params_meta[] = {
-    {"light_color", "Ceiling light color", ParamType::COLOR_RGB, .default_c3 = {1, 1, 1}},
+    {"light_color",
+     "Ceiling light color",
+     ParamType::COLOR_RGB,
+     .buffer_offset = RT_NUM_STD_PARAMS * sizeof(float),
+     .default_c3 = {1, 1, 1}},
     {"light_strength",
      "Ceiling light intensity",
      ParamType::FLOAT,
@@ -35,13 +39,6 @@ static KernelDesc desc = {"cornell_box",
                           1,
                           (const char *[]) {"kernel.cpp", nullptr}};
 extern "C" KernelDesc *get_kernel_desc() {
-    uint32_t offset = RT_NUM_STD_PARAMS * sizeof(float);
-    for ( int i = 0; i < desc.param_count; i++ ) {
-        params_meta[i].buffer_offset = offset;
-        params_meta[i].buffer_size = param_buffer_size(params_meta[i]);
-        offset += params_meta[i].buffer_size;
-    }
-    desc.params_buffer_size = offset;
     return &desc;
 }
 
