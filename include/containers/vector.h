@@ -69,9 +69,9 @@ public:
 
 
 
+    template <bool Enable = (Tag == alloc::Target::Host),
+              typename = std::enable_if_t<Enable>>
     void push_back(const void *element) {
-        static_assert(Tag == alloc::Target::Host,
-                      "push_back requires a host vector; build on host then transfer() to device");
         auto buf = allocator_.allocate(element_size_, alignment_);
         if (!buf.is_valid()) return;
         alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
@@ -128,9 +128,9 @@ public:
     vector(const vector &) = default;
     vector &operator=(const vector &) = default;
 
+    template <bool Enable = (Tag == alloc::Target::Host),
+              typename = std::enable_if_t<Enable>>
     void push_back(const T &element) {
-        static_assert(Tag == alloc::Target::Host,
-                      "push_back requires a host vector; build on host then transfer() to device");
         impl_.push_back(&element);
     }
 
