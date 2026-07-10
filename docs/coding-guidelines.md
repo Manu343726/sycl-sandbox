@@ -159,6 +159,15 @@ target enabled** (or at least verify compilation) before committing,
 because the CUDA backend is stricter and will catch portability issues
 that `generic` silently accepts.
 
+## AGENTS.md
+
+`AGENTS.md` is the entry point for AI agents working on this repository.
+It must only **reference** documentation files by path and order — never
+write rules, summaries, or examples inline.  Rules live in
+`docs/coding-guidelines.md`, architecture in `docs/architecture.md` and
+`docs/raytracing.md`.  If a rule needs updating, update the doc file,
+not `AGENTS.md`.
+
 ## Keeping docs in sync
 
 Architecture changes must update the corresponding docs in the same commit:
