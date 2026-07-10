@@ -8,7 +8,6 @@
 #include <sycl-sandbox/rt/hittables/box.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/diffuse_light.h>
-#include <sycl-sandbox/containers/vector.h>
 
 #include <cstring>
 
@@ -43,8 +42,10 @@ extern "C" KernelDesc *get_kernel_desc() {
     return &desc;
 }
 
-static containers::vector<alloc::Target::Host, Object> g_scene;
-static containers::vector<alloc::Target::Device, Object> g_device_scene;
+static constexpr int NUM_OBJECTS = 8;
+static Object *g_scene_host = nullptr;
+static Object *g_scene_device = nullptr;
+static sycl::queue *g_queue = nullptr;
 
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
@@ -53,7 +54,7 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     memcpy(&light_color, params + std_offset + PARAM_LIGHT_COLOR, 12);
     float light_strength = params[std_offset + PARAM_LIGHT_STRENGTH];
 
-    g_scene = containers::vector<alloc::Target::Host, Object>(8, *queue);
+    g_queue = queue;
 
     float3 white = {0.73f, 0.73f, 0.73f};
     float3 red = {0.65f, 0.05f, 0.05f};
@@ -63,19 +64,23 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     using hittables::quad;
     using hittables::box;
 
-    g_scene.push_back({quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)});
-    g_scene.push_back({quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)});
-    g_scene.push_back({quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)});
-    g_scene.push_back({quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)});
-    g_scene.push_back({quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)});
-    g_scene.push_back({quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)});
+    g_scene_host = sycl::malloc_host<Object>(NUM_OBJECTS, *queue);
 
-    g_scene.push_back(
-        {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f), lambertian({0.55f, 0.55f, 0.55f})});
-    g_scene.push_back(
-        {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f), lambertian({0.55f, 0.55f, 0.55f})});
+    g_scene_host[0] = {quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)};
+    g_scene_host[1] = {quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)};
+    g_scene_host[2] = {quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)};
+    g_scene_host[3] = {quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)};
+    g_scene_host[4] = {quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)};
+    g_scene_host[5] = {quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)};
+    g_scene_host[6] = {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f),
+                       lambertian({0.55f, 0.55f, 0.55f})};
+    g_scene_host[7] = {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f),
+                       lambertian({0.55f, 0.55f, 0.55f})};
 
-    g_device_scene = g_scene.template transfer<alloc::Target::Device>();
+    g_scene_device = sycl::malloc_device<Object>(NUM_OBJECTS, *queue);
+    queue->memcpy(g_scene_device, g_scene_host, NUM_OBJECTS * sizeof(Object)).wait();
+    sycl::free(g_scene_host, *queue);
+    g_scene_host = nullptr;
 }
 
 extern "C" void render_kernel(sycl::queue *queue,
@@ -85,21 +90,22 @@ extern "C" void render_kernel(sycl::queue *queue,
                               void *accum_buffer,
                               int sample_index) {
     const float *params = (const float *)params_buffer;
-    auto buf = g_device_scene.data();
     render_main(queue,
                 width,
                 height,
                 params,
                 (float *)accum_buffer,
                 sample_index,
-                buf.data,
-                static_cast<int>(buf.count),
+                g_scene_device,
+                NUM_OBJECTS,
                 [](const Ray &) -> float3 {
                     return {0, 0, 0};
                 });
 }
 
 extern "C" void shutdown_kernel(sycl::queue *queue) {
-    g_scene = containers::vector<alloc::Target::Host, Object>(0, *queue);
-    g_device_scene = containers::vector<alloc::Target::Device, Object>(0, *queue);
+    if (g_scene_host)   sycl::free(g_scene_host, *queue);
+    if (g_scene_device) sycl::free(g_scene_device, *queue);
+    g_scene_host   = nullptr;
+    g_scene_device = nullptr;
 }
