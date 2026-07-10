@@ -125,6 +125,40 @@ using rt::materials::lambertian;
 - **Free factory functions** instead of static methods.
   `sphere(c, r)` returns a `Sphere`, not `Sphere::create(c, r)`.
 
+## CPU + GPU portability
+
+All kernel code must compile and run correctly on both the `generic` (OpenMP
+CPU) backend and the CUDA GPU backend.  This means:
+
+- **No virtual functions, no function pointers, no `std::function`** in
+  code that runs on the device (inside `parallel_for` or any function it
+  calls).  These require vtables or indirect calls that CUDA doesn't support.
+  Use `std::variant` + `visit_rt()` instead (compile-time dispatch).
+
+- **No `dynamic_cast`, `typeid`, `std::any`** in device code.
+
+- **No RTTI or exceptions** in device code.
+
+- **No host-only pointers in device memory.**  Memory allocated with
+  `sycl::malloc_device` is GPU-only; use `sycl::malloc_host` or
+  `sycl::malloc_shared` when both sides need access.
+
+- **No `std::vector`, `std::string`, or heap-allocating containers**
+  inside kernel lambdas.  Prefer stack arrays or SYCL USM pointers.
+
+- **No global/static constructors with side effects** in kernel shared
+  libraries (`.so` loaded via `dlopen`).  The SYCL runtime must register
+  device images during static init; don't interfere.
+
+- **No platform-specific intrinsics or inline assembly.**  Stick to
+  standard C++ and SYCL builtins (`sycl::sqrt`, `sycl::fabs`, etc.).
+
+The `generic` backend runs kernel lambdas as regular C++ on the host
+(via OpenMP), which is more permissive.  **Always build with the CUDA
+target enabled** (or at least verify compilation) before committing,
+because the CUDA backend is stricter and will catch portability issues
+that `generic` silently accepts.
+
 ## Keeping docs in sync
 
 Architecture changes must update the corresponding docs in the same commit:
