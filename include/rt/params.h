@@ -6,7 +6,7 @@
 /// beginning of its param_meta array, in this exact order, so that
 /// rt::render_main() can read them without knowing the kernel's full
 /// parameter layout.  Kernel-specific parameters start at index 13.
-enum class rt_std_param : int {
+enum rt_std_param {
     RT_SPP_FRAME    = 0,   ///< int,   samples per frame
     RT_MAX_BOUNCES  = 1,   ///< int,   maximum ray path depth
     RT_CAM_EYE      = 2,   ///< VEC3,  camera position (floats 2,3,4)
@@ -17,5 +17,4 @@ enum class rt_std_param : int {
     RT_NUM_STD_PARAMS = 13 ///< first index available for kernel-specific params
 };
 
-/// Convenience: cast an rt_std_param enumerator to int for array indexing.
-inline constexpr int rti(rt_std_param e) { return static_cast<int>(e); }
+

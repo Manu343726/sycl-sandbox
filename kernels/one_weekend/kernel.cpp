@@ -31,7 +31,7 @@ static ParamMeta params_meta[] = {
     {"background","Sky colour",ParamType::COLOR_RGB,.default_c3={0.5f,0.7f,1}},
 };
 enum {
-    PARAM_NUM_SPHERES    = rti(rt_std_param::RT_NUM_STD_PARAMS),
+    PARAM_NUM_SPHERES    = RT_NUM_STD_PARAMS,
     PARAM_GROUND_COLOR   = PARAM_NUM_SPHERES + 1,
     PARAM_BACKGROUND     = PARAM_GROUND_COLOR + 3,
 };
