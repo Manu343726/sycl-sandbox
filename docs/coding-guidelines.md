@@ -158,6 +158,25 @@ target enabled** (or at least verify compilation) before committing,
 because the CUDA backend is stricter and will catch portability issues
 that `generic` silently accepts.
 
+## Fully qualified includes
+
+All includes must use the full path from the repository root (`include/`).  Use
+angle brackets, never quotes with relative paths:
+
+```cpp
+// Bad
+#include "buffer.h"
+#include "../buffer.h"
+#include "../alloc/buffer.h"
+
+// Good
+#include <alloc/buffer.h>
+#include <rt/trace.h>
+#include <containers/vector.h>
+```
+
+The only exceptions are generated/config files co-located with the source.
+
 ## Fully qualified names in library headers
 
 Library headers (`include/alloc/`, `include/containers/`, `include/rt/`) must

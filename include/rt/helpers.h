@@ -1,5 +1,5 @@
 #pragma once
-#include "math.h"
+#include <rt/math.h>
 
 /// Shared math helpers for raytracing.
 namespace rt {

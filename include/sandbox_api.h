@@ -1,5 +1,5 @@
 #pragma once
-#include "param_types.h"
+#include <param_types.h>
 #include <sycl/sycl.hpp>
 #include <cstdint>
 

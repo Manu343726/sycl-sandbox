@@ -1,8 +1,8 @@
 #pragma once
-#include "types.h"
-#include "camera.h"
-#include "params.h"
-#include "variant.h"
+#include <rt/types.h>
+#include <rt/camera.h>
+#include <rt/params.h>
+#include <rt/variant.h>
 #include <optional>
 
 namespace rt {

@@ -1,5 +1,5 @@
 #pragma once
-#include "math.h"
+#include <rt/math.h>
 #include <optional>
 
 /// Forward declarations used by individual hittable/material headers.

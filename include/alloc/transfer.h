@@ -1,7 +1,7 @@
 #pragma once
 #include <cstring>
 #include <sycl/sycl.hpp>
-#include "buffer.h"
+#include <alloc/buffer.h>
 
 namespace alloc::raw {
 

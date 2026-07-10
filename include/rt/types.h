@@ -1,16 +1,16 @@
 #pragma once
-#include "math.h"
-#include "types_fwd.h"
+#include <rt/math.h>
+#include <rt/types_fwd.h>
 #include <variant>
-#include "variant.h"
-#include "hittables/sphere.h"
-#include "hittables/triangle.h"
-#include "hittables/quad.h"
-#include "hittables/box.h"
-#include "materials/lambertian.h"
-#include "materials/metal.h"
-#include "materials/dielectric.h"
-#include "materials/diffuse_light.h"
+#include <rt/variant.h>
+#include <rt/hittables/sphere.h>
+#include <rt/hittables/triangle.h>
+#include <rt/hittables/quad.h>
+#include <rt/hittables/box.h>
+#include <rt/materials/lambertian.h>
+#include <rt/materials/metal.h>
+#include <rt/materials/dielectric.h>
+#include <rt/materials/diffuse_light.h>
 
 /// Raised to the top-level `rt` namespace for convenience.
 namespace rt {

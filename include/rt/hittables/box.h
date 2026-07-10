@@ -1,7 +1,7 @@
 #pragma once
-#include "../math.h"
-#include "../types_fwd.h"
-#include "quad.h"
+#include <rt/math.h>
+#include <rt/types_fwd.h>
+#include <rt/hittables/quad.h>
 #include <optional>
 #include <array>
 

@@ -1,7 +1,7 @@
 #pragma once
-#include "../math.h"
-#include "../types_fwd.h"
-#include "../helpers.h"
+#include <rt/math.h>
+#include <rt/types_fwd.h>
+#include <rt/helpers.h>
 #include <optional>
 
 /// Metallic (reflective) material: reflects incoming rays with a fuzzy

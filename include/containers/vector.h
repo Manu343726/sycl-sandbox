@@ -3,14 +3,12 @@
 #include <cstring>
 #include <type_traits>
 #include <sycl/sycl.hpp>
-
-template <typename> struct always_false : std::false_type {};
 #include <alloc/buffer.h>
 #include <alloc/tag.h>
 #include <alloc/linear_allocator.h>
 #include <alloc/root_allocator.h>
 #include <alloc/transfer.h>
-#include "buffer.h"
+#include <containers/buffer.h>
 
 namespace containers::raw {
 

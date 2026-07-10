@@ -2,8 +2,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <sycl/sycl.hpp>
-#include "buffer.h"
-#include "tag.h"
+#include <alloc/buffer.h>
+#include <alloc/tag.h>
 
 namespace alloc::raw {
 

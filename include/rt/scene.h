@@ -1,6 +1,6 @@
 #pragma once
-#include "math.h"
-#include "types.h"
+#include <rt/math.h>
+#include <rt/types.h>
 #include <alloc/tag.h>
 #include <alloc/buffer.h>
 #include <alloc/host_allocator.h>

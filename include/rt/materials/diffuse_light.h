@@ -1,6 +1,6 @@
 #pragma once
-#include "../math.h"
-#include "../types_fwd.h"
+#include <rt/math.h>
+#include <rt/types_fwd.h>
 #include <optional>
 
 namespace rt::materials {

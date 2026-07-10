@@ -1,6 +1,6 @@
 #pragma once
 #include <sycl/sycl.hpp>
-#include "buffer.h"
+#include <alloc/buffer.h>
 
 namespace alloc::raw {
 

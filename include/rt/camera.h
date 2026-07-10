@@ -1,6 +1,6 @@
 #pragma once
-#include "math.h"
-#include "types_fwd.h"
+#include <rt/math.h>
+#include <rt/types_fwd.h>
 
 /// Camera utility: computes ray origin, horizontal, vertical, and lower-left
 /// corner from lookAt parameters.  Used by rt::render_main().

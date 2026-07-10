@@ -13,6 +13,14 @@ class SyclSandboxConan(ConanFile):
         "imgui/1.92.8",
         "adaptivecpp/25.10.0",
         "spdlog/1.17.0",
+        # Tracy server dependencies — Tracy's vendor.cmake finds these via
+        # pkg-config and skips its own CPM downloads when present.
+        "capstone/5.0.7",
+        "freetype/2.13.3",
+        "curl/8.12.1",
+        "pugixml/1.14",
+        "nlohmann_json/3.12.0",
+        "zstd/1.5.7",
     ]
 
     tool_requires = [
@@ -20,4 +28,4 @@ class SyclSandboxConan(ConanFile):
         "ninja/1.12.1",
     ]
 
-    generators = "CMakeToolchain", "CMakeDeps"
+    generators = "CMakeToolchain", "CMakeDeps", "PkgConfigDeps"
