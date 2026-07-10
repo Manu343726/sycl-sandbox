@@ -1,0 +1,40 @@
+name: Merge master to main and delete master
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch all branches
+        run: git fetch origin
+
+      - name: Checkout main
+        run: git checkout main
+
+      - name: Rebase master onto main
+        run: git rebase origin/master
+
+      - name: Force push main
+        run: git push origin main --force-with-lease
+
+      - name: Delete master branch
+        run: git push origin --delete master
+
+      - name: Verify branches
+        run: |
+          echo "Current branches:"
+          git branch -r
