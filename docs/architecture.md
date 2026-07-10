@@ -1,105 +1,181 @@
 # Architecture
 
-## Overview
+## Project overview
+
+`sycl-sandbox` is an interactive GPU/CPU rendering sandbox with hot-reloadable
+SYCL kernels.  It renders scenes using procedurally generated geometry (spheres,
+quads, boxes), accumulates samples progressively, and provides a Dear ImGui UI
+for scene selection, parameter tweaking, and camera control.
+
+The application is split into two runtime components:
+
+1. **Host** — the `sandbox` executable (OpenGL + ImGui + SYCL runtime).
+2. **Kernels** — shared libraries (`.so`) loaded at runtime via `dlopen`.
+   Each kernel defines a scene and is hot-reloaded on source change.
 
 ```
-kernel.cpp (extern "C")  →  rt::render_main()  →  rt::trace()  →  Object::hit/scatter/emit
-       │                        │                       │              │
-       │  init_kernel()         │  reads std params     │  bounces    visit_rt() dispatch
-       │  builds Object[]       │  sets up camera       │  loop        to variant
-       │  uploads to device     │  launches parallel_for│              types
+                          ┌──────────────────┐
+     GLFW + OpenGL        │   sandbox (host)  │  dlopen → kernel.so
+      ←→ ImGui window     │   main.cpp        │──────────→ one_weekend.so
+       ↑                  │   kernel_library  │──────────→ cornell_box.so
+       │                  │   scene_registry  │──────────→ mandelbrot.so
+       │                  │   param_ui        │
+       │                  │   watcher         │
+       │                  │   spdlog          │
+       │                  └──────────────────┘
+     Framebuffer               │ SYCL queue
+     (OpenGL texture)          │ (GPU or CPU)
+                               ↓
+                         parallel_for
+                         (per-pixel tracing)
 ```
 
-Each raytracer kernel (`.so` loaded at runtime) exposes four `extern "C"` functions:
-`get_kernel_desc()`, `init_kernel()`, `render_kernel()`, `shutdown_kernel()`.
-The heavy lifting is done by the shared `rt/` library.
+## Host side (`src/`)
 
-## Variant-based polymorphism (no vtables, no function pointers)
+### Main loop (`src/main.cpp`)
 
-Geometry and material types are stored as `std::variant` with no base classes
-and no virtual methods.  Dispatch is done at compile time via `visit_rt()` —
-a recursive template that expands to a chain of `if (index == 0) … else if …`
-at compile time, producing no function pointers or vtable lookups.
+Each frame:
+1. **Poll events** — GLFW input, inotify source watcher.
+2. **Detect window resize** — recreate render texture + SYCL buffers.
+3. **Check source changes** — hot-reload any modified kernel `.cpp`/`.h`.
+4. **ImGui frame** — dockspace, background render texture, control panels.
+5. **Camera controls** — 2D pan/zoom (Mandelbrot) or 3D orbit/WASD (raytracers).
+   Ctrl+scroll = aperture, Ctrl+Shift+scroll = FOV, Ctrl+Alt+scroll = roll.
+6. **Render** — call kernel's `render_kernel()` via `dlsym`.
+7. **Tonemap + display** — copy accumulation buffer from device, tonemap
+   (Reinhard + gamma), upload to OpenGL texture.
+8. **Render ImGui** — draw UI over the scene.
+
+### Kernel library (`src/kernel_library.cpp`)
+
+Each kernel is a shared library built by `acpp` (AdaptiveCpp).  On load:
+1. Copy the `.so` to a versioned path (e.g. `libone_weekend.v3.so`).
+2. `dlopen` the copy (so a fresh handle is guaranteed).
+3. `dlsym` `get_kernel_desc()` to read the parameter metadata.
+4. Compute per-param buffer offsets.
+
+Hot-reload: `inotify` watches the kernel source directory.  On file change,
+`cmake --build` is run for that target, then the `.so` is reloaded.
+
+### Scene registry (`src/scene_registry.cpp`)
+
+YAML files in `scenes/` define named scenes referencing a kernel:
+
+```yaml
+name: "Cornell Box"
+kernel: cornell_box
+params:
+  spp_frame: 1
+  light_color: [1.0, 1.0, 1.0]
+```
+
+`apply_params()` fills a kernel's params buffer with defaults from
+`ParamMeta`, then overlays YAML values.
+
+### Parameter UI (`src/param_ui.cpp`)
+
+Dynamically generates ImGui controls from `ParamMeta[]`:
+- `float` → `SliderFloat` / `InputFloat`
+- `int` → `SliderInt` / `InputInt`
+- `bool` → `Checkbox`
+- `COLOR_RGB` → `ColorEdit3`
+- `VEC3` → `InputFloat3`
+- `ENUM` → `Combo`
+
+All values are stored as `float` in the params buffer (including ints and
+bools) so the kernel reads them uniformly as `(int)p[idx]`.
+
+## Raytracing library (`include/rt/`)
+
+### Variant-based polymorphism
+
+Geometry and material types are stored as `std::variant` with no base
+classes and no virtual methods.  Dispatch is done at compile time via
+`visit_rt()` — a recursive template that expands to a chain of
+`if (index == 0) … else if …`, producing no function pointers or vtables.
 
 ```
 Hittable = std::variant<Sphere, Quad>
 Material = std::variant<Lambertian, Metal, Dielectric, DiffuseLight>
-
-Object { Hittable hittable; Material material; }
+Object   { Hittable hittable; Material material; }
 ```
 
 - `Object::hit()` → `visit_rt(hittable, [](auto& h) { h.hit(…); })`
 - `Object::scatter()` → `visit_rt(material, [](auto& m) { m.scatter(…); })`
 - `Object::emit()` → `visit_rt(material, [](auto& m) { m.emit(…); })`
 
-This works on any SYCL backend (CPU, CUDA, ROCm) because no virtual tables
-or function pointers are used.
+This works on any SYCL backend (CPU, CUDA) because no vtables or
+function pointers are used.
 
-## std::optional return values
+### std::optional return values
 
 Instead of output-reference parameters + `bool`:
 
 ```cpp
-// Before (bad)
-bool hit(const Ray&, float, float, HitRecord&) const;
-bool scatter(const Ray&, const HitRecord&, float3&, Ray&, RNG&) const;
-
-// After (good)
-std::optional<HitRecord> hit(const Ray&, float, float) const;
-std::optional<ScatterRecord> scatter(const Ray&, const HitRecord&, RNG&) const;
+std::optional<HitRecord>      hit(const Ray&, float, float) const;
+std::optional<ScatterRecord>  scatter(const Ray&, const HitRecord&, RNG&) const;
 ```
 
-`ScatterRecord` bundles `attenuation` + `scattered` ray into a single struct.
+`ScatterRecord` bundles `attenuation` + `scattered` ray.
 
-## Scene building helpers
+### Scene building helpers
 
-`rt/scene.h` provides host-side helpers for constructing axis-aligned geometry:
+`rt/scene.h` provides host-side helpers for axis-aligned geometry:
 
 ```cpp
 quad_corner(Axis::Y, 3.0f, -2, 2, -2, 2, 0);
 add_quad(objects, count, Axis::X, -2.0f, -2, 2, 0, 3, material);
-add_box(objects, count, corner_x, corner_y, corner_z, size_x, size_y, size_z, material);
+add_box(objects, count, cx, cy, cz, sx, sy, sz, material);
 ```
 
-The `Axis` enum class (`Axis::X`, `Axis::Y`, `Axis::Z`) replaces bare `0`/`1`/`2`.
+### Standard parameter layout
 
-## Standard parameter layout
+Every raytracer kernel's params buffer starts with the same layout
+(`enum rt_std_param` in `params.h`), then kernel-specific params from
+index 13 onward (`enum { … }`).
 
-Every raytracer kernel's params buffer starts with these seven values
-(in this exact order, as a plain `enum rt_std_param`):
-
-| Index | Name            | Type   | Description                     |
-|-------|-----------------|--------|---------------------------------|
-| 0     | RT_SPP_FRAME    | int    | Samples per frame               |
-| 1     | RT_MAX_BOUNCES  | int    | Maximum ray path depth          |
-| 2–4   | RT_CAM_EYE      | VEC3   | Camera position                 |
-| 5–7   | RT_CAM_AT       | VEC3   | Look-at target                  |
-| 8     | RT_CAM_FOV      | float  | Vertical field of view (deg)    |
-| 9     | RT_CAM_APERTURE | float  | Depth-of-field aperture         |
-| 10–12 | RT_CAM_UP       | VEC3   | Camera up vector                |
-| 13+   | —               | —      | Kernel-specific parameters      |
-
-Kernel-specific params start at index 13 with an anonymous `enum { … }`.
-
-## File structure
+### File structure
 
 ```
 include/rt/
   math.h              — float3, operators, RNG
   types_fwd.h         — Ray, HitRecord, ScatterRecord
-  types.h             — Hittable variant, Material variant, Object class
+  types.h             — Hittable/Material variants, Object class
   helpers.h           — random_in_unit_sphere, reflect, refract, schlick
-  variant.h           — visit_rt<>() — compile-time variant dispatch
-  camera.h            — Camera, lookat()
+  variant.h           — visit_rt<>() compile-time variant dispatch
+  camera.h            — Camera struct, lookat()
   params.h            — rt_std_param enum
-  trace.h             — Object::hit/scatter/emit dispatch, trace(), render_main<>()
+  trace.h             — Object dispatch, trace(), render_main<>()
   scene.h             — Axis enum, quad_corner, add_quad, add_box
-  hittables/
-    sphere.h          — Sphere class + sphere() factory
-    quad.h            — Quad   class + quad()   factory
-  materials/
-    lambertian.h      — Lambertian  + lambertian()
-    metal.h           — Metal       + metal()
-    dielectric.h      — Dielectric  + dielectric()
-    diffuse_light.h   — DiffuseLight + diffuse_light()
+  hittables/          — Sphere, Quad (each in own file, with factory)
+  materials/          — Lambertian, Metal, Dielectric, DiffuseLight
 ```
+
+## Kernels (`kernels/`)
+
+Each kernel is a shared library exposing four `extern "C"` functions:
+
+| Function            | Called when      | Purpose                                  |
+|---------------------|------------------|------------------------------------------|
+| `get_kernel_desc()` | `.so` loaded     | Return parameter metadata + limits       |
+| `init_kernel()`     | Scene selected   | Build geometry, upload to device         |
+| `render_kernel()`   | Every frame      | Read params, call `rt::render_main()`   |
+| `shutdown_kernel()` | Scene changed    | Free device memory                       |
+
+Three kernels:
+- **mandelbrot** — Mandelbrot fractal (no ray tracing, single-frame).
+- **one_weekend** — Raytraced spheres (lambertian, metal, dielectric).
+- **cornell_box** — Raytraced quads with emissive light source.
+
+## Build system
+
+Dependencies are managed by Conan (`conanfile.py`).  Two build directories
+are maintained:
+
+```bash
+build/        # cmake --preset conan-release    (Release, -O3)
+build_debug/  # cmake --preset conan-debug      (Debug, -O0 -g)
+```
+
+Kernels are built via `add_sycl_to_target()` (AdaptiveCpp).  The `generic`
+backend is used (OpenMP CPU), portable across any system.
