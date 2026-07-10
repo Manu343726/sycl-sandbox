@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstring>
+#include <type_traits>
 #include <sycl/sycl.hpp>
 #include <alloc/buffer.h>
 #include <alloc/tag.h>
@@ -117,6 +118,8 @@ class vector {
 public:
     vector(size_t max_elements, sycl::queue &queue)
         : impl_(max_elements, sizeof(T), alignof(T), queue) {
+        static_assert(std::is_trivially_copyable_v<T>,
+                      "SYCL device types must be trivially copyable");
     }
 
     ~vector() = default;

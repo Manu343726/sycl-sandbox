@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include "tag.h"
 
 namespace alloc {
@@ -9,6 +10,9 @@ namespace alloc {
 /// Pointer is T-aligned; count is number of full elements that fit.
 template <alloc::Target Tag, typename T>
 struct Buffer {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "SYCL device types must be trivially copyable");
+
     T      *data  = nullptr;
     size_t  count = 0;
 
