@@ -39,17 +39,17 @@ public:
         other.count_ = 0;
     }
 
-    vector &operator=(vector &&other) noexcept {
-        if (this != &other) {
-            allocator_.reset_and_free(*queue_);
-            queue_        = other.queue_;
-            allocator_    = std::move(other.allocator_);
-            element_size_ = other.element_size_;
-            alignment_    = other.alignment_;
-            count_        = other.count_;
-            other.queue_  = nullptr;
-            other.count_  = 0;
-        }
+    friend void swap(vector &a, vector &b) noexcept {
+        using std::swap;
+        swap(a.queue_,        b.queue_);
+        swap(a.allocator_,    b.allocator_);
+        swap(a.element_size_, b.element_size_);
+        swap(a.alignment_,    b.alignment_);
+        swap(a.count_,        b.count_);
+    }
+
+    vector &operator=(vector other) noexcept {
+        swap(*this, other);
         return *this;
     }
 
@@ -68,13 +68,7 @@ public:
         }
     }
 
-    vector &operator=(const vector &other) {
-        if (this != &other) {
-            vector tmp(other);
-            *this = std::move(tmp);
-        }
-        return *this;
-    }
+
 
     void push_back(const void *element) {
         auto buf = allocator_.allocate(element_size_, alignment_);
