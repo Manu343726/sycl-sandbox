@@ -63,14 +63,15 @@ template <typename BgFn>
 void render_main(sycl::queue* q, int w, int h,
                  const float* p, float* accum, int si,
                  const Object* d_objs, int count, BgFn&& bg_fn) {
-    int samples_per_frame = (int)p[RT_SPP_FRAME];
-    int max_bounces       = (int)p[RT_MAX_BOUNCES];
+    auto rti = [](rt_std_param e) { return static_cast<int>(e); };
+    int samples_per_frame = (int)p[rti(rt_std_param::RT_SPP_FRAME)];
+    int max_bounces       = (int)p[rti(rt_std_param::RT_MAX_BOUNCES)];
     float3 camera_eye, camera_at, camera_up;
-    memcpy(&camera_eye, p + RT_CAM_EYE, 12);
-    memcpy(&camera_at,  p + RT_CAM_AT,  12);
-    memcpy(&camera_up,  p + RT_CAM_UP,  12);
-    float field_of_view      = p[RT_CAM_FOV];
-    float aperture_size      = p[RT_CAM_APERTURE];
+    memcpy(&camera_eye, p + rti(rt_std_param::RT_CAM_EYE), 12);
+    memcpy(&camera_at,  p + rti(rt_std_param::RT_CAM_AT),  12);
+    memcpy(&camera_up,  p + rti(rt_std_param::RT_CAM_UP),  12);
+    float field_of_view      = p[rti(rt_std_param::RT_CAM_FOV)];
+    float aperture_size      = p[rti(rt_std_param::RT_CAM_APERTURE)];
     float aspect_ratio       = (float)w / (float)h;
 
     Camera camera = lookat(camera_eye, camera_at, camera_up,

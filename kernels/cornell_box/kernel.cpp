@@ -24,8 +24,8 @@ static ParamMeta params_meta[]={
     {"light_color","Ceiling light color",ParamType::COLOR_RGB,.default_c3={1,1,1}},
     {"light_strength","Ceiling light intensity",ParamType::FLOAT,.range={.f={1,50,1}},.default_f=15},
 };
-enum ParamIndex {
-    PARAM_LIGHT_COLOR     = RT_NUM_STD_PARAMS,
+enum ParamIndex : int {
+    PARAM_LIGHT_COLOR     = static_cast<int>(rt_std_param::RT_NUM_STD_PARAMS),
     PARAM_LIGHT_STRENGTH  = PARAM_LIGHT_COLOR + 3,
 };
 static KernelDesc desc={

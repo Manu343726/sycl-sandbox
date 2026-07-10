@@ -30,10 +30,10 @@ static ParamMeta params_meta[] = {
     {"ground_color","Ground sphere albedo",ParamType::COLOR_RGB,.default_c3={0.5f,0.5f,0.5f}},
     {"background","Sky colour",ParamType::COLOR_RGB,.default_c3={0.5f,0.7f,1}},
 };
-enum ParamIndex {
-    PARAM_NUM_SPHERES = RT_NUM_STD_PARAMS,
-    PARAM_GROUND_COLOR = PARAM_NUM_SPHERES + 1,
-    PARAM_BACKGROUND = PARAM_GROUND_COLOR + 3,
+enum ParamIndex : int {
+    PARAM_NUM_SPHERES    = static_cast<int>(rt_std_param::RT_NUM_STD_PARAMS),
+    PARAM_GROUND_COLOR   = PARAM_NUM_SPHERES + 1,
+    PARAM_BACKGROUND     = PARAM_GROUND_COLOR + 3,
 };
 static KernelDesc desc={
     "one_weekend","Raytracing in One Weekend — random spheres",
