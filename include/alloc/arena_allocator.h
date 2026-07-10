@@ -8,10 +8,10 @@
 namespace alloc::raw {
 
 /// Arena allocator — allocates from a chain of fixed-size blocks.
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 class ArenaAllocator {
 public:
-    static constexpr AllocatorTag tag = Tag_;
+    static constexpr alloc::Target tag = Tag_;
 
     ArenaAllocator(sycl::queue &queue, size_t block_size)
         : block_size_(block_size), queue_(queue) {
@@ -47,7 +47,7 @@ private:
 
 namespace alloc::raw {
 
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 Buffer<Tag_> ArenaAllocator<Tag_>::allocate(size_t bytes, size_t alignment) {
     // Check current block
     if (current_) {
@@ -70,7 +70,7 @@ Buffer<Tag_> ArenaAllocator<Tag_>::allocate(size_t bytes, size_t alignment) {
     return {reinterpret_cast<void *>(aligned), bytes};
 }
 
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 void ArenaAllocator<Tag_>::free_all() {
     RootAllocator<Tag_> root;
     for (auto &b : blocks_) {
@@ -81,7 +81,7 @@ void ArenaAllocator<Tag_>::free_all() {
     current_offset_ = 0;
 }
 
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 Buffer<Tag_> ArenaAllocator<Tag_>::fresh_block() {
     return RootAllocator<Tag_>().allocate(block_size_, queue_);
 }

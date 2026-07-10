@@ -7,17 +7,17 @@
 namespace alloc::raw {
 
 /// Tag-dispatched root allocator: HostAllocator when Tag=Host, DeviceAllocator when Tag=Device.
-template <AllocatorTag Tag>
+template <alloc::Target Tag>
 struct RootAllocator;
 
 template <>
-struct RootAllocator<AllocatorTag::Host> : HostAllocator {
+struct RootAllocator<alloc::Target::Host> : HostAllocator {
     using HostAllocator::allocate;
     using HostAllocator::deallocate;
 };
 
 template <>
-struct RootAllocator<AllocatorTag::Device> : DeviceAllocator {
+struct RootAllocator<alloc::Target::Device> : DeviceAllocator {
     using DeviceAllocator::allocate;
     using DeviceAllocator::deallocate;
 };

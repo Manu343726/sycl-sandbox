@@ -4,11 +4,15 @@
 #include "linear_allocator.h"
 #include "stack_allocator.h"
 
-/// Composable allocator variant, keyed by Tag.
-/// Only allocators matching the given tag are included.
-template <AllocatorTag Tag>
+namespace alloc::raw {
+
+/// Composable allocator variant, keyed by Target.
+/// Only allocators matching the given target are included.
+template <alloc::Target Tgt>
 using Allocator = std::variant<
-    alloc::raw::RootAllocator<Tag>,
-    alloc::raw::LinearAllocator<Tag>,
-    alloc::raw::StackAllocator<Tag>
+    RootAllocator<Tgt>,
+    LinearAllocator<Tgt>,
+    StackAllocator<Tgt>
 >;
+
+} // namespace alloc::raw

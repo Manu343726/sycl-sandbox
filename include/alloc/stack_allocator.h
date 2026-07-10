@@ -8,10 +8,10 @@
 namespace alloc::raw {
 
 /// Stack allocator — supports push/pop via markers.
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 class StackAllocator {
 public:
-    static constexpr AllocatorTag tag = Tag_;
+    static constexpr alloc::Target tag = Tag_;
     using Marker = size_t;
 
     StackAllocator() = default;

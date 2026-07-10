@@ -11,7 +11,7 @@
 namespace containers::raw {
 
 /// Untyped vector<Tag> — fixed-max-length buffer on LinearAllocator.
-template <AllocatorTag Tag>
+template <alloc::Target Tag>
 class vector {
 public:
     vector(size_t max_elements, size_t element_size, size_t alignment, sycl::queue &queue)
@@ -43,7 +43,7 @@ public:
     size_t size()     const { return count_; }
     size_t max_size() const { return allocator_.pool().size / element_size_; }
 
-    template <AllocatorTag TargetTag>
+    template <alloc::Target TargetTag>
     vector<TargetTag> transfer(sycl::queue &queue) {
         size_t n = count_;
         vector<TargetTag> result(n, element_size_, alignment_, queue);
@@ -71,7 +71,7 @@ private:
 namespace containers {
 
 /// Typed vector<Tag, T> — type-safe wrapper around raw::vector.
-template <AllocatorTag Tag, typename T>
+template <alloc::Target Tag, typename T>
 class vector {
 public:
     vector(size_t max_elements, sycl::queue &queue)
@@ -86,7 +86,7 @@ public:
     size_t size()       const { return impl_.size(); }
     size_t max_size()   const { return impl_.max_size(); }
 
-    template <AllocatorTag TargetTag>
+    template <alloc::Target TargetTag>
     vector<TargetTag, T> transfer(sycl::queue &queue) {
         auto untyped = impl_.template transfer<TargetTag>(queue);
         vector<TargetTag, T> result(std::move(untyped));

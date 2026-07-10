@@ -12,10 +12,10 @@ namespace alloc::raw {
 /// Obtains a large block from an upstream allocator once, then sub-allocates
 /// linearly.  Individual deallocations are a no-op; the entire pool is
 /// reclaimed via reset().  Ideal for per-frame scratch allocation.
-template <AllocatorTag Tag_>
+template <alloc::Target Tag_>
 class LinearAllocator {
 public:
-    static constexpr AllocatorTag tag = Tag_;
+    static constexpr alloc::Target tag = Tag_;
 
     LinearAllocator() = default;
 
