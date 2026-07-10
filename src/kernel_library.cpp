@@ -1,5 +1,4 @@
 #include "kernel_library.h"
-#include <sycl-sandbox/rt/params.h>
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
@@ -67,16 +66,8 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
     kh->path = ver_so;
     kh->desc = *get_desc();
 
-    // Compute buffer offsets for each param.
-    // Kernel params sit after the implicit standard params block.
-    uint32_t offset = RT_NUM_STD_PARAMS * sizeof(float);
-    for ( int i = 0; i < kh->desc.param_count; i++ ) {
-        auto &p = const_cast<ParamMeta &>(kh->desc.params[i]);
-        p.buffer_offset = offset;
-        p.buffer_size = param_buffer_size(p);
-        offset += p.buffer_size;
-    }
-    kh->desc.params_buffer_size = offset;
+    // buffer_offset, buffer_size, and params_buffer_size are already set by
+    // the kernel's get_kernel_desc() — trust them as-is.
 
     // Store the handle, activate it
     auto *ptr = kh.get();
@@ -87,7 +78,7 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
                  kernel_name,
                  gen,
                  ptr->desc.param_count,
-                 offset);
+                 ptr->desc.params_buffer_size);
     return ptr;
 }
 
