@@ -48,6 +48,8 @@ add_executable(sandbox
     param_ui.cpp
 )
 
+target_compile_options(sandbox PRIVATE -Werror -Wno-c99-designator)
+
 target_include_directories(sandbox PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )

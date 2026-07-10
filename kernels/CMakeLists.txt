@@ -7,6 +7,8 @@ foreach(kdir ${KERNEL_DIRS})
     add_library(${kdir} SHARED ${ksources})
     add_sycl_to_target(TARGET ${kdir} SOURCES ${ksources})
 
+    target_compile_options(${kdir} PRIVATE -Werror -Wno-c99-designator)
+
     target_include_directories(${kdir} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/${kdir}
