@@ -12,6 +12,7 @@
 using namespace rt;
 using rt::materials::lambertian;
 using rt::materials::diffuse_light;
+using rt::Axis;
 
 static ParamMeta params_meta[]={
     {"spp_frame","Samples per frame",ParamType::INT,.range={.i={1,64,1}},.default_i=1},
@@ -58,15 +59,12 @@ extern "C" void init_kernel(sycl::queue* queue, int, int,
     float3 green  = {0.12f, 0.45f, 0.15f};
     float3 light_emission = scale(light_color, light_strength);
 
-    // Room walls (axis: 0=X, 1=Y, 2=Z)
-    add_quad(objects, object_count, 1, 0.0f,   -2, 2, -2, 2, lambertian(white));
-    add_quad(objects, object_count, 1, 3.0f,   -2, 2, -2, 2, lambertian(white));
-    add_quad(objects, object_count, 2, -2.0f,  -2, 2,  0, 3, lambertian(white));
-    add_quad(objects, object_count, 0, -2.0f,  -2, 2,  0, 3, lambertian(red));
-    add_quad(objects, object_count, 0, 2.0f,   -2, 2,  0, 3, lambertian(green));
-
-    // Ceiling light
-    add_quad(objects, object_count, 1, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
+    add_quad(objects, object_count, Axis::Y, 0.0f,   -2, 2, -2, 2, lambertian(white));
+    add_quad(objects, object_count, Axis::Y, 3.0f,   -2, 2, -2, 2, lambertian(white));
+    add_quad(objects, object_count, Axis::Z, -2.0f,  -2, 2,  0, 3, lambertian(white));
+    add_quad(objects, object_count, Axis::X, -2.0f,  -2, 2,  0, 3, lambertian(red));
+    add_quad(objects, object_count, Axis::X, 2.0f,   -2, 2,  0, 3, lambertian(green));
+    add_quad(objects, object_count, Axis::Y, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
 
     // Tall box
     add_box(objects, object_count, -0.8f, 0.0f, -0.8f,  0.6f, 1.5f, 0.6f,
