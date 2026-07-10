@@ -46,39 +46,6 @@ static Object *g_scene_objects = nullptr;
 static int g_num_objects = 0;
 
 /// Build four corners of an axis-aligned rectangle and add it as a Quad.
-static void add_quad(Object *objects,
-                     int &count,
-                     Axis primary,
-                     float value,
-                     float min_s,
-                     float max_s,
-                     float min_t,
-                     float max_t,
-                     Material material) {
-    float3 p0 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 0);
-    float3 p1 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 1);
-    float3 p2 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 2);
-    add(objects, count, {hittables::quad_from_corners(p0, p1, p2), std::move(material)});
-}
-
-/// Build an axis-aligned box (six Quad faces).
-static void add_box(Object *objects,
-                    int &count,
-                    float cx,
-                    float cy,
-                    float cz,
-                    float sx,
-                    float sy,
-                    float sz,
-                    Material material) {
-    add_quad(objects, count, Axis::Y, cy + sy, cx, cx + sx, cz, cz + sz, material);
-    add_quad(objects, count, Axis::Y, cy, cx, cx + sx, cz, cz + sz, material);
-    add_quad(objects, count, Axis::Z, cz, cx, cx + sx, cy, cy + sy, material);
-    add_quad(objects, count, Axis::Z, cz + sz, cx, cx + sx, cy, cy + sy, material);
-    add_quad(objects, count, Axis::X, cx, cz, cz + sz, cy, cy + sy, material);
-    add_quad(objects, count, Axis::X, cx + sx, cz, cz + sz, cy, cy + sy, material);
-}
-
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
     int std_offset = RT_NUM_STD_PARAMS;
@@ -99,31 +66,38 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     float3 green = {0.12f, 0.45f, 0.15f};
     float3 light_emission = scale(light_color, light_strength);
 
-    add_quad(objects, object_count, Axis::Y, 0.0f, -2, 2, -2, 2, lambertian(white));
-    add_quad(objects, object_count, Axis::Y, 3.0f, -2, 2, -2, 2, lambertian(white));
-    add_quad(objects, object_count, Axis::Z, -2.0f, -2, 2, 0, 3, lambertian(white));
-    add_quad(objects, object_count, Axis::X, -2.0f, -2, 2, 0, 3, lambertian(red));
-    add_quad(objects, object_count, Axis::X, 2.0f, -2, 2, 0, 3, lambertian(green));
-    add_quad(objects, object_count, Axis::Y, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
+    auto add_quad_at = [&](Axis primary,
+                           float value,
+                           float min_s,
+                           float max_s,
+                           float min_t,
+                           float max_t,
+                           Material material) {
+        float3 p0 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 0);
+        float3 p1 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 1);
+        float3 p2 = quad_corner(primary, value, min_s, max_s, min_t, max_t, 2);
+        add(objects, object_count, {hittables::quad_from_corners(p0, p1, p2), std::move(material)});
+    };
 
-    add_box(objects,
-            object_count,
-            -0.8f,
-            0.0f,
-            -0.8f,
-            0.6f,
-            1.5f,
-            0.6f,
-            lambertian({0.55f, 0.55f, 0.55f}));
-    add_box(objects,
-            object_count,
-            0.8f,
-            0.0f,
-            -0.3f,
-            0.6f,
-            0.6f,
-            1.2f,
-            lambertian({0.55f, 0.55f, 0.55f}));
+    auto add_box_at =
+        [&](float cx, float cy, float cz, float sx, float sy, float sz, Material material) {
+            add_quad_at(Axis::Y, cy + sy, cx, cx + sx, cz, cz + sz, material);
+            add_quad_at(Axis::Y, cy, cx, cx + sx, cz, cz + sz, material);
+            add_quad_at(Axis::Z, cz, cx, cx + sx, cy, cy + sy, material);
+            add_quad_at(Axis::Z, cz + sz, cx, cx + sx, cy, cy + sy, material);
+            add_quad_at(Axis::X, cx, cz, cz + sz, cy, cy + sy, material);
+            add_quad_at(Axis::X, cx + sx, cz, cz + sz, cy, cy + sy, material);
+        };
+
+    add_quad_at(Axis::Y, 0.0f, -2, 2, -2, 2, lambertian(white));
+    add_quad_at(Axis::Y, 3.0f, -2, 2, -2, 2, lambertian(white));
+    add_quad_at(Axis::Z, -2.0f, -2, 2, 0, 3, lambertian(white));
+    add_quad_at(Axis::X, -2.0f, -2, 2, 0, 3, lambertian(red));
+    add_quad_at(Axis::X, 2.0f, -2, 2, 0, 3, lambertian(green));
+    add_quad_at(Axis::Y, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
+
+    add_box_at(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f, lambertian({0.55f, 0.55f, 0.55f}));
+    add_box_at(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f, lambertian({0.55f, 0.55f, 0.55f}));
 
     g_scene_objects = sycl::malloc_device<Object>(object_count, *queue);
     queue->memcpy(g_scene_objects, objects, object_count * sizeof(Object)).wait();
