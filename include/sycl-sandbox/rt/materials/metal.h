@@ -22,12 +22,12 @@ public:
     /// Reflects the incoming ray about the surface normal, adding a random
     /// perturbation scaled by `fuzz`.  Returns an empty Optional if the scattered
     /// ray points into the surface (absorption).
-    Optional<ScatterRecord>
+    optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
         if ( dot(scattered.dir, hit.normal) <= 0 ) {
-            return Optional<ScatterRecord>{};
+            return nullopt;
         }
         return ScatterRecord {albedo, scattered};
     }

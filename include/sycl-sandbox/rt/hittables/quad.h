@@ -23,17 +23,17 @@ public:
     }
 
     /// Ray-quad intersection using barycentric (α, β) coordinates.
-    Optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
         if ( sycl::fabs(denom) < 1e-8f ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         // Compute the distance t along the ray; reject if outside the allowed range
         float t = dot(sub(base, ray.orig), normal) / denom;
         if ( t < t_min || t > t_max ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         // Compute the hit point and the vector from the base corner to it
@@ -50,7 +50,7 @@ public:
         float d21 = dot(pa, edge_v);
         float denominator = d00 * d11 - d01 * d01;
         if ( sycl::fabs(denominator) < 1e-12f ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         float alpha = (d11 * d20 - d01 * d21) / denominator;
@@ -58,7 +58,7 @@ public:
 
         // The hit point is inside the quad only if α, β ∈ [0, 1]
         if ( alpha < 0 || alpha > 1 || beta < 0 || beta > 1 ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         // Fill the HitRecord; flip the normal if the ray hit from inside

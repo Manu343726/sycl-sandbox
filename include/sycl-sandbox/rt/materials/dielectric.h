@@ -15,7 +15,7 @@ public:
     }
 
     /// Refract or reflect the incoming ray using Snell's law + Schlick Fresnel.
-    Optional<ScatterRecord>
+    optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         // Determine whether the ray is entering the dielectric or exiting it
         float3 outward_normal;

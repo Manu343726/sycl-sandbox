@@ -15,7 +15,7 @@ public:
     }
 
     /// Ray-sphere intersection using the reduced quadratic formula.
-    Optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the vector from the sphere centre to the ray origin
         float3 oc = sub(ray.orig, center);
 
@@ -28,7 +28,7 @@ public:
         // Solve the reduced quadratic: t = (-half_b ± √(half_b² − a·c)) / a
         float discriminant = half_b * half_b - a * c_;
         if ( discriminant <= 0 ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         float sqrt_d = sycl::sqrt(discriminant);
@@ -37,7 +37,7 @@ public:
             t = (-half_b + sqrt_d) / a;
         }
         if ( t < t_min || t > t_max ) {
-            return Optional<HitRecord>{};
+            return nullopt;
         }
 
         // Fill the HitRecord with the intersection point and the outward-facing normal

@@ -12,8 +12,8 @@ public:
     explicit DiffuseLight(float3 e) : emit_color(e) {
     }
 
-    Optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
-        return Optional<ScatterRecord>{};
+    optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
+        return nullopt;
     }
     float3 emit(const HitRecord &) const {
         return emit_color;

@@ -1,46 +1,58 @@
 #pragma once
 
-/// Minimal POD optional — no constructors, no exceptions, trivially copyable.
+/// Minimal POD optional — no exceptions, trivially copyable.
 /// Drop-in for std::optional in device code where exception infrastructure is
 /// unavailable (AdaptiveCpp / hipSYCL).
 namespace rt {
 
+struct nullopt_t {
+    explicit constexpr nullopt_t(int) {
+    }
+};
+inline constexpr nullopt_t nullopt {0};
+
 template <typename T>
-struct Optional {
+struct optional {
     bool has_value;
     T value;
 
-    Optional() : has_value(false), value{} {
+    constexpr optional() : has_value(false), value {} {
     }
-    Optional(const T &v) : has_value(true), value(v) {
+    constexpr optional(nullopt_t) : has_value(false), value {} {
     }
-    Optional(T &&v) : has_value(true), value(static_cast<T &&>(v)) {
+    constexpr optional(const T &v) : has_value(true), value(v) {
+    }
+    constexpr optional(T &&v) : has_value(true), value(static_cast<T &&>(v)) {
     }
 
-    Optional &operator=(const T &v) {
+    optional &operator=(nullopt_t) {
+        has_value = false;
+        return *this;
+    }
+    optional &operator=(const T &v) {
         has_value = true;
         value = v;
         return *this;
     }
-    Optional &operator=(T &&v) {
+    optional &operator=(T &&v) {
         has_value = true;
         value = static_cast<T &&>(v);
         return *this;
     }
 
-    explicit operator bool() const {
+    explicit constexpr operator bool() const {
         return has_value;
     }
-    const T *operator->() const {
+    constexpr const T *operator->() const {
         return &value;
     }
-    T *operator->() {
+    constexpr T *operator->() {
         return &value;
     }
-    const T &operator*() const {
+    constexpr const T &operator*() const {
         return value;
     }
-    T &operator*() {
+    constexpr T &operator*() {
         return value;
     }
 };

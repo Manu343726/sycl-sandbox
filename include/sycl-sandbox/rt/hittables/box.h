@@ -31,8 +31,8 @@ public:
     }
 
     /// Iterate over all six faces and return the closest hit.
-    Optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
-        Optional<HitRecord> closest;
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        optional<HitRecord> closest;
         for ( int i = 0; i < 6; i++ ) {
             auto hit = faces[i].hit(ray, t_min, closest ? closest->t : t_max);
             if ( hit ) {
