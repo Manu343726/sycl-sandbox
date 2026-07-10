@@ -106,10 +106,7 @@ extern "C" void render_kernel(sycl::queue* q, int w, int h,
     float cam_fov = p[P_CAM_FOV];
     float cam_aperture = p[P_CAM_APERTURE];
 
-    rt::Camera cam = rt::lookat(cam_eye, cam_at, {0,1,0}, cam_fov, aspect);
-
-    // Background gradient direction
-    rt::float3 bg_dir = rt::norm(rt::sub(cam_at, cam_eye));
+    rt::Camera cam = rt::lookat(cam_eye, cam_at, {0,1,0}, cam_fov, aspect, 10.f);
 
     auto* acc_local = (float*)accum;
     auto* d_sph = g_d_spheres;
