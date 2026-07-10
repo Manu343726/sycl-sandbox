@@ -23,7 +23,7 @@ public:
     float3 emit(const HitRecord&) const { return {0,0,0}; }
 };
 
-inline Metal make_metal(float3 albedo, float fuzz) {
+inline Metal metal(float3 albedo, float fuzz) {
     return Metal(albedo, fuzz);
 }
 

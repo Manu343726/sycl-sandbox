@@ -22,7 +22,7 @@ public:
     float3 emit(const HitRecord&) const { return {0,0,0}; }
 };
 
-inline Lambertian make_lambertian(float3 albedo) {
+inline Lambertian lambertian(float3 albedo) {
     return Lambertian(albedo);
 }
 

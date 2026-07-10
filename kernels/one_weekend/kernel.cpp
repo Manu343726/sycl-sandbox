@@ -13,10 +13,10 @@
 #include <cstring>
 
 using namespace rt;
-using rt::hittables::make_sphere;
-using rt::materials::make_lambertian;
-using rt::materials::make_metal;
-using rt::materials::make_dielectric;
+using rt::hittables::sphere;
+using rt::materials::lambertian;
+using rt::materials::metal;
+using rt::materials::dielectric;
 
 static ParamMeta params_meta[] = {
     {"spp_frame","Samples per frame",ParamType::INT,.range={.i={1,64,1}},.default_i=1},
@@ -57,7 +57,7 @@ extern "C" void init_kernel(sycl::queue* q,int,int,const void* params,size_t){
     auto* o=new Object[n+4+3];
     int c=0;
 
-    o[c++]={make_sphere({0,-1000,0},1000), make_lambertian(gc)};
+    o[c++]={sphere({0,-1000,0},1000), lambertian(gc)};
 
     for(int k=0;k<n;){
         float x=-10+20*rnd(),z=-10+20*rnd();
@@ -65,14 +65,14 @@ extern "C" void init_kernel(sycl::queue* q,int,int,const void* params,size_t){
         if(len(cen)<=0.9f)continue;
         float3 col={rnd()*rnd(),rnd()*rnd(),rnd()*rnd()};
         float d=rnd();
-        if(d<0.6f)      o[c++]={make_sphere(cen,0.2f), make_lambertian(col)};
-        else if(d<0.85f) o[c++]={make_sphere(cen,0.2f), make_metal(col,0.5f*rnd())};
-        else             o[c++]={make_sphere(cen,0.2f), make_dielectric(1.5f)};
+        if(d<0.6f)      o[c++]={sphere(cen,0.2f), lambertian(col)};
+        else if(d<0.85f) o[c++]={sphere(cen,0.2f), metal(col,0.5f*rnd())};
+        else             o[c++]={sphere(cen,0.2f), dielectric(1.5f)};
         k++;
     }
-    o[c++]={make_sphere({4,1,0},1), make_metal({0.7f,0.6f,0.5f},0)};
-    o[c++]={make_sphere({-4,1,0},1), make_lambertian({0.4f,0.2f,0.1f})};
-    o[c++]={make_sphere({0,1,0},1), make_dielectric(1.5f)};
+    o[c++]={sphere({4,1,0},1), metal({0.7f,0.6f,0.5f},0)};
+    o[c++]={sphere({-4,1,0},1), lambertian({0.4f,0.2f,0.1f})};
+    o[c++]={sphere({0,1,0},1), dielectric(1.5f)};
 
     g_objs=sycl::malloc_device<Object>(c,*q);
     q->memcpy(g_objs,o,c*sizeof(Object)).wait();

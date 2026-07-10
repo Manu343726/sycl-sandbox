@@ -14,7 +14,7 @@ public:
     float3 emit(const HitRecord&) const { return emit_color; }
 };
 
-inline DiffuseLight make_diffuse_light(float3 emit) {
+inline DiffuseLight diffuse_light(float3 emit) {
     return DiffuseLight(emit);
 }
 

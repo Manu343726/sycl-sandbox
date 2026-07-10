@@ -10,9 +10,9 @@
 #include <cstring>
 
 using namespace rt;
-using rt::hittables::make_quad;
-using rt::materials::make_lambertian;
-using rt::materials::make_diffuse_light;
+using rt::hittables::quad;
+using rt::materials::lambertian;
+using rt::materials::diffuse_light;
 
 static ParamMeta params_meta[]={
     {"spp_frame","Samples per frame",ParamType::INT,.range={.i={1,64,1}},.default_i=1},
@@ -59,24 +59,24 @@ extern "C" void init_kernel(sycl::queue* q,int,int,const void* params,size_t){
     auto add=[&](int ax,float av,float b0,float b1,float c0,float c1,Material mat){
         auto a=p4(ax,av,b0,b1,c0,c1,0),b=p4(ax,av,b0,b1,c0,c1,1);
         auto c=p4(ax,av,b0,b1,c0,c1,2),d=p4(ax,av,b0,b1,c0,c1,3);
-        o[i++]={make_quad(a,b,c), mat};
-        o[i++]={make_quad(a,c,d), mat};
+        o[i++]={quad(a,b,c), mat};
+        o[i++]={quad(a,c,d), mat};
     };
 
-    add(1,0,   -2,2,-2,2, make_lambertian(w));
-    add(1,3,   -2,2,-2,2, make_lambertian(w));
-    add(2,-2,  -2,2,0,3,  make_lambertian(w));
-    add(0,-2,  -2,2,0,3,  make_lambertian(r));
-    add(0,2,   -2,2,0,3,  make_lambertian(g));
-    add(1,2.99f,-1,1,-1,1, make_diffuse_light(le));
+    add(1,0,   -2,2,-2,2, lambertian(w));
+    add(1,3,   -2,2,-2,2, lambertian(w));
+    add(2,-2,  -2,2,0,3,  lambertian(w));
+    add(0,-2,  -2,2,0,3,  lambertian(r));
+    add(0,2,   -2,2,0,3,  lambertian(g));
+    add(1,2.99f,-1,1,-1,1, diffuse_light(le));
 
     auto box=[&](float bx,float by,float bz,float bw,float bh,float bd,Material m){
         add(1,by+bh, bx,bx+bw,bz,bz+bd, m); add(1,by, bx,bx+bw,bz,bz+bd, m);
         add(2,bz,   bx,bx+bw,by,by+bh, m); add(2,bz+bd,bx,bx+bw,by,by+bh, m);
         add(0,bx,   bz,bz+bd,by,by+bh, m); add(0,bx+bw,bz,bz+bd,by,by+bh, m);
     };
-    box(-0.8f,0,-0.8f, 0.6f,1.5f,0.6f, make_lambertian({0.55f,0.55f,0.55f}));
-    box(0.8f,0,-0.3f, 0.6f,0.6f,1.2f, make_lambertian({0.55f,0.55f,0.55f}));
+    box(-0.8f,0,-0.8f, 0.6f,1.5f,0.6f, lambertian({0.55f,0.55f,0.55f}));
+    box(0.8f,0,-0.3f, 0.6f,0.6f,1.2f, lambertian({0.55f,0.55f,0.55f}));
 
     g_objs=sycl::malloc_device<Object>(i,*q);
     q->memcpy(g_objs,o,i*sizeof(Object)).wait();

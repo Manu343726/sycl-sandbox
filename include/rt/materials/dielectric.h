@@ -36,7 +36,7 @@ public:
     float3 emit(const HitRecord&) const { return {0,0,0}; }
 };
 
-inline Dielectric make_dielectric(float ir) {
+inline Dielectric dielectric(float ir) {
     return Dielectric(ir);
 }
 

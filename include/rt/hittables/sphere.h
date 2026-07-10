@@ -30,7 +30,7 @@ public:
     }
 };
 
-inline Sphere make_sphere(float3 center, float radius) {
+inline Sphere sphere(float3 center, float radius) {
     return Sphere(center, radius);
 }
 

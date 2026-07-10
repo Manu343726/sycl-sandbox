@@ -34,7 +34,7 @@ public:
     }
 };
 
-inline Quad make_quad(float3 a, float3 b, float3 c) {
+inline Quad quad(float3 a, float3 b, float3 c) {
     return Quad(a, b, c);
 }
 
