@@ -222,14 +222,21 @@ int main(int argc, char **argv) {
     q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
 
     // Auto-load first scene
+    spdlog::info("[startup] scenes loaded: {}", scenes.all().size());
     if ( !scenes.all().empty() ) {
         active_scene = &scenes.all().front();
+        spdlog::info("[startup] first scene: name='{}' kernel='{}' yaml='{}'",
+                     active_scene->name, active_scene->kernel, active_scene->yaml_path);
         spdlog::info("[startup] loading kernel: {}", active_scene->kernel);
         active_kernel = kernels.load(active_scene->kernel);
         spdlog::info("[startup] kernel loaded, target_spp={}, sz={}",
                      active_kernel ? active_kernel->desc.max_spp : 0,
                      active_kernel ? active_kernel->desc.params_buffer_size : 0);
         if ( active_kernel ) {
+            spdlog::info("[startup] kernel '{}' has {} params, params_buffer={}",
+                         active_kernel->desc.name,
+                         active_kernel->desc.param_count,
+                         active_kernel->desc.params_buffer_size);
             target_spp = active_kernel->desc.max_spp;
             auto sz = active_kernel->desc.params_buffer_size;
             h_params = (float *)calloc(sz, 1);
@@ -348,7 +355,9 @@ int main(int argc, char **argv) {
         // ---- param controls ----
         if ( active_kernel && h_params ) {
             ImGui::SeparatorText("Parameters");
+            spdlog::trace("[param] rendering {} params", active_kernel->desc.param_count);
             if ( render_param_controls(active_kernel->desc, h_params, false) ) {
+                spdlog::info("[param] param changed, re-init kernel and reset accum");
                 q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
                 try {
                     call_init_kernel(active_kernel->handle,
@@ -607,6 +616,7 @@ int main(int argc, char **argv) {
             }
 
             if ( changed ) {
+                spdlog::trace("[cam] camera changed, re-init kernel and reset accum");
                 q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
                 try {
                     call_init_kernel(active_kernel->handle,
@@ -625,7 +635,9 @@ int main(int argc, char **argv) {
 
         // ---- render ----
         bool rendered = false;
+        spdlog::trace("[frame] spp={}/{} kernel={}", current_spp, target_spp, active_kernel ? active_kernel->name : "null");
         if ( active_kernel && current_spp < target_spp ) {
+            spdlog::trace("[frame] calling render_kernel sample={}", current_spp);
             try {
                 call_render_kernel(active_kernel->handle,
                                    q,
@@ -636,14 +648,20 @@ int main(int argc, char **argv) {
                                    current_spp);
                 current_spp++;
                 rendered = true;
+                spdlog::trace("[frame] render_kernel OK, spp now {}", current_spp);
             } catch ( const std::exception &e ) {
                 spdlog::error("[sycl] render error: {}", e.what());
                 current_spp = target_spp;
             }
+        } else {
+            spdlog::trace("[frame] skip render: kernel={} spp={}/{}",
+                          active_kernel ? active_kernel->name : "null",
+                          current_spp, target_spp);
         }
 
         // Only update display when rendering happened or on first frame
         if ( rendered || current_spp == 0 ) {
+            spdlog::trace("[frame] display upload (rendered={}, spp={})", rendered, current_spp);
             PROF_ZONE_SCOPED_N("Display upload");
             try {
                 q.memcpy(h_accum, d_accum, pixel_count * 4 * sizeof(float)).wait();

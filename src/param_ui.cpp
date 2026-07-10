@@ -2,9 +2,12 @@
 #include "imgui.h"
 #include <cstdio>
 #include <cstring>
+#include <spdlog/spdlog.h>
 
 static bool render_one(const ParamMeta &p, float *data) {
     bool changed = false;
+
+    spdlog::trace("[param_ui] render '{}' type={}", p.name, static_cast<int>(p.type));
 
     switch ( p.type ) {
         case ParamType::FLOAT: {
