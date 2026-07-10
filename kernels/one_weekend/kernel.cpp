@@ -47,8 +47,9 @@ static KernelDesc desc = {"one_weekend",
                           (const char *[]) {"kernel.cpp", "kernel.h", nullptr}};
 extern "C" KernelDesc *get_kernel_desc() {
     desc.params_buffer_size = RT_NUM_STD_PARAMS * sizeof(float);
-    for ( int i = 0; i < desc.param_count; i++ )
+    for ( int i = 0; i < desc.param_count; i++ ) {
         desc.params_buffer_size += param_buffer_size(params_meta[i]);
+    }
     return &desc;
 }
 
@@ -84,20 +85,22 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
         float x = -10.0f + 20.0f * random_float();
         float z = -10.0f + 20.0f * random_float();
         float3 center = {x, 0.2f, z};
-        if ( len(center) <= 0.9f )
+        if ( len(center) <= 0.9f ) {
             continue;
+        }
 
         float3 color = {random_float() * random_float(),
                         random_float() * random_float(),
                         random_float() * random_float()};
         float choice = random_float();
 
-        if ( choice < 0.6f )
+        if ( choice < 0.6f ) {
             objects[object_count++] = {sphere(center, 0.2f), lambertian(color)};
-        else if ( choice < 0.85f )
+        } else if ( choice < 0.85f ) {
             objects[object_count++] = {sphere(center, 0.2f), metal(color, 0.5f * random_float())};
-        else
+        } else {
             objects[object_count++] = {sphere(center, 0.2f), dielectric(1.5f)};
+        }
         k++;
     }
 

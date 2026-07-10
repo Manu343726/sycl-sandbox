@@ -38,8 +38,9 @@ static KernelDesc desc = {"cornell_box",
                           (const char *[]) {"kernel.cpp", nullptr}};
 extern "C" KernelDesc *get_kernel_desc() {
     desc.params_buffer_size = RT_NUM_STD_PARAMS * sizeof(float);
-    for ( int i = 0; i < desc.param_count; i++ )
+    for ( int i = 0; i < desc.param_count; i++ ) {
         desc.params_buffer_size += param_buffer_size(params_meta[i]);
+    }
     return &desc;
 }
 

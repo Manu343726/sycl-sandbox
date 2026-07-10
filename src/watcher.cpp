@@ -6,13 +6,15 @@
 
 SourceWatcher::SourceWatcher() {
     inotify_fd_ = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-    if ( inotify_fd_ < 0 )
+    if ( inotify_fd_ < 0 ) {
         perror("inotify_init1");
+    }
 }
 
 SourceWatcher::~SourceWatcher() {
-    if ( inotify_fd_ >= 0 )
+    if ( inotify_fd_ >= 0 ) {
         close(inotify_fd_);
+    }
 }
 
 void SourceWatcher::watch_kernel(const std::string &kernel_name, const std::string &source_dir) {
@@ -28,8 +30,9 @@ std::vector<std::string> SourceWatcher::poll() {
     std::vector<std::string> dirty;
     alignas(struct inotify_event) char buf[4096];
     ssize_t len = read(inotify_fd_, buf, sizeof(buf));
-    if ( len <= 0 )
+    if ( len <= 0 ) {
         return dirty;
+    }
 
     for ( char *p = buf; p < buf + len; ) {
         auto *ev = reinterpret_cast<struct inotify_event *>(p);
@@ -40,13 +43,15 @@ std::vector<std::string> SourceWatcher::poll() {
                 auto it = wd_to_kernel_.find(ev->wd);
                 if ( it != wd_to_kernel_.end() ) {
                     bool dup = false;
-                    for ( auto &k : dirty )
+                    for ( auto &k : dirty ) {
                         if ( k == it->second ) {
                             dup = true;
                             break;
                         }
-                    if ( !dup )
+                    }
+                    if ( !dup ) {
                         dirty.push_back(it->second);
+                    }
                 }
             }
         }

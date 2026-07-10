@@ -168,6 +168,19 @@ write rules, summaries, or examples inline.  Rules live in
 `docs/raytracing.md`.  If a rule needs updating, update the doc file,
 not `AGENTS.md`.
 
+## Run clang-format
+
+Always run clang-format after any code change, before committing:
+
+```bash
+clang-format -i src/*.cpp include/rt/**/*.h include/rt/hittables/*.h \
+                include/rt/materials/*.h kernels/*/kernel.cpp
+```
+
+The CI equivalent `make format` can be set up as a phony target.  If
+clang-format is not available, at minimum ensure `InsertBraces` and
+`AllowShortIfStatementsOnASingleLine` are respected by hand.
+
 ## Keeping docs in sync
 
 Architecture changes must update the corresponding docs in the same commit:
@@ -192,11 +205,17 @@ std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
 
     // Solve for t using the reduced quadratic formula
     float discriminant = half_b*half_b - a*c_;
-    if (discriminant <= 0) return std::nullopt;
+    if (discriminant <= 0) {
+        return std::nullopt;
+    }
     float sqrt_d = sycl::sqrt(discriminant);
     float t = (-half_b - sqrt_d) / a;
-    if (t < t_min || t > t_max) t = (-half_b + sqrt_d) / a;
-    if (t < t_min || t > t_max) return std::nullopt;
+    if (t < t_min || t > t_max) {
+        t = (-half_b + sqrt_d) / a;
+    }
+    if (t < t_min || t > t_max) {
+        return std::nullopt;
+    }
 
     // Fill the HitRecord with the intersection point and surface normal
     HitRecord rec;

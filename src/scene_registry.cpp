@@ -23,19 +23,22 @@ void SceneRegistry::rescan() {
             SceneDef def;
             def.yaml_path = entry.path().string();
             load_yaml(def.yaml_path, def);
-            if ( !def.name.empty() && !def.kernel.empty() )
+            if ( !def.name.empty() && !def.kernel.empty() ) {
                 scenes_.push_back(std::move(def));
-            else
+            } else {
                 spdlog::warn("[scenes] skipping {} (missing name/kernel)", def.yaml_path);
+            }
         }
     }
     spdlog::info("[scenes] loaded {} scene(s)", scenes_.size());
 }
 
 const SceneDef *SceneRegistry::find(const std::string &name) const {
-    for ( auto &s : scenes_ )
-        if ( s.name == name )
+    for ( auto &s : scenes_ ) {
+        if ( s.name == name ) {
             return &s;
+        }
+    }
     return nullptr;
 }
 
@@ -94,19 +97,22 @@ void SceneRegistry::apply_params(const SceneDef &scene,
     }
 
     // 2. Overlay YAML values
-    if ( !scene.has_overrides )
+    if ( !scene.has_overrides ) {
         return;
+    }
     try {
         YAML::Node root = YAML::LoadFile(scene.yaml_path);
         auto params_node = root["params"];
-        if ( !params_node )
+        if ( !params_node ) {
             return;
+        }
 
         for ( int i = 0; i < desc.param_count; i++ ) {
             const auto &p = desc.params[i];
             auto val = params_node[p.name];
-            if ( !val )
+            if ( !val ) {
                 continue;
+            }
 
             auto *dst = reinterpret_cast<char *>(out_buffer) + p.buffer_offset;
             switch ( p.type ) {
@@ -122,20 +128,23 @@ void SceneRegistry::apply_params(const SceneDef &scene,
                     break;
                 case ParamType::COLOR_RGB: {
                     auto v = val.as<std::vector<float>>();
-                    if ( v.size() >= 3 )
+                    if ( v.size() >= 3 ) {
                         std::memcpy(dst, v.data(), 12);
+                    }
                     break;
                 }
                 case ParamType::COLOR_RGBA: {
                     auto v = val.as<std::vector<float>>();
-                    if ( v.size() >= 4 )
+                    if ( v.size() >= 4 ) {
                         std::memcpy(dst, v.data(), 16);
+                    }
                     break;
                 }
                 case ParamType::VEC3: {
                     auto v = val.as<std::vector<float>>();
-                    if ( v.size() >= 3 )
+                    if ( v.size() >= 3 ) {
                         std::memcpy(dst, v.data(), 12);
+                    }
                     break;
                 }
             }

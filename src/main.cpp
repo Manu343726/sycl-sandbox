@@ -147,8 +147,9 @@ int main(int argc, char **argv) {
 
     // ---- GLFW window ----
     glfwSetErrorCallback(glfw_error_cb);
-    if ( !glfwInit() )
+    if ( !glfwInit() ) {
         return 1;
+    }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -280,8 +281,9 @@ int main(int argc, char **argv) {
                     h_params = (float *)calloc(sz, 1);
                     scenes.apply_params(*active_scene, new_kh->desc, h_params, sz);
                     init_std_params(h_params, sz);
-                    if ( d_params )
+                    if ( d_params ) {
                         sycl::free(d_params, q);
+                    }
                     d_params = sycl::malloc_host<float>(sz / 4, q);
                     q.memcpy(d_params, h_params, sz).wait();
                     call_init_kernel(new_kh->handle, q, WIDTH, HEIGHT, d_params, sz);
@@ -326,8 +328,9 @@ int main(int argc, char **argv) {
                             h_params = (float *)calloc(sz, 1);
                             scenes.apply_params(s, active_kernel->desc, h_params, sz);
                             init_std_params(h_params, sz);
-                            if ( d_params )
+                            if ( d_params ) {
                                 sycl::free(d_params, q);
+                            }
                             d_params = sycl::malloc_host<float>(sz / 4, q);
                             q.memcpy(d_params, h_params, sz).wait();
                             call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params, sz);
@@ -367,8 +370,9 @@ int main(int argc, char **argv) {
             ImGui::Text("SPP %d / %d", current_spp, target_spp);
             ImGui::Text("%d x %d", WIDTH, HEIGHT);
             int kernel_max = active_kernel->desc.max_spp;
-            if ( ImGui::SliderInt("Target SPP", &target_spp, 1, kernel_max) )
+            if ( ImGui::SliderInt("Target SPP", &target_spp, 1, kernel_max) ) {
                 current_spp = std::min(current_spp, target_spp);
+            }
             if ( ImGui::Button("Reset") ) {
                 q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                 current_spp = 0;
@@ -692,8 +696,9 @@ int main(int argc, char **argv) {
 
     // ---- cleanup ----
     sycl::free(d_accum, q);
-    if ( d_params )
+    if ( d_params ) {
         sycl::free(d_params, q);
+    }
     delete[] h_accum;
     free(h_params);
     ImGui_ImplOpenGL3_Shutdown();
@@ -709,10 +714,11 @@ static void
 call_init_kernel(void *handle, sycl::queue &q, int w, int h, const void *params, size_t sz) {
     using fn_t = void (*)(sycl::queue *, int, int, const void *, size_t);
     auto *fn = reinterpret_cast<fn_t>(dlsym(handle, "init_kernel"));
-    if ( fn )
+    if ( fn ) {
         fn(&q, w, h, params, sz);
-    else
+    } else {
         spdlog::error("[kernel] init_kernel not found");
+    }
 }
 
 static void call_render_kernel(void *handle,
@@ -724,18 +730,20 @@ static void call_render_kernel(void *handle,
                                int sample) {
     using fn_t = void (*)(sycl::queue *, int, int, const void *, void *, int);
     auto *fn = reinterpret_cast<fn_t>(dlsym(handle, "render_kernel"));
-    if ( fn )
+    if ( fn ) {
         fn(&q, w, h, params, accum, sample);
-    else
+    } else {
         spdlog::error("[kernel] render_kernel not found");
+    }
 }
 
 /// Fill the standard parameter area of a params buffer with defaults.
 /// Kernels that support standard params have
 /// `buffer_size >= RT_NUM_STD_PARAMS * sizeof(float)`.
 static void init_std_params(float *buf, size_t buf_size) {
-    if ( buf_size < RT_NUM_STD_PARAMS * sizeof(float) )
+    if ( buf_size < RT_NUM_STD_PARAMS * sizeof(float) ) {
         return;
+    }
     buf[RT_SPP_FRAME] = 1;
     buf[RT_MAX_BOUNCES] = 10;
     buf[RT_CAM_EYE + 0] = 0;

@@ -38,8 +38,9 @@ static KernelDesc desc =
 
 extern "C" KernelDesc *get_kernel_desc() {
     desc.params_buffer_size = 0;
-    for ( int i = 0; i < desc.param_count; i++ )
+    for ( int i = 0; i < desc.param_count; i++ ) {
         desc.params_buffer_size += param_buffer_size(params_meta[i]);
+    }
     return &desc;
 }
 
@@ -95,8 +96,9 @@ extern "C" void render_kernel(sycl::queue *queue,
                            } else {
                                // Map iteration count to a hue, then apply HSV-to-RGB conversion
                                float t = (float)iteration / 50.0f;
-                               if ( t > 1.0f )
+                               if ( t > 1.0f ) {
                                    t = 1.0f;
+                               }
 
                                float hue = t;
                                float saturation = 0.9f;

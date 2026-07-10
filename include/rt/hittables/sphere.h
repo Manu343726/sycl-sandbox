@@ -27,15 +27,18 @@ public:
 
         // Solve the reduced quadratic: t = (-half_b ± √(half_b² − a·c)) / a
         float discriminant = half_b * half_b - a * c_;
-        if ( discriminant <= 0 )
+        if ( discriminant <= 0 ) {
             return std::nullopt;
+        }
 
         float sqrt_d = sycl::sqrt(discriminant);
         float t = (-half_b - sqrt_d) / a;
-        if ( t < t_min || t > t_max )
+        if ( t < t_min || t > t_max ) {
             t = (-half_b + sqrt_d) / a;
-        if ( t < t_min || t > t_max )
+        }
+        if ( t < t_min || t > t_max ) {
             return std::nullopt;
+        }
 
         // Fill the HitRecord with the intersection point and the outward-facing normal
         HitRecord rec;
@@ -43,8 +46,9 @@ public:
         rec.p = add(ray.orig, scale(ray.dir, t));
         rec.normal = scale(sub(rec.p, center), 1.f / radius);
         rec.front_face = dot(ray.dir, rec.normal) < 0;
-        if ( !rec.front_face )
+        if ( !rec.front_face ) {
             rec.normal = scale(rec.normal, -1);
+        }
         return rec;
     }
 };

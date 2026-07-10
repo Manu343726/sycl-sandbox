@@ -25,8 +25,9 @@ static bool render_one(const ParamMeta &p, float *data) {
             } else {
                 changed = ImGui::InputInt(p.name, &v, p.range.i.step_i ? p.range.i.step_i : 1);
             }
-            if ( changed )
+            if ( changed ) {
                 *data = (float)v;
+            }
             break;
         }
         case ParamType::COLOR_RGB:
@@ -47,22 +48,26 @@ static bool render_one(const ParamMeta &p, float *data) {
         case ParamType::BOOL: {
             bool v = *data != 0.0f;
             changed = ImGui::Checkbox(p.name, &v);
-            if ( changed )
+            if ( changed ) {
                 *data = v ? 1.0f : 0.0f;
+            }
             break;
         }
         case ParamType::ENUM: {
             int32_t v = (int32_t)*data;
-            if ( p.enum_labels && p.enum_count > 0 )
+            if ( p.enum_labels && p.enum_count > 0 ) {
                 changed = ImGui::Combo(p.name, &v, p.enum_labels, p.enum_count);
-            if ( changed )
+            }
+            if ( changed ) {
                 *data = (float)v;
+            }
             break;
         }
     }
 
-    if ( ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) )
+    if ( ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) ) {
         ImGui::SetTooltip("%s", p.description ? p.description : "");
+    }
     return changed;
 }
 
@@ -76,8 +81,9 @@ bool render_param_controls(const KernelDesc &desc, float *params, bool read_only
             render_one(p, params + p.buffer_offset / sizeof(float));
             ImGui::EndDisabled();
         } else {
-            if ( render_one(p, params + p.buffer_offset / sizeof(float)) )
+            if ( render_one(p, params + p.buffer_offset / sizeof(float)) ) {
                 any_changed = true;
+            }
         }
     }
     return any_changed;

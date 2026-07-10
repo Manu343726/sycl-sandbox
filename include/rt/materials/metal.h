@@ -26,8 +26,9 @@ public:
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
-        if ( dot(scattered.dir, hit.normal) <= 0 )
+        if ( dot(scattered.dir, hit.normal) <= 0 ) {
             return std::nullopt;
+        }
         return ScatterRecord {albedo, scattered};
     }
 

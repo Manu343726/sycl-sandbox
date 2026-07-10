@@ -57,18 +57,21 @@ trace(const Ray &ray, const Object *objects, int num_objects, int max_bounces, R
         }
 
         // If no object was hit the ray escapes to the void
-        if ( !closest_hit )
+        if ( !closest_hit ) {
             return {0, 0, 0};
+        }
 
         // If the hit object emits light, return the attenuated emission
         float3 emitted = objects[hit_index].emit(*closest_hit);
-        if ( emitted.x != 0 || emitted.y != 0 || emitted.z != 0 )
+        if ( emitted.x != 0 || emitted.y != 0 || emitted.z != 0 ) {
             return mul(attenuation, emitted);
+        }
 
         // Scatter the ray; if the material absorbs it, terminate the path
         auto scattered = objects[hit_index].scatter(ray_in_out, *closest_hit, rng);
-        if ( !scattered )
+        if ( !scattered ) {
             return {0, 0, 0};
+        }
 
         // Update the attenuation and continue with the scattered ray
         attenuation = mul(attenuation, scattered->attenuation);
@@ -141,8 +144,9 @@ void render_main(sycl::queue *queue,
                     float3 colour = trace(ray, scene_objects, num_objects, max_bounces, rng);
 
                     // If the ray hit nothing (colour is black), use the background colour
-                    if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f )
+                    if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
                         colour = background_fn(ray);
+                    }
 
                     // Accumulate the sample into the RGBA output buffer
                     int base = flat_index * 4;

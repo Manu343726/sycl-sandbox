@@ -90,14 +90,16 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
 }
 
 void KernelLibrary::unload(KernelHandle *kh) {
-    if ( !kh )
+    if ( !kh ) {
         return;
+    }
     // Remove from active, but KEEP the handle alive (never dlclose)
     for ( auto it = active_.begin(); it != active_.end(); ) {
-        if ( it->second == kh )
+        if ( it->second == kh ) {
             it = active_.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
 }
 

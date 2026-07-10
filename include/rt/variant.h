@@ -8,9 +8,10 @@
 template <typename V, typename Visitor, std::size_t I = 0>
 void visit_rt(V &v, Visitor &&vis) {
     if constexpr ( I < std::variant_size_v<V> ) {
-        if ( v.index() == I )
+        if ( v.index() == I ) {
             vis(std::get<I>(v));
-        else
+        } else {
             visit_rt<V, Visitor, I + 1>(v, std::forward<Visitor>(vis));
+        }
     }
 }

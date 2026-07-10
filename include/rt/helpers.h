@@ -9,8 +9,9 @@ namespace rt {
 inline float3 random_in_unit_sphere(RNG &rng) {
     for ( int i = 0; i < 100; i++ ) {
         float3 candidate = {2 * rng.next() - 1, 2 * rng.next() - 1, 2 * rng.next() - 1};
-        if ( len2(candidate) < 1 )
+        if ( len2(candidate) < 1 ) {
             return candidate;
+        }
     }
     return {0, 0, 1};
 }
@@ -34,8 +35,9 @@ inline bool refract(float3 incident, float3 surface_normal, float eta, float3 &o
 
     // Compute the discriminant from Snell's law: 1 − η²·(1 − cos²(θ₁))
     float discriminant = 1 - eta * eta * (1 - cos_theta_i * cos_theta_i);
-    if ( discriminant <= 0 )
+    if ( discriminant <= 0 ) {
         return false; // total internal reflection
+    }
 
     // Compute the refracted direction:  η·(v − n·(v·n)) − n·√(discriminant)
     out_direction = sub(scale(sub(unit_incident, scale(surface_normal, cos_theta_i)), eta),

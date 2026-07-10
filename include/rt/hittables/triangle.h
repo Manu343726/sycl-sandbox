@@ -20,13 +20,15 @@ public:
     std::optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
-        if ( sycl::fabs(denom) < 1e-8f )
+        if ( sycl::fabs(denom) < 1e-8f ) {
             return std::nullopt;
+        }
 
         // Compute the distance t along the ray; reject if outside the allowed range
         float t = dot(sub(a, ray.orig), normal) / denom;
-        if ( t < t_min || t > t_max )
+        if ( t < t_min || t > t_max ) {
             return std::nullopt;
+        }
 
         // Compute the hit point and the vector from vertex a to it
         float3 hit_point = add(ray.orig, scale(ray.dir, t));
@@ -41,15 +43,17 @@ public:
         float d00 = dot(ba, ba), d01 = dot(ba, ca), d11 = dot(ca, ca);
         float d20 = dot(pa, ba), d21 = dot(pa, ca);
         float denominator = d00 * d11 - d01 * d01; // |ba × ca|²  (twice the triangle area)
-        if ( sycl::fabs(denominator) < 1e-12f )
+        if ( sycl::fabs(denominator) < 1e-12f ) {
             return std::nullopt;
+        }
 
         float u = (d11 * d20 - d01 * d21) / denominator;
         float v = (d00 * d21 - d01 * d20) / denominator;
 
         // The hit point is inside the triangle only if u ≥ 0, v ≥ 0, and u+v ≤ 1
-        if ( u < 0 || v < 0 || u + v > 1 )
+        if ( u < 0 || v < 0 || u + v > 1 ) {
             return std::nullopt;
+        }
 
         // Fill the HitRecord; flip the normal if the ray hit from inside
         HitRecord rec;

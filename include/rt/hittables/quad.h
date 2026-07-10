@@ -26,13 +26,15 @@ public:
     std::optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
-        if ( sycl::fabs(denom) < 1e-8f )
+        if ( sycl::fabs(denom) < 1e-8f ) {
             return std::nullopt;
+        }
 
         // Compute the distance t along the ray; reject if outside the allowed range
         float t = dot(sub(base, ray.orig), normal) / denom;
-        if ( t < t_min || t > t_max )
+        if ( t < t_min || t > t_max ) {
             return std::nullopt;
+        }
 
         // Compute the hit point and the vector from the base corner to it
         float3 hit_point = add(ray.orig, scale(ray.dir, t));
@@ -47,15 +49,17 @@ public:
         float d20 = dot(pa, edge_u);
         float d21 = dot(pa, edge_v);
         float denominator = d00 * d11 - d01 * d01;
-        if ( sycl::fabs(denominator) < 1e-12f )
+        if ( sycl::fabs(denominator) < 1e-12f ) {
             return std::nullopt;
+        }
 
         float alpha = (d11 * d20 - d01 * d21) / denominator;
         float beta = (d00 * d21 - d01 * d20) / denominator;
 
         // The hit point is inside the quad only if α, β ∈ [0, 1]
-        if ( alpha < 0 || alpha > 1 || beta < 0 || beta > 1 )
+        if ( alpha < 0 || alpha > 1 || beta < 0 || beta > 1 ) {
             return std::nullopt;
+        }
 
         // Fill the HitRecord; flip the normal if the ray hit from inside
         HitRecord rec;
