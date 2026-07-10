@@ -18,4 +18,4 @@ enum class rt_std_param : int {
 };
 
 /// Convenience: cast an rt_std_param enumerator to int for array indexing.
-inline constexpr int operator*(rt_std_param e) { return static_cast<int>(e); }
+inline constexpr int rti(rt_std_param e) { return static_cast<int>(e); }

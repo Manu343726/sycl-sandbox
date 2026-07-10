@@ -63,7 +63,6 @@ template <typename BgFn>
 void render_main(sycl::queue* q, int w, int h,
                  const float* p, float* accum, int si,
                  const Object* d_objs, int count, BgFn&& bg_fn) {
-    auto rti = [](rt_std_param e) { return static_cast<int>(e); };
     int samples_per_frame = (int)p[rti(rt_std_param::RT_SPP_FRAME)];
     int max_bounces       = (int)p[rti(rt_std_param::RT_MAX_BOUNCES)];
     float3 camera_eye, camera_at, camera_up;
