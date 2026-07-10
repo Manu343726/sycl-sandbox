@@ -63,9 +63,7 @@ public:
         auto pool = alloc::raw::RootAllocator<Tag>().allocate(total, *queue_);
         allocator_ = alloc::raw::LinearAllocator<Tag>(pool);
         if (count_ > 0) {
-            alloc::raw::Buffer<Tag> src = other.data();
-            alloc::raw::Buffer<Tag> dst = data();
-            std::memcpy(dst.data, src.data, src.size);
+            alloc::raw::memcpy<Tag>(data(), other.data(), *queue_);
         }
     }
 
@@ -74,7 +72,7 @@ public:
     void push_back(const void *element) {
         auto buf = allocator_.allocate(element_size_, alignment_);
         if (!buf.is_valid()) return;
-        std::memcpy(buf.data, element, element_size_);
+        alloc::raw::memcpy<Tag>(buf, element, element_size_, *queue_);
         count_++;
     }
 
