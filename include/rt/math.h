@@ -2,11 +2,11 @@
 #include <sycl/sycl.hpp>
 #include <cstdint>
 
+/// 3D vector math and RNG for SYCL device code.
 namespace rt {
 
-struct float3 {
-    float x, y, z;
-};
+/// 3-component floating-point vector.
+struct float3 { float x, y, z; };
 
 inline float3 add(float3 a, float3 b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
 inline float3 sub(float3 a, float3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
@@ -23,6 +23,7 @@ inline float3 lerp(float3 a, float3 b, float t) {
     return add(scale(a, 1-t), scale(b, t));
 }
 
+/// Xorshift32 pseudo-random number generator.
 struct RNG {
     uint32_t state;
     float next() {

@@ -2,16 +2,24 @@
 #include "../math.h"
 #include "../types_fwd.h"
 
+/// Spherical geometry primitive.
+///
+/// Factory:  rt::hittables::sphere(center, radius) -> Sphere
+///
+/// Example:
+///   Object obj = {sphere({0,0,0}, 1.0f), lambertian({0.8f,0.2f,0.2f})};
 namespace rt::hittables {
 
 class Sphere {
 public:
-    float3 center;
-    float  radius;
+    float3 center; ///< Sphere centre in world space.
+    float  radius; ///< Sphere radius.
 
     Sphere() = default;
     Sphere(float3 c, float r) : center(c), radius(r) {}
 
+    /// Ray-sphere intersection test.
+    /// Returns true and fills `rec` if the ray hits the sphere within [t_min, t_max].
     bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
         float3 oc = sub(r.orig, center);
         float a = dot(r.dir, r.dir);
@@ -30,6 +38,7 @@ public:
     }
 };
 
+/// Creates a Sphere from centre and radius.
 inline Sphere sphere(float3 center, float radius) {
     return Sphere(center, radius);
 }

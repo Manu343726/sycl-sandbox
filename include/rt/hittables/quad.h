@@ -2,18 +2,33 @@
 #include "../math.h"
 #include "../types_fwd.h"
 
+/// Parallelogram-quad geometry primitive (two triangles form a quad).
+///
+/// The quad is defined by three corner points a, b, c.  The fourth corner
+/// is implicitly b + c - a.  The surface normal is pre-computed in the
+/// constructor from (b - a) × (c - a).
+///
+/// Factory:  rt::hittables::quad(a, b, c) -> Quad
+///
+/// Example:
+///   Object wall = {quad({-2,0,-2}, {2,0,-2}, {-2,3,-2}), lambertian(white)};
 namespace rt::hittables {
 
 class Quad {
 public:
-    float3 a, b, c, normal;
+    float3 a, b, c;   ///< Three corners of the parallelogram.
+    float3 normal;    ///< Unit surface normal (pre-computed).
 
     Quad() = default;
+
+    /// Constructs a quad from three corners.  Normal is computed automatically.
     Quad(float3 a_, float3 b_, float3 c_) : a(a_), b(b_), c(c_) {
         float3 ab = sub(b, a), ac = sub(c, a);
         normal = norm(cross(ab, ac));
     }
 
+    /// Ray-quad intersection test (barycentric).
+    /// Returns true and fills `rec` if the ray hits the quad within [t_min, t_max].
     bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
         float denom = dot(normal, r.dir);
         if (sycl::fabs(denom) < 1e-8f) return false;
@@ -34,6 +49,7 @@ public:
     }
 };
 
+/// Creates a Quad from three corner points.
 inline Quad quad(float3 a, float3 b, float3 c) {
     return Quad(a, b, c);
 }

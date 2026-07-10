@@ -43,18 +43,18 @@ extern "C" KernelDesc* get_kernel_desc(){
 static Object* g_scene_objects = nullptr;
 static int     g_num_objects   = 0;
 
-static float3 compute_corner(int axis, float axis_value,
-                              float min_b, float max_b,
-                              float min_c, float max_c,
+static float3 compute_corner(int primary_axis, float axis_value,
+                              float min_second_axis, float max_second_axis,
+                              float min_third_axis, float max_third_axis,
                               int corner_index) {
-    int second_axis = (axis + 1) % 3;
-    int third_axis  = (axis + 2) % 3;
-    float bounds_second[2] = {min_b, max_b};
-    float bounds_third[2]  = {min_c, max_c};
+    int second_axis = (primary_axis + 1) % 3;
+    int third_axis  = (primary_axis + 2) % 3;
+    float bounds_second[2] = {min_second_axis, max_second_axis};
+    float bounds_third[2]  = {min_third_axis, max_third_axis};
     float result[3] = {0, 0, 0};
-    result[axis]        = axis_value;
-    result[second_axis] = bounds_second[corner_index & 1];
-    result[third_axis]  = bounds_third[corner_index >> 1];
+    result[primary_axis] = axis_value;
+    result[second_axis]  = bounds_second[corner_index & 1];
+    result[third_axis]   = bounds_third[corner_index >> 1];
     return {result[0], result[1], result[2]};
 }
 
@@ -75,27 +75,27 @@ extern "C" void init_kernel(sycl::queue* queue, int, int,
     float3 zero   = {0, 0, 0};
     float3 light_emission = scale(light_color, light_strength);
 
-    auto add_quad_as_two_triangles = [&](int axis, float axis_value,
-                                          float min_b, float max_b,
-                                          float min_c, float max_c,
+    auto add_quad_as_two_triangles = [&](int primary_axis, float axis_value,
+                                          float min_second_axis, float max_second_axis,
+                                          float min_third_axis, float max_third_axis,
                                           Material material) {
-        float3 p0 = compute_corner(axis, axis_value, min_b, max_b, min_c, max_c, 0);
-        float3 p1 = compute_corner(axis, axis_value, min_b, max_b, min_c, max_c, 1);
-        float3 p2 = compute_corner(axis, axis_value, min_b, max_b, min_c, max_c, 2);
-        float3 p3 = compute_corner(axis, axis_value, min_b, max_b, min_c, max_c, 3);
+        float3 p0 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 0);
+        float3 p1 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 1);
+        float3 p2 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 2);
+        float3 p3 = compute_corner(primary_axis, axis_value, min_second_axis, max_second_axis, min_third_axis, max_third_axis, 3);
         objects[object_count++] = {quad(p0, p1, p2), material};
         objects[object_count++] = {quad(p0, p2, p3), material};
     };
 
-    auto add_box = [&](float center_x, float center_y, float center_z,
-                        float box_width, float box_height, float box_depth,
+    auto add_box = [&](float corner_x, float corner_y, float corner_z,
+                        float size_x, float size_y, float size_z,
                         Material material) {
-        add_quad_as_two_triangles(1, center_y + box_height, center_x, center_x + box_width,  center_z, center_z + box_depth,  material);
-        add_quad_as_two_triangles(1, center_y,              center_x, center_x + box_width,  center_z, center_z + box_depth,  material);
-        add_quad_as_two_triangles(2, center_z,              center_x, center_x + box_width,  center_y, center_y + box_height, material);
-        add_quad_as_two_triangles(2, center_z + box_depth,  center_x, center_x + box_width,  center_y, center_y + box_height, material);
-        add_quad_as_two_triangles(0, center_x,              center_z, center_z + box_depth,  center_y, center_y + box_height, material);
-        add_quad_as_two_triangles(0, center_x + box_width,  center_z, center_z + box_depth,  center_y, center_y + box_height, material);
+        add_quad_as_two_triangles(1, corner_y + size_y, corner_x, corner_x + size_x,  corner_z, corner_z + size_z,  material);
+        add_quad_as_two_triangles(1, corner_y,           corner_x, corner_x + size_x,  corner_z, corner_z + size_z,  material);
+        add_quad_as_two_triangles(2, corner_z,           corner_x, corner_x + size_x,  corner_y, corner_y + size_y,  material);
+        add_quad_as_two_triangles(2, corner_z + size_z,  corner_x, corner_x + size_x,  corner_y, corner_y + size_y,  material);
+        add_quad_as_two_triangles(0, corner_x,           corner_z, corner_z + size_z,  corner_y, corner_y + size_y,  material);
+        add_quad_as_two_triangles(0, corner_x + size_x,  corner_z, corner_z + size_z,  corner_y, corner_y + size_y,  material);
     };
 
     // Room walls (axis: 0=X, 1=Y, 2=Z)

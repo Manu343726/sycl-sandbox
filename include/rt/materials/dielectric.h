@@ -3,14 +3,27 @@
 #include "../types_fwd.h"
 #include "../helpers.h"
 
+/// Dielectric (transparent) material: refracts and reflects light based on
+/// the relative index of refraction and the incident angle (Snell's law +
+/// Schlick Fresnel approximation).  Examples: glass, water, diamond.
+///
+/// Factory:  rt::materials::dielectric(ir) -> Dielectric
+///   ir = index of refraction (e.g. 1.5 for glass, 2.4 for diamond).
+///
+/// Example:
+///   Object sphere = {sphere({0,0,0}, 1), dielectric(1.5f)};
 namespace rt::materials {
 
 class Dielectric {
 public:
-    float ir;
+    float ir; ///< Index of refraction (>1 for denser media).
+
     Dielectric() = default;
     explicit Dielectric(float i) : ir(i) {}
 
+    /// Refracts or reflects the incoming ray.  The probability of reflection
+    /// increases at grazing angles (Schlick's approximation).  Always returns
+    /// true (some ray is always produced).
     bool scatter(const Ray& in, const HitRecord& rec, float3& attenuation,
                  Ray& scattered, RNG& rng) const {
         attenuation = {1,1,1};
@@ -33,9 +46,11 @@ public:
         return true;
     }
 
+    /// Dielectric materials do not emit light.
     float3 emit(const HitRecord&) const { return {0,0,0}; }
 };
 
+/// Creates a Dielectric material with the given index of refraction.
 inline Dielectric dielectric(float ir) {
     return Dielectric(ir);
 }
