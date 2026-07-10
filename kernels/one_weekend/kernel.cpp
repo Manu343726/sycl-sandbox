@@ -9,9 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
-// Standard params (0-12) + kernel-specific (13+)
 static ParamMeta params_meta[] = {
-    // ── standard rt params (order fixed by rt_std_param) ────────────
     { "spp_frame",    "Samples per frame",
       ParamType::INT,  .range = { .i = { 1, 64, 1 } },  .default_i = 1 },
     { "max_bounces",  "Maximum ray path depth",
@@ -26,7 +24,6 @@ static ParamMeta params_meta[] = {
       ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.1f },
     { "cam_up",       "Camera up vector",
       ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
-    // ── kernel-specific params (index 13+) ──────────────────────────
     { "num_spheres",  "Number of random small spheres",
       ParamType::INT,  .range = { .i = { 0, 500, 1 } }, .default_i = 11 },
     { "ground_color", "Ground sphere albedo",
@@ -36,9 +33,9 @@ static ParamMeta params_meta[] = {
 };
 
 enum ParamIdx : int {
-    P_NUM_SPHERES = RT_NUM_STD_PARAMS,       // 13
-    P_GROUND_COLOR = P_NUM_SPHERES + 1,      // 14
-    P_BACKGROUND = P_GROUND_COLOR + 1,       // 17 (COLOR_RGB is 3 floats)
+    P_NUM_SPHERES = RT_NUM_STD_PARAMS,
+    P_GROUND_COLOR = P_NUM_SPHERES + 1,
+    P_BACKGROUND = P_GROUND_COLOR + 3,
 };
 
 static const char* source_files[] = { "kernel.cpp", "kernel.h", nullptr };
@@ -54,33 +51,11 @@ extern "C" KernelDesc* get_kernel_desc() {
     return &desc;
 }
 
-// ── per-instance state ─────────────────────────────────────────────────
-static rt::Sphere*  g_d_spheres = nullptr;
-static int           g_num_spheres = 0;
-static rt::float3    g_background = {0.5f, 0.7f, 1.0f};
+static float rnd() { return (float)rand() * (1.f / 2147483647.f); }
 
-// ── host scene builder ─────────────────────────────────────────────────
-static rt::Sphere* build_random_spheres(int n, rt::float3 gc) {
-    auto* s = new rt::Sphere[n + 4];
-    int i = 0;
-    s[i++] = {{0,-1000,0}, 1000, rt::MatType::LAMBERTIAN, gc, 0,0,{0,0,0}};
-    rt::RNG rng{42};
-    for (int k = 0; k < n; k++) {
-        float x = -10 + 20*rng.next(), z = -10 + 20*rng.next();
-        rt::float3 c = {x,0.2f,z};
-        if (rt::len(c) <= 0.9f) continue;
-        rt::float3 col = { rng.next()*rng.next(), rng.next()*rng.next(),
-                       rng.next()*rng.next() };
-        float d = rng.next();
-        if      (d < 0.6f)  s[i++] = { c,0.2f, rt::MatType::LAMBERTIAN, col,0,0,{0,0,0} };
-        else if (d < 0.85f) s[i++] = { c,0.2f, rt::MatType::METAL, col, 0.5f*rng.next(),0,{0,0,0} };
-        else                s[i++] = { c,0.2f, rt::MatType::DIELECTRIC, {1,1,1},0,1.5f,{0,0,0} };
-    }
-    s[i++] = { {4,1,0}, 1, rt::MatType::METAL,      {0.7f,0.6f,0.5f},0,0,{0,0,0} };
-    s[i++] = { {-4,1,0},1, rt::MatType::LAMBERTIAN,  {0.4f,0.2f,0.1f},0,0,{0,0,0} };
-    s[i++] = { {0,1,0}, 1, rt::MatType::DIELECTRIC,  {1,1,1},0,1.5f,{0,0,0} };
-    return s;
-}
+static rt::Object* g_d_objects = nullptr;
+static int         g_num_objects = 0;
+static rt::float3  g_background = {0.5f, 0.7f, 1.0f};
 
 extern "C" void init_kernel(sycl::queue* q, int, int,
                              const void* params, size_t) {
@@ -89,31 +64,52 @@ extern "C" void init_kernel(sycl::queue* q, int, int,
     rt::float3 gc; memcpy(&gc, p + P_GROUND_COLOR, 12);
     memcpy(&g_background, p + P_BACKGROUND, 12);
 
-    int cnt = n + 4;
-    auto* hs = build_random_spheres(n, gc);
-    if (g_d_spheres) sycl::free(g_d_spheres, *q);
-    g_d_spheres = sycl::malloc_device<rt::Sphere>(cnt, *q);
-    q->memcpy(g_d_spheres, hs, cnt*sizeof(rt::Sphere)).wait();
-    g_num_spheres = cnt;
-    delete[] hs;
+    if (g_d_objects) { sycl::free(g_d_objects, *q); g_d_objects = nullptr; }
+
+    int max_obj = n + 4 + 3;
+    auto* objs = new rt::Object[max_obj];
+    int cnt = 0;
+    srand(42);
+
+    objs[cnt++] = {new rt::Sphere({0,-1000,0},1000), new rt::Lambertian(gc)};
+
+    for (int k = 0; k < n; ) {
+        float x = -10 + 20*rnd(), z = -10 + 20*rnd();
+        rt::float3 c = {x,0.2f,z};
+        if (rt::len(c) <= 0.9f) continue;
+        float r = rnd()*rnd(), g = rnd()*rnd(), b = rnd()*rnd();
+        float d = rnd();
+        auto* s = new rt::Sphere(c, 0.2f);
+        if (d < 0.6f)
+            objs[cnt++] = {s, new rt::Lambertian({r,g,b})};
+        else if (d < 0.85f)
+            objs[cnt++] = {s, new rt::Metal({r,g,b}, 0.5f*rnd())};
+        else
+            objs[cnt++] = {s, new rt::Dielectric(1.5f)};
+        k++;
+    }
+
+    objs[cnt++] = {new rt::Sphere({4,1,0},1), new rt::Metal({0.7f,0.6f,0.5f},0)};
+    objs[cnt++] = {new rt::Sphere({-4,1,0},1), new rt::Lambertian({0.4f,0.2f,0.1f})};
+    objs[cnt++] = {new rt::Sphere({0,1,0},1), new rt::Dielectric(1.5f)};
+
+    g_d_objects = sycl::malloc_device<rt::Object>(cnt, *q);
+    q->memcpy(g_d_objects, objs, cnt * sizeof(rt::Object)).wait();
+    g_num_objects = cnt;
+    delete[] objs;
 }
 
 extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                const void* params, void* accum, int si) {
     auto* p = (const float*)params;
-    rt::float3 bg = g_background;
-
     rt::render_main(q, w, h, p, (float*)accum, si,
-                    g_d_spheres, g_num_spheres,
-                    [](const rt::Sphere& sp, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
-                        return rt::hit_sphere(sp, rr, mn, mx, rec);
-                    },
-                    [bg](const rt::Ray& ray) -> rt::float3 {
+                    g_d_objects, g_num_objects,
+                    [bg = g_background](const rt::Ray& ray) -> rt::float3 {
                         float t = 0.5f * (ray.dir.y + 1.f);
                         return rt::lerp({1,1,1}, bg, t);
                     });
 }
 
 extern "C" void shutdown_kernel(sycl::queue* q) {
-    if (g_d_spheres) { sycl::free(g_d_spheres, *q); g_d_spheres = nullptr; }
+    if (g_d_objects) { sycl::free(g_d_objects, *q); g_d_objects = nullptr; }
 }

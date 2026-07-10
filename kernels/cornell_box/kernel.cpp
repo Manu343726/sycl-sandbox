@@ -6,9 +6,7 @@
 #include "rt/params.h"
 #include <cstring>
 
-// Standard params (0-12) + kernel-specific (13+)
 static ParamMeta params_meta[] = {
-    // ── standard rt params (order fixed by rt_std_param) ────────────
     { "spp_frame",    "Samples per frame",
       ParamType::INT,  .range = { .i = { 1, 64, 1 } },  .default_i = 1 },
     { "max_bounces",  "Maximum ray path depth",
@@ -23,17 +21,15 @@ static ParamMeta params_meta[] = {
       ParamType::FLOAT, .range = { .f = { 0.f, 1.f, 0.01f } }, .default_f = 0.f },
     { "cam_up",       "Camera up vector",
       ParamType::VEC3, .default_c3 = { 0.f, 1.f, 0.f } },
-    // ── kernel-specific params (index 13+) ──────────────────────────
     { "light_color",  "Ceiling light color",
       ParamType::COLOR_RGB, .default_c3 = { 1.f, 1.f, 1.f } },
     { "light_strength","Ceiling light intensity multiplier",
       ParamType::FLOAT, .range = { .f = { 1.f, 50.f, 1.f } }, .default_f = 15.f },
 };
 
-// idx beyond standard
 enum ParamIdx : int {
-    P_LIGHT_COLOR = RT_NUM_STD_PARAMS,       // 13
-    P_LIGHT_STRENGTH = P_LIGHT_COLOR + 3,    // 16 (COLOR_RGB takes 3 floats)
+    P_LIGHT_COLOR = RT_NUM_STD_PARAMS,
+    P_LIGHT_STRENGTH = P_LIGHT_COLOR + 3,
 };
 
 static const char* source_files[] = { "kernel.cpp", nullptr };
@@ -49,83 +45,84 @@ extern "C" KernelDesc* get_kernel_desc() {
     return &desc;
 }
 
-// ── scene builder ──────────────────────────────────────────────────────
-static void add_quad(rt::Quad* out, int& i, int ax, float a_val,
-                     float b_lo, float b_hi, float c_lo, float c_hi,
-                     rt::MatType mat, rt::float3 albedo, rt::float3 emit) {
-    rt::float3 p[4];
-    int bi = (ax + 1) % 3, ci = (ax + 2) % 3;
-    float bb[2] = {b_lo, b_hi}, cc[2] = {c_lo, c_hi};
-    for (int k = 0; k < 4; k++) {
-        float* v = (float*)&p[k];
-        v[ax] = a_val; v[bi] = bb[k & 1]; v[ci] = cc[k >> 1];
-    }
-    rt::float3 n = rt::norm(rt::cross(rt::sub(p[1], p[0]), rt::sub(p[2], p[0])));
-    out[i] = {p[0], p[1], p[2], n, mat, albedo, emit};
-    i++;
+static rt::Object* g_d_objects = nullptr;
+static int         g_num_objects = 0;
+
+// Build a quad as two triangles (two objects per quad)
+static void add_quad(rt::Object* objs, int& idx, rt::float3 a, rt::float3 b, rt::float3 c,
+                     rt::float3 d, rt::Material* mat) {
+    // Quad as two triangles: (a,b,c) and (a,c,d)
+    // For axis-aligned quads, the normal is computed by Quad constructor
+    objs[idx++] = {new rt::Quad(a,b,c), mat};
+    objs[idx++] = {new rt::Quad(a,c,d), mat};
 }
-
-static int build_scene(rt::Quad* out, rt::float3 light_col, float light_strength) {
-    int i = 0;
-    rt::float3 w = {0.73f,0.73f,0.73f}, r = {0.65f,0.05f,0.05f};
-    rt::float3 g = {0.12f,0.45f,0.15f}, z = {0,0,0};
-    rt::float3 le = rt::scale(light_col, light_strength);
-
-    add_quad(out,i,1,0.f,   -2,2,-2,2, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,1,3.f,   -2,2,-2,2, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,2,-2.f,  -2,2,0,3,  rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,0,-2.f,  -2,2,0,3,  rt::MatType::LAMBERTIAN, r,z);
-    add_quad(out,i,0,2.f,   -2,2,0,3,  rt::MatType::LAMBERTIAN, g,z);
-    add_quad(out,i,1,2.99f, -1,1,-1,1, rt::MatType::DIFFUSE_LIGHT, w,le);
-
-    float bx=-0.8f,by=0.f,bz=-0.8f,bw=0.6f,bh=1.5f,bd=0.6f;
-    add_quad(out,i,1,by+bh, bx,bx+bw,bz,bz+bd, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,1,by,    bx,bx+bw,bz,bz+bd, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,2,bz,    bx,bx+bw,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,2,bz+bd, bx,bx+bw,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,0,bx,    bz,bz+bd,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,0,bx+bw, bz,bz+bd,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-
-    bx=0.8f;by=0.f;bz=-0.3f;bw=0.6f;bh=0.6f;bd=1.2f;
-    add_quad(out,i,1,by+bh, bx,bx+bw,bz,bz+bd, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,1,by,    bx,bx+bw,bz,bz+bd, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,2,bz,    bx,bx+bw,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,2,bz+bd, bx,bx+bw,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,0,bx,    bz,bz+bd,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    add_quad(out,i,0,bx+bw, bz,bz+bd,by,by+bh, rt::MatType::LAMBERTIAN, w,z);
-    return i;
-}
-
-static rt::Quad* g_d_quads = nullptr;
-static int       g_num_quads = 0;
 
 extern "C" void init_kernel(sycl::queue* q, int, int,
                              const void* params, size_t) {
     auto* p = (const float*)params;
     rt::float3 lc; memcpy(&lc, p + P_LIGHT_COLOR, 12);
     float ls = p[P_LIGHT_STRENGTH];
-    rt::Quad hq[32];
-    int nq = build_scene(hq, lc, ls);
-    if (g_d_quads) sycl::free(g_d_quads, *q);
-    g_d_quads = sycl::malloc_device<rt::Quad>(nq, *q);
-    q->memcpy(g_d_quads, hq, nq * sizeof(rt::Quad)).wait();
-    g_num_quads = nq;
+
+    if (g_d_objects) { sycl::free(g_d_objects, *q); g_d_objects = nullptr; }
+
+    rt::float3 w = {0.73f,0.73f,0.73f}, r = {0.65f,0.05f,0.05f};
+    rt::float3 g = {0.12f,0.45f,0.15f}, z = {0,0,0};
+    rt::float3 le = rt::scale(lc, ls);
+
+    auto* objs = new rt::Object[64];
+    int i = 0;
+
+    // Helper: axis-aligned quad as two triangles
+    auto quad = [&](int ax, float a_val, float b0, float b1, float c0, float c1,
+                     rt::Material* mat) {
+        rt::float3 p[4];
+        int bi = (ax+1)%3, ci = (ax+2)%3;
+        float bb[2]={b0,b1}, cc[2]={c0,c1};
+        for (int k=0;k<4;k++) {
+            float* v=(float*)&p[k];
+            v[ax]=a_val; v[bi]=bb[k&1]; v[ci]=cc[k>>1];
+        }
+        add_quad(objs, i, p[0], p[1], p[2], p[3], mat);
+    };
+
+    // Room
+    auto* white = new rt::Lambertian(w);
+    quad(1,0,   -2,2,-2,2, white);
+    quad(1,3,   -2,2,-2,2, white);
+    quad(2,-2,  -2,2,0,3, white);
+    quad(0,-2,  -2,2,0,3, new rt::Lambertian(r));
+    quad(0,2,   -2,2,0,3, new rt::Lambertian(g));
+
+    // Light
+    quad(1,2.99f, -1,1,-1,1, new rt::DiffuseLight(le));
+
+    // Boxes
+    auto box = [&](float cx, float cy, float cz, float bw, float bh, float bd, rt::Material* m) {
+        quad(1,cy+bh, cx,cx+bw, cz,cz+bd, m);
+        quad(1,cy,   cx,cx+bw, cz,cz+bd, m);
+        quad(2,cz,   cx,cx+bw, cy,cy+bh, m);
+        quad(2,cz+bd,cx,cx+bw, cy,cy+bh, m);
+        quad(0,cx,   cz,cz+bd, cy,cy+bh, m);
+        quad(0,cx+bw,cz,cz+bd, cy,cy+bh, m);
+    };
+    box(-0.8f,0,-0.8f, 0.6f,1.5f,0.6f, new rt::Lambertian({0.55f,0.55f,0.55f}));
+    box(0.8f,0,-0.3f, 0.6f,0.6f,1.2f, new rt::Lambertian({0.55f,0.55f,0.55f}));
+
+    int cnt = i;
+    g_d_objects = sycl::malloc_device<rt::Object>(cnt, *q);
+    q->memcpy(g_d_objects, objs, cnt * sizeof(rt::Object)).wait();
+    g_num_objects = cnt;
+    delete[] objs;
 }
 
 extern "C" void render_kernel(sycl::queue* q, int w, int h,
                                const void* params, void* accum, int si) {
     auto* p = (const float*)params;
-
     rt::render_main(q, w, h, p, (float*)accum, si,
-                    g_d_quads, g_num_quads,
-                    [](const rt::Quad& qq, const rt::Ray& rr, float mn, float mx, rt::HitRecord& rec) {
-                        return rt::hit_quad(qq, rr, mn, mx, rec);
-                    },
-                    [](const rt::Ray&) -> rt::float3 {
-                        return {0,0,0};
-                    });
+                    g_d_objects, g_num_objects,
+                    [](const rt::Ray&) -> rt::float3 { return {0,0,0}; });
 }
 
 extern "C" void shutdown_kernel(sycl::queue* q) {
-    if (g_d_quads) { sycl::free(g_d_quads, *q); g_d_quads = nullptr; }
+    if (g_d_objects) { sycl::free(g_d_objects, *q); g_d_objects = nullptr; }
 }
