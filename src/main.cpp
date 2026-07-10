@@ -3,6 +3,7 @@
 #include "kernel_library.h"
 #include "scene_registry.h"
 #include "param_ui.h"
+#include "rt/params.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -38,6 +39,7 @@ static void call_render_kernel(void* handle, sycl::queue& q,
                                 int w, int h, const void* params,
                                 void* accum, int sample);
 static float* find_param(float* params, const KernelDesc& desc, const char* name);
+static void init_std_params(float* buf, size_t buf_size);
 
 // ── GLFW error callback ────────────────────────────────────────────────
 static void glfw_error_cb(int error, const char* desc) {
@@ -191,6 +193,7 @@ int main(int argc, char** argv) {
             spdlog::info("[startup] apply_params...");
             scenes.apply_params(*active_scene, active_kernel->desc,
                                 h_params, sz);
+            init_std_params(h_params, sz);
             spdlog::info("[startup] alloc d_params...");
             d_params = sycl::malloc_host<float>(sz / 4, q);
             spdlog::info("[startup] upload params...");
@@ -235,6 +238,7 @@ int main(int argc, char** argv) {
                     h_params = (float*)calloc(sz, 1);
                     scenes.apply_params(*active_scene, new_kh->desc,
                                         h_params, sz);
+                    init_std_params(h_params, sz);
                     if (d_params) sycl::free(d_params, q);
                     d_params = sycl::malloc_host<float>(sz / 4, q);
                     q.memcpy(d_params, h_params, sz).wait();
@@ -281,6 +285,7 @@ int main(int argc, char** argv) {
                             h_params = (float*)calloc(sz, 1);
                             scenes.apply_params(s, active_kernel->desc,
                                                 h_params, sz);
+                            init_std_params(h_params, sz);
                             if (d_params) sycl::free(d_params, q);
                             d_params = sycl::malloc_host<float>(sz / 4, q);
                             q.memcpy(d_params, h_params, sz).wait();
@@ -329,17 +334,24 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---- camera info & controls ----
+        // ── camera info & controls ──────────────────────────────────
+        bool has_std_params = active_kernel && h_params &&
+            active_kernel->desc.params_buffer_size >= RT_NUM_STD_PARAMS * sizeof(float);
+        float* ce  = has_std_params ? h_params + RT_CAM_EYE     : nullptr;
+        float* ca  = has_std_params ? h_params + RT_CAM_AT      : nullptr;
+        float* cf  = has_std_params ? h_params + RT_CAM_FOV     : nullptr;
+        float* cap = has_std_params ? h_params + RT_CAM_APERTURE: nullptr;
+        float* cup = has_std_params ? h_params + RT_CAM_UP      : nullptr;
+        bool   has_2d = false;
+
         if (active_kernel && h_params) {
             ImGui::SeparatorText("Camera");
             float* cx = find_param(h_params, active_kernel->desc, "center_x");
             float* cy = find_param(h_params, active_kernel->desc, "center_y");
             float* zm = find_param(h_params, active_kernel->desc, "zoom");
-            float* ce = find_param(h_params, active_kernel->desc, "cam_eye");
-            float* ca = find_param(h_params, active_kernel->desc, "cam_at");
-            float* cf = find_param(h_params, active_kernel->desc, "cam_fov");
 
             if (cx && cy && zm) {
+                has_2d = true;
                 ImGui::Text("LMB drag = pan  |  scroll = zoom  |  arrows = pan");
                 ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f", *cx, *cy, *zm);
             } else if (ce && ca && cf) {
@@ -350,8 +362,8 @@ int main(int argc, char** argv) {
                 ImGui::Text("Q/E = up/down");
                 ImGui::Text("Eye: (%.2f, %.2f, %.2f)", ce[0], ce[1], ce[2]);
                 ImGui::Text("FOV: %.1f\u00b0", *cf);
-                float* cap = find_param(h_params, active_kernel->desc, "cam_aperture");
-                if (cap) ImGui::Text("Aperture: %.3f", *cap);
+                float* cap = h_params + RT_CAM_APERTURE;
+                ImGui::Text("Aperture: %.3f", *cap);
             }
         }
 
@@ -359,35 +371,30 @@ int main(int argc, char** argv) {
 
         // ---- camera controls (2D pan / 3D orbit) ----
         if (active_kernel && h_params) {
-            float* cx = find_param(h_params, active_kernel->desc, "center_x");
-            float* cy = find_param(h_params, active_kernel->desc, "center_y");
-            float* zm = find_param(h_params, active_kernel->desc, "zoom");
-            float* ce = find_param(h_params, active_kernel->desc, "cam_eye");
-            float* ca = find_param(h_params, active_kernel->desc, "cam_at");
-            float* cf = find_param(h_params, active_kernel->desc, "cam_fov");
+            float* cx2 = has_2d ? find_param(h_params, active_kernel->desc, "center_x") : nullptr;
+            float* cy2 = has_2d ? find_param(h_params, active_kernel->desc, "center_y") : nullptr;
+            float* zm2 = has_2d ? find_param(h_params, active_kernel->desc, "zoom")     : nullptr;
 
             bool changed = false;
 
             // ── 2D camera (center + zoom) ──────────────────────────
-            if (cx && cy && zm) {
+            if (cx2 && cy2 && zm2) {
                 if (!io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
                     auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                    *cx -= d.x / WIDTH * *zm * ((float)WIDTH / HEIGHT);
-                    *cy += d.y / HEIGHT * *zm;
+                    *cx2 -= d.x / WIDTH * *zm2 * ((float)WIDTH / HEIGHT);
+                    *cy2 += d.y / HEIGHT * *zm2;
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     changed = true;
                 }
                 if (!io.WantCaptureMouse && io.MouseWheel != 0.f) {
-                    *zm *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
-                    *zm = (*zm < 0.001f) ? 0.001f : (*zm > 1000.f ? 1000.f : *zm);
+                    *zm2 *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
+                    *zm2 = (*zm2 < 0.001f) ? 0.001f : (*zm2 > 1000.f ? 1000.f : *zm2);
                     changed = true;
                 }
             }
 
             // ── 3D orbit camera ────────────────────────────────────
             if (ce && ca && cf) {
-                float* cap = find_param(h_params, active_kernel->desc, "cam_aperture");
-                float* cup = find_param(h_params, active_kernel->desc, "cam_up");
 
                 static OrbitCam orbit;
                 static bool     orbit_init = false;
@@ -599,6 +606,20 @@ static void call_render_kernel(void* handle, sycl::queue& q,
     auto* fn = reinterpret_cast<fn_t>(dlsym(handle, "render_kernel"));
     if (fn) fn(&q, w, h, params, accum, sample);
     else spdlog::error("[kernel] render_kernel not found");
+}
+
+/// Fill the standard parameter area of a params buffer with defaults.
+/// Kernels that support standard params have
+/// `buffer_size >= RT_NUM_STD_PARAMS * sizeof(float)`.
+static void init_std_params(float* buf, size_t buf_size) {
+    if (buf_size < RT_NUM_STD_PARAMS * sizeof(float)) return;
+    buf[RT_SPP_FRAME]    = 1;
+    buf[RT_MAX_BOUNCES]  = 10;
+    buf[RT_CAM_EYE + 0]  = 0; buf[RT_CAM_EYE + 1]  = 1.5f; buf[RT_CAM_EYE + 2]  = 4.5f;
+    buf[RT_CAM_AT + 0]   = 0; buf[RT_CAM_AT + 1]   = 1.2f; buf[RT_CAM_AT + 2]   = 0;
+    buf[RT_CAM_FOV]      = 35;
+    buf[RT_CAM_APERTURE] = 0;
+    buf[RT_CAM_UP + 0]   = 0; buf[RT_CAM_UP + 1]   = 1;    buf[RT_CAM_UP + 2]   = 0;
 }
 
 static void recreate_render_buffers(sycl::queue& q, GLuint& tex,

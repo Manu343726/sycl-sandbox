@@ -19,29 +19,24 @@ using rt::materials::metal;
 using rt::materials::dielectric;
 
 static ParamMeta params_meta[] = {
-    {"spp_frame","Samples per frame",ParamType::INT,.range={.i={1,64,1}},.default_i=1},
-    {"max_bounces","Maximum ray path depth",ParamType::INT,.range={.i={1,100,1}},.default_i=10},
-    {"cam_eye","Camera position",ParamType::VEC3,.default_c3={13,2,3}},
-    {"cam_at","Camera look-at target",ParamType::VEC3,.default_c3={0,0,0}},
-    {"cam_fov","Vertical field of view",ParamType::FLOAT,.range={.f={1,120,1}},.default_f=20},
-    {"cam_aperture","Depth of field aperture",ParamType::FLOAT,.range={.f={0,1,0.01f}},.default_f=0.1f},
-    {"cam_up","Camera up vector",ParamType::VEC3,.default_c3={0,1,0}},
     {"num_spheres","Number of random small spheres",ParamType::INT,.range={.i={0,500,1}},.default_i=11},
     {"ground_color","Ground sphere albedo",ParamType::COLOR_RGB,.default_c3={0.5f,0.5f,0.5f}},
     {"background","Sky colour",ParamType::COLOR_RGB,.default_c3={0.5f,0.7f,1}},
 };
+
 enum {
-    PARAM_NUM_SPHERES    = RT_NUM_STD_PARAMS,
-    PARAM_GROUND_COLOR   = PARAM_NUM_SPHERES + 1,
-    PARAM_BACKGROUND     = PARAM_GROUND_COLOR + 3,
+    PARAM_NUM_SPHERES   = 0,
+    PARAM_GROUND_COLOR  = PARAM_NUM_SPHERES + 1,
+    PARAM_BACKGROUND    = PARAM_GROUND_COLOR + 3,
 };
+
 static KernelDesc desc={
     "one_weekend","Raytracing in One Weekend — random spheres",
-    10,params_meta,0,4096,2,
+    3, params_meta, 0, 4096, 2,
     (const char*[]){"kernel.cpp","kernel.h",nullptr}
 };
 extern "C" KernelDesc* get_kernel_desc(){
-    desc.params_buffer_size=0;
+    desc.params_buffer_size = RT_NUM_STD_PARAMS * sizeof(float);
     for(int i=0;i<desc.param_count;i++)
         desc.params_buffer_size+=param_buffer_size(params_meta[i]);
     return &desc;
@@ -58,9 +53,10 @@ static float random_float() {
 extern "C" void init_kernel(sycl::queue* queue, int, int,
                             const void* params_buffer, size_t) {
     const float* params = (const float*)params_buffer;
-    int num_spheres = (int)params[PARAM_NUM_SPHERES];
-    float3 ground_color; memcpy(&ground_color, params + PARAM_GROUND_COLOR, 12);
-    memcpy(&g_background, params + PARAM_BACKGROUND, 12);
+    int offset = RT_NUM_STD_PARAMS;
+    int num_spheres = (int)params[offset + PARAM_NUM_SPHERES];
+    float3 ground_color; memcpy(&ground_color, params + offset + PARAM_GROUND_COLOR, 12);
+    memcpy(&g_background, params + offset + PARAM_BACKGROUND, 12);
 
     if (g_scene_objects) { sycl::free(g_scene_objects, *queue); g_scene_objects = nullptr; }
     srand(42);

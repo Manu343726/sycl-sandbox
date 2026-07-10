@@ -15,26 +15,21 @@ using rt::materials::diffuse_light;
 using rt::Axis;
 
 static ParamMeta params_meta[]={
-    {"spp_frame","Samples per frame",ParamType::INT,.range={.i={1,64,1}},.default_i=1},
-    {"max_bounces","Maximum ray path depth",ParamType::INT,.range={.i={1,100,1}},.default_i=10},
-    {"cam_eye","Camera position",ParamType::VEC3,.default_c3={0,1.5f,4.5f}},
-    {"cam_at","Camera look-at target",ParamType::VEC3,.default_c3={0,1.2f,0}},
-    {"cam_fov","Vertical field of view",ParamType::FLOAT,.range={.f={1,120,1}},.default_f=35},
-    {"cam_aperture","Depth of field aperture",ParamType::FLOAT,.range={.f={0,1,0.01f}},.default_f=0},
-    {"cam_up","Camera up vector",ParamType::VEC3,.default_c3={0,1,0}},
     {"light_color","Ceiling light color",ParamType::COLOR_RGB,.default_c3={1,1,1}},
     {"light_strength","Ceiling light intensity",ParamType::FLOAT,.range={.f={1,50,1}},.default_f=15},
 };
+
 enum {
-    PARAM_LIGHT_COLOR     = RT_NUM_STD_PARAMS,
+    PARAM_LIGHT_COLOR     = 0,
     PARAM_LIGHT_STRENGTH  = PARAM_LIGHT_COLOR + 3,
 };
+
 static KernelDesc desc={
-    "cornell_box","Cornell box scene with quads",9,params_meta,0,4096,1,
+    "cornell_box","Cornell box scene with quads",2,params_meta,0,4096,1,
     (const char*[]){"kernel.cpp",nullptr}
 };
 extern "C" KernelDesc* get_kernel_desc(){
-    desc.params_buffer_size=0;
+    desc.params_buffer_size = RT_NUM_STD_PARAMS * sizeof(float);
     for(int i=0;i<desc.param_count;i++)
         desc.params_buffer_size+=param_buffer_size(params_meta[i]);
     return &desc;
@@ -46,8 +41,9 @@ static int     g_num_objects   = 0;
 extern "C" void init_kernel(sycl::queue* queue, int, int,
                             const void* params_buffer, size_t) {
     const float* params = (const float*)params_buffer;
-    float3 light_color; memcpy(&light_color, params + PARAM_LIGHT_COLOR, 12);
-    float light_strength = params[PARAM_LIGHT_STRENGTH];
+    int offset = RT_NUM_STD_PARAMS;
+    float3 light_color; memcpy(&light_color, params + offset + PARAM_LIGHT_COLOR, 12);
+    float light_strength = params[offset + PARAM_LIGHT_STRENGTH];
 
     if (g_scene_objects) { sycl::free(g_scene_objects, *queue); g_scene_objects = nullptr; }
 
@@ -66,10 +62,8 @@ extern "C" void init_kernel(sycl::queue* queue, int, int,
     add_quad(objects, object_count, Axis::X, 2.0f,   -2, 2,  0, 3, lambertian(green));
     add_quad(objects, object_count, Axis::Y, 2.99f, -1, 1, -1, 1, diffuse_light(light_emission));
 
-    // Tall box
     add_box(objects, object_count, -0.8f, 0.0f, -0.8f,  0.6f, 1.5f, 0.6f,
             lambertian({0.55f, 0.55f, 0.55f}));
-    // Short box
     add_box(objects, object_count, 0.8f, 0.0f, -0.3f,  0.6f, 0.6f, 1.2f,
             lambertian({0.55f, 0.55f, 0.55f}));
 
