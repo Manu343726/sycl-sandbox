@@ -41,8 +41,7 @@ extern "C" KernelDesc *get_kernel_desc() {
     return &desc;
 }
 
-static Object *g_scene_objects = nullptr;
-static int g_num_objects = 0;
+static DeviceBuffer<Object> g_scene;
 
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
@@ -51,13 +50,7 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     memcpy(&light_color, params + std_offset + PARAM_LIGHT_COLOR, 12);
     float light_strength = params[std_offset + PARAM_LIGHT_STRENGTH];
 
-    if ( g_scene_objects ) {
-        sycl::free(g_scene_objects, *queue);
-        g_scene_objects = nullptr;
-    }
-
-    auto *objects = new Object[64];
-    int object_count = 0;
+    g_scene = DeviceBuffer<Object>(queue, 64);
 
     float3 white = {0.73f, 0.73f, 0.73f};
     float3 red = {0.65f, 0.05f, 0.05f};
@@ -67,24 +60,19 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     using hittables::quad;
     using hittables::box;
 
-    add(objects, object_count, {quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)});
-    add(objects, object_count, {quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)});
-    add(objects, object_count, {quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)});
-    add(objects, object_count, {quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)});
-    add(objects, object_count, {quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)});
-    add(objects, object_count, {quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)});
+    g_scene.push_back({quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)});
+    g_scene.push_back({quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)});
+    g_scene.push_back({quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)});
+    g_scene.push_back({quad(0, -2.0f, -2, 2, 0, 3), lambertian(red)});
+    g_scene.push_back({quad(0, 2.0f, -2, 2, 0, 3), lambertian(green)});
+    g_scene.push_back({quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)});
 
-    add(objects,
-        object_count,
+    g_scene.push_back(
         {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f), lambertian({0.55f, 0.55f, 0.55f})});
-    add(objects,
-        object_count,
+    g_scene.push_back(
         {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f), lambertian({0.55f, 0.55f, 0.55f})});
 
-    g_scene_objects = sycl::malloc_device<Object>(object_count, *queue);
-    queue->memcpy(g_scene_objects, objects, object_count * sizeof(Object)).wait();
-    g_num_objects = object_count;
-    delete[] objects;
+    g_scene.transfer_to_device();
 }
 
 extern "C" void render_kernel(sycl::queue *queue,
@@ -100,16 +88,13 @@ extern "C" void render_kernel(sycl::queue *queue,
                 params,
                 (float *)accum_buffer,
                 sample_index,
-                g_scene_objects,
-                g_num_objects,
+                g_scene.device_ptr(),
+                g_scene.size(),
                 [](const Ray &) -> float3 {
                     return {0, 0, 0};
                 });
 }
 
 extern "C" void shutdown_kernel(sycl::queue *queue) {
-    if ( g_scene_objects ) {
-        sycl::free(g_scene_objects, *queue);
-        g_scene_objects = nullptr;
-    }
+    g_scene = DeviceBuffer<Object>();
 }

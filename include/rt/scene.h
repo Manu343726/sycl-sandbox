@@ -28,9 +28,82 @@ inline float3 quad_corner(Axis primary_axis,
     return {result[0], result[1], result[2]};
 }
 
-/// Append a pre-built Object to a scene array.
-inline void add(Object *objects, int &object_count, Object object) {
-    objects[object_count++] = std::move(object);
-}
+/// A host-resident buffer that can be transferred to the device.
+///
+/// Grows automatically on push_back (doubles capacity).
+/// transfer_to_device() allocates device memory and copies contents.
+/// The destructor frees both host and device allocations.
+template <typename T>
+class DeviceBuffer {
+public:
+    DeviceBuffer() = default;
+
+    DeviceBuffer(sycl::queue *queue, int initial_capacity = 64)
+        : queue_(queue), host_(sycl::malloc_host<T>(initial_capacity, *queue)),
+          capacity_(initial_capacity) {
+    }
+
+    ~DeviceBuffer() {
+        if ( host_ ) {
+            sycl::free(host_, *queue_);
+        }
+        if ( device_ ) {
+            sycl::free(device_, *queue_);
+        }
+    }
+
+    DeviceBuffer(const DeviceBuffer &) = delete;
+    DeviceBuffer &operator=(const DeviceBuffer &) = delete;
+
+    DeviceBuffer(DeviceBuffer &&other) noexcept {
+        *this = std::move(other);
+    }
+
+    DeviceBuffer &operator=(DeviceBuffer &&other) noexcept {
+        std::swap(queue_, other.queue_);
+        std::swap(host_, other.host_);
+        std::swap(device_, other.device_);
+        std::swap(capacity_, other.capacity_);
+        std::swap(count_, other.count_);
+        return *this;
+    }
+
+    void push_back(T object) {
+        if ( count_ >= capacity_ ) {
+            int new_cap = capacity_ * 2;
+            T *new_host = sycl::malloc_host<T>(new_cap, *queue_);
+            for ( int i = 0; i < count_; i++ ) {
+                new_host[i] = std::move(host_[i]);
+            }
+            sycl::free(host_, *queue_);
+            host_ = new_host;
+            capacity_ = new_cap;
+        }
+        host_[count_++] = std::move(object);
+    }
+
+    /// Allocate device memory and copy host contents.
+    void transfer_to_device() {
+        if ( device_ ) {
+            sycl::free(device_, *queue_);
+        }
+        device_ = sycl::malloc_device<T>(count_, *queue_);
+        queue_->memcpy(device_, host_, count_ * sizeof(T)).wait();
+    }
+
+    T *device_ptr() const {
+        return device_;
+    }
+    int size() const {
+        return count_;
+    }
+
+private:
+    sycl::queue *queue_ = nullptr;
+    T *host_ = nullptr;
+    T *device_ = nullptr;
+    int capacity_ = 0;
+    int count_ = 0;
+};
 
 } // namespace rt

@@ -42,7 +42,7 @@ Kernels only declare their own kernel-specific params.
 #include "rt/types.h"        // Object, Hittable, Material
 #include "rt/trace.h"        // rt::render_main()
 #include "rt/params.h"       // rt_std_param enum (implicit)
-#include "rt/scene.h"        // Axis, quad_corner, add()
+#include "rt/scene.h"        // Axis, quad_corner, DeviceBuffer
 #include "rt/hittables/quad.h"
 #include "rt/materials/lambertian.h"
 #include "rt/materials/diffuse_light.h"
@@ -94,7 +94,7 @@ avoids proliferating custom geometry helpers (like `add_quad`/`add_box`)
 — just construct the primitive directly and add it as a single `Object`:
 
 ```cpp
-add(objects, count, {hittables::box(cx, cy, cz, sx, sy, sz), material});
+g_scene.push_back({hittables::box(cx, cy, cz, sx, sy, sz), material});
 ```
 
 The same composition principle can be extended to other compound primitives
@@ -153,19 +153,31 @@ ignores everything beyond.  Kernel-specific params use a plain anonymous
 
 ## Scene building helpers
 
-`rt/scene.h` provides `add(objects, count, object)` which appends a single
-`Object` (hittable + material) to a plain array.  The hittable factories live
-in their respective headers — there are **no** `add_quad`/`add_box` helpers:
+`rt/scene.h` provides `DeviceBuffer<T>`, a host-resident buffer that grows
+on demand (`push_back`) and uploads to device (`transfer_to_device()`):
 
 ```cpp
-add(objects, count, {hittables::quad(axis, value, …), material});   // one face
-add(objects, count, {hittables::box(cx, cy, cz, sx, sy, sz), material});  // box
+static DeviceBuffer<Object> g_scene;
+
+void init_kernel(sycl::queue *queue, …) {
+    g_scene = DeviceBuffer<Object>(queue, 64);           // initial capacity
+
+    g_scene.push_back({hittables::quad(axis, value, …), material});  // one face
+    g_scene.push_back({hittables::box(cx, cy, cz, sx, sy, sz), material});  // box
+
+    g_scene.transfer_to_device();   // malloc_device + memcpy
+}
+
+void render_kernel(…) {
+    render_main(queue, …, g_scene.device_ptr(), g_scene.size(), …);
+}
+
+void shutdown_kernel(…) {
+    g_scene = DeviceBuffer<Object>();  // move-assign empty → frees old
+}
 ```
 
-`quad()` takes the primary axis as a bare int (`0` = X, `1` = Y, `2` = Z),
-not the `Axis` enum.  `quad_corner()` is still available for low-level
-corner computation.
-
+`quad()` takes the primary axis as a bare int (`0` = X, `1` = Y, `2` = Z).
 `Box` is a first-class hittable — it is implemented as six `Quad` faces
 internally but hits as a single `Object`.
 
@@ -181,7 +193,7 @@ include/rt/
   camera.h            — Camera struct, lookat()
   params.h            — rt_std_param enum
   trace.h             — Object::hit/scatter/emit dispatch, trace(), render_main<>()
-   scene.h             — Axis enum, quad_corner, add()
+    scene.h             — Axis enum, quad_corner, DeviceBuffer
   hittables/
     sphere.h          — Sphere class + sphere() factory
     quad.h            — Quad   class + quad()   factory
