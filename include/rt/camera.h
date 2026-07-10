@@ -8,37 +8,35 @@ namespace rt {
 
 /// Camera frustum parameters computed by lookat().
 struct Camera {
-    float3 origin;     ///< Camera position in world space.
-    float3 lower_left; ///< World-space position of the viewport's bottom-left corner.
-    float3 horizontal; ///< Width vector of the viewport (right direction * viewport width).
-    float3 vertical;   ///< Height vector of the viewport (up direction * viewport height).
+    float3 origin;
+    float3 lower_left;
+    float3 horizontal;
+    float3 vertical;
 };
 
-/// Builds a Camera from standard lookAt parameters.
-/// @param from       Camera position (eye).
-/// @param at         Look-at target point.
-/// @param up         Up vector (usually {0,1,0}).
-/// @param vfov_deg   Vertical field of view in degrees.
-/// @param aspect     Width / height ratio of the output image.
-/// @param focus_dist Distance from the camera to the focal plane (default 1).
+/// Build a Camera from standard lookAt parameters.
 inline Camera
 lookat(float3 from, float3 at, float3 up, float vfov_deg, float aspect, float focus_dist = 1.f) {
+    // Convert vertical FOV from degrees to radians and compute viewport dimensions
     float theta = vfov_deg * 3.14159265f / 180.f;
-    float h = sycl::tan(theta / 2.f);
-    float vh = 2.f * h;
-    float vw = aspect * vh;
+    float half_height = sycl::tan(theta / 2.f);
+    float viewport_height = 2.f * half_height;
+    float viewport_width = aspect * viewport_height;
 
-    float3 ww = norm(sub(from, at));
-    float3 uu = norm(cross(up, ww));
-    float3 vv = cross(ww, uu);
+    // Build orthonormal camera basis: forward (ww), right (uu), up (vv)
+    float3 forward = norm(sub(from, at));
+    float3 right = norm(cross(up, forward));
+    float3 cam_up = cross(forward, right);
 
-    Camera c;
-    c.origin = from;
-    c.horizontal = scale(uu, vw * focus_dist);
-    c.vertical = scale(vv, vh * focus_dist);
-    c.lower_left = sub(sub(sub(from, scale(c.horizontal, 0.5f)), scale(c.vertical, 0.5f)),
-                       scale(ww, focus_dist));
-    return c;
+    // Compute the frustum corners from the basis and focus distance
+    Camera camera;
+    camera.origin = from;
+    camera.horizontal = scale(right, viewport_width * focus_dist);
+    camera.vertical = scale(cam_up, viewport_height * focus_dist);
+    camera.lower_left =
+        sub(sub(sub(from, scale(camera.horizontal, 0.5f)), scale(camera.vertical, 0.5f)),
+            scale(forward, focus_dist));
+    return camera;
 }
 
 } // namespace rt

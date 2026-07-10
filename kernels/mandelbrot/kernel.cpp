@@ -1,5 +1,6 @@
 #include "sandbox_api.h"
 #include <sycl/sycl.hpp>
+#include <cstring>
 
 static ParamMeta params_meta[] = {
     {"center_x",
@@ -45,93 +46,114 @@ extern "C" KernelDesc *get_kernel_desc() {
 extern "C" void init_kernel(sycl::queue *, int, int, const void *, size_t) {
 }
 
-extern "C" void render_kernel(sycl::queue *q, int w, int h, const void *params, void *accum, int) {
-    auto *p = (const float *)params;
-    float cx = p[P_CENTER_X];
-    float cy = p[P_CENTER_Y];
-    float zoom = p[P_ZOOM];
-    int max_iter = (int)p[P_MAX_ITER];
-    float aspect = (float)w / (float)h;
+extern "C" void render_kernel(sycl::queue *queue,
+                              int width,
+                              int height,
+                              const void *params,
+                              void *accum_buffer,
+                              int) {
+    auto *params_data = (const float *)params;
+    float center_x = params_data[P_CENTER_X];
+    float center_y = params_data[P_CENTER_Y];
+    float zoom_level = params_data[P_ZOOM];
+    int max_iterations = (int)params_data[P_MAX_ITER];
+    float aspect_ratio = (float)width / (float)height;
 
-    auto *acc = (float *)accum;
+    auto *accum = (float *)accum_buffer;
 
-    q->parallel_for(sycl::range<2> {(size_t)h, (size_t)w}, [=](sycl::item<2> it) {
-         int x = it[1], y = it[0], idx = y * w + x;
+    queue
+        ->parallel_for(sycl::range<2> {(size_t)height, (size_t)width},
+                       [=](sycl::item<2> pixel) {
+                           int x = pixel[1], y = pixel[0], flat_index = y * width + x;
 
-         float px = (x + 0.5f) / (float)w;
-         float py = (y + 0.5f) / (float)h;
-         float map_x = cx + (px - 0.5f) * zoom * aspect;
-         float map_y = cy + (py - 0.5f) * zoom;
+                           // Map the pixel to a point in the complex plane
+                           float px = (x + 0.5f) / (float)width;
+                           float py = (y + 0.5f) / (float)height;
+                           float map_x = center_x + (px - 0.5f) * zoom_level * aspect_ratio;
+                           float map_y = center_y + (py - 0.5f) * zoom_level;
 
-         float zx = 0.0f, zy = 0.0f;
-         float zx2 = 0.0f, zy2 = 0.0f;
-         int iter = 0;
-         while ( iter < max_iter && zx2 + zy2 < 4.0f ) {
-             zy = 2.0f * zx * zy + map_y;
-             zx = zx2 - zy2 + map_x;
-             zx2 = zx * zx;
-             zy2 = zy * zy;
-             iter++;
-         }
+                           // Iterate the Mandelbrot recurrence:  z ← z² + c
+                           float zx = 0.0f, zy = 0.0f;
+                           float zx2 = 0.0f, zy2 = 0.0f;
+                           int iteration = 0;
 
-         float col_r, col_g, col_b;
-         if ( iter == max_iter ) {
-             col_r = 0.0f;
-             col_g = 0.0f;
-             col_b = 0.0f;
-         } else {
-             float t = (float)iter / 50.0f;
-             if ( t > 1.0f )
-                 t = 1.0f;
-             float h = t;
-             float s = 0.9f;
-             float v = 0.8f + t * 0.2f;
-             float h6 = h * 6.0f;
-             int hi = (int)h6;
-             float f = h6 - (float)hi;
-             float p = v * (1.0f - s);
-             float q = v * (1.0f - s * f);
-             float tt = v * (1.0f - s * (1.0f - f));
-             switch ( hi % 6 ) {
-                 case 0:
-                     col_r = v;
-                     col_g = tt;
-                     col_b = p;
-                     break;
-                 case 1:
-                     col_r = q;
-                     col_g = v;
-                     col_b = p;
-                     break;
-                 case 2:
-                     col_r = p;
-                     col_g = v;
-                     col_b = tt;
-                     break;
-                 case 3:
-                     col_r = p;
-                     col_g = q;
-                     col_b = v;
-                     break;
-                 case 4:
-                     col_r = tt;
-                     col_g = p;
-                     col_b = v;
-                     break;
-                 default:
-                     col_r = v;
-                     col_g = p;
-                     col_b = q;
-                     break;
-             }
-         }
+                           while ( iteration < max_iterations && zx2 + zy2 < 4.0f ) {
+                               zy = 2.0f * zx * zy + map_y;
+                               zx = zx2 - zy2 + map_x;
+                               zx2 = zx * zx;
+                               zy2 = zy * zy;
+                               iteration++;
+                           }
 
-         int base = idx * 4;
-         acc[base + 0] += col_r;
-         acc[base + 1] += col_g;
-         acc[base + 2] += col_b;
-         acc[base + 3] += 1;
-     }).wait();
+                           // Convert the iteration count to an HSV colour, then to RGB
+                           float red, green, blue;
+                           if ( iteration == max_iterations ) {
+                               // Interior of the set — render as black
+                               red = 0.0f;
+                               green = 0.0f;
+                               blue = 0.0f;
+                           } else {
+                               // Map iteration count to a hue, then apply HSV-to-RGB conversion
+                               float t = (float)iteration / 50.0f;
+                               if ( t > 1.0f )
+                                   t = 1.0f;
+
+                               float hue = t;
+                               float saturation = 0.9f;
+                               float value = 0.8f + t * 0.2f;
+
+                               // Standard HSV-to-RGB conversion
+                               float hue_sector = hue * 6.0f;
+                               int sector_index = (int)hue_sector;
+                               float fractional_part = hue_sector - (float)sector_index;
+
+                               float p = value * (1.0f - saturation);
+                               float q = value * (1.0f - saturation * fractional_part);
+                               float t_component =
+                                   value * (1.0f - saturation * (1.0f - fractional_part));
+
+                               switch ( sector_index % 6 ) {
+                                   case 0:
+                                       red = value;
+                                       green = t_component;
+                                       blue = p;
+                                       break;
+                                   case 1:
+                                       red = q;
+                                       green = value;
+                                       blue = p;
+                                       break;
+                                   case 2:
+                                       red = p;
+                                       green = value;
+                                       blue = t_component;
+                                       break;
+                                   case 3:
+                                       red = p;
+                                       green = q;
+                                       blue = value;
+                                       break;
+                                   case 4:
+                                       red = t_component;
+                                       green = p;
+                                       blue = value;
+                                       break;
+                                   default:
+                                       red = value;
+                                       green = p;
+                                       blue = q;
+                                       break;
+                               }
+                           }
+
+                           // Accumulate the colour (single frame: max_spp = 1, no averaging needed)
+                           int base = flat_index * 4;
+                           accum[base + 0] += red;
+                           accum[base + 1] += green;
+                           accum[base + 2] += blue;
+                           accum[base + 3] += 1;
+                       })
+        .wait();
 }
 
 extern "C" void shutdown_kernel(sycl::queue *) {

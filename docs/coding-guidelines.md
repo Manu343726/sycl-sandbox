@@ -177,6 +177,41 @@ Architecture changes must update the corresponding docs in the same commit:
 
 Out-of-date docs are worse than no docs.
 
+## Math code layout
+
+Math-heavy functions must be broken into logical sections separated by
+blank lines, each preceded by a `///` or `//` comment explaining the step.
+
+```cpp
+std::optional<HitRecord> hit(const Ray& ray, float t_min, float t_max) const {
+    // Compute the quadratic coefficients using the geometric formulation
+    float3 oc = sub(ray.orig, center);
+    float a = dot(ray.dir, ray.dir);
+    float half_b = dot(oc, ray.dir);
+    float c_ = dot(oc, oc) - radius * radius;
+
+    // Solve for t using the reduced quadratic formula
+    float discriminant = half_b*half_b - a*c_;
+    if (discriminant <= 0) return std::nullopt;
+    float sqrt_d = sycl::sqrt(discriminant);
+    float t = (-half_b - sqrt_d) / a;
+    if (t < t_min || t > t_max) t = (-half_b + sqrt_d) / a;
+    if (t < t_min || t > t_max) return std::nullopt;
+
+    // Fill the HitRecord with the intersection point and surface normal
+    HitRecord rec;
+    rec.t = t;
+    rec.p = add(ray.orig, scale(ray.dir, t));
+    rec.normal = scale(sub(rec.p, center), 1.f / radius);
+    rec.front_face = dot(ray.dir, rec.normal) < 0;
+    if (!rec.front_face) rec.normal = scale(rec.normal, -1);
+    return rec;
+}
+```
+
+Each section should be one logical step — you should be able to read
+the comments alone and understand the algorithm.
+
 ## Code organisation
 
 - One class per file, named after the class (lowercase_snake_case).
