@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <cstdlib>
+#include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 
@@ -29,8 +30,7 @@ bool KernelLibrary::rebuild(const std::string& kernel_name) {
 KernelHandle* KernelLibrary::load(const std::string& kernel_name) {
     fs::path src_so = fs::path(build_dir_) / "kernels" / kernel_name / ("lib" + kernel_name + ".so");
     if (!fs::exists(src_so)) {
-        fprintf(stderr, "[kernel] %s not found at %s\n",
-                kernel_name.c_str(), src_so.c_str());
+        spdlog::error("[kernel] {} not found at {}", kernel_name, src_so.string());
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
 
@@ -42,19 +42,19 @@ KernelHandle* KernelLibrary::load(const std::string& kernel_name) {
     std::error_code ec;
     fs::copy_file(src_so, ver_so, fs::copy_options::overwrite_existing, ec);
     if (ec) {
-        fprintf(stderr, "[kernel] copy failed: %s\n", ec.message().c_str());
+        spdlog::error("[kernel] copy failed: {}", ec.message());
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
 
     void* h = dlopen(ver_so.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!h) {
-        fprintf(stderr, "[kernel] dlopen %s: %s\n", ver_so.c_str(), dlerror());
+        spdlog::error("[kernel] dlopen {}: {}", ver_so.string(), dlerror());
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
 
     auto* get_desc = reinterpret_cast<KernelDesc*(*)()>(dlsym(h, "get_kernel_desc"));
     if (!get_desc) {
-        fprintf(stderr, "[kernel] dlsym get_kernel_desc: %s\n", dlerror());
+        spdlog::error("[kernel] dlsym get_kernel_desc: {}", dlerror());
         // keep old handle active
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
@@ -81,8 +81,8 @@ KernelHandle* KernelLibrary::load(const std::string& kernel_name) {
     handles_[ver_so] = std::move(kh);
     active_[kernel_name] = ptr;
 
-    fprintf(stderr, "[kernel] loaded %s (gen %d, %d params, %zu bytes)\n",
-            kernel_name.c_str(), gen, ptr->desc.param_count, offset);
+    spdlog::info("[kernel] loaded {} (gen {}, {} params, {} bytes)",
+                 kernel_name, gen, ptr->desc.param_count, offset);
     return ptr;
 }
 

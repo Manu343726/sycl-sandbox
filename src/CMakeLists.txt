@@ -1,3 +1,18 @@
+# ---- args (header-only CLI parser) ----
+include(FetchContent)
+FetchContent_Declare(args
+    GIT_REPOSITORY  https://github.com/Taywee/args
+    GIT_TAG         master
+    GIT_SHALLOW     TRUE
+    SOURCE_SUBDIR   NONE
+)
+FetchContent_GetProperties(args)
+if(NOT args_POPULATED)
+    FetchContent_Populate(args)
+endif()
+add_library(args INTERFACE)
+target_include_directories(args INTERFACE "${args_SOURCE_DIR}")
+
 # ---- ImGui backends helper ----
 # conan imgui provides core as a prebuilt static library (imgui::imgui).
 # Backend .cpp files are fetched from GitHub since the conan package doesn't compile them.
@@ -37,12 +52,16 @@ target_include_directories(sandbox PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
+find_package(spdlog REQUIRED)
+
 target_link_libraries(sandbox PRIVATE
     AdaptiveCpp::acpp-rt
     imgui_helper
+    args
     glfw
     glm::glm-header-only
     yaml-cpp::yaml-cpp
+    spdlog::spdlog
     OpenGL::GL
     ${CMAKE_DL_LIBS}
 )

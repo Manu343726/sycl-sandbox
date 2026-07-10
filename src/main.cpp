@@ -8,6 +8,8 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
+#include <spdlog/spdlog.h>
+#include <args.hxx>
 
 #include <sycl/sycl.hpp>
 
@@ -15,25 +17,47 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <vector>
 
 // ── configuration ──────────────────────────────────────────────────────
-static constexpr int  WIDTH    = 1280;
-static constexpr int  HEIGHT   = 720;
-static constexpr int  MAX_SPP  = 4096;
+static int  WIDTH    = 1280;
+static int  HEIGHT   = 720;
 
-// ── forward declarations for kernel dispatch helpers ───────────────────
+static void recreate_render_buffers(sycl::queue& q, GLuint& tex,
+                                     float*& d_accum, float*& h_accum,
+                                     size_t& pixel_count,
+                                     int w, int h);
+
+// ── forward declarations ───────────────────────────────────────────────
 static void call_init_kernel(void* handle, sycl::queue& q,
                               int w, int h, const void* params, size_t sz);
 static void call_render_kernel(void* handle, sycl::queue& q,
                                 int w, int h, const void* params,
                                 void* accum, int sample);
+static float* find_param(float* params, const KernelDesc& desc, const char* name);
 
 // ── GLFW error callback ────────────────────────────────────────────────
 static void glfw_error_cb(int error, const char* desc) {
-    fprintf(stderr, "GLFW %d: %s\n", error, desc);
+    spdlog::error("GLFW {}: {}", error, desc);
+}
+
+// ── orbit camera (for 3D scenes like one_weekend) ──────────────────────
+struct OrbitCam {
+    float theta     = 1.35f;
+    float phi       = 1.05f;
+    float dist      = 12.f;
+    float target[3] = { 0.f, 0.f, 0.f };
+};
+
+static void orbit_to_eye(const OrbitCam& o, float eye[3]) {
+    float ct = cosf(o.theta), st = sinf(o.theta);
+    float cp = cosf(o.phi),   sp = sinf(o.phi);
+    eye[0] = o.target[0] + o.dist * cp * st;
+    eye[1] = o.target[1] + o.dist * sp;
+    eye[2] = o.target[2] + o.dist * cp * ct;
 }
 
 // ── OpenGL texture helpers ─────────────────────────────────────────────
@@ -41,8 +65,8 @@ static GLuint create_render_texture(int w, int h) {
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
-                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -50,36 +74,21 @@ static GLuint create_render_texture(int w, int h) {
     return tex;
 }
 
-// ── orbit camera state ─────────────────────────────────────────────────
-struct OrbitCamera {
-    float theta   = 1.35f;
-    float phi     = 1.05f;
-    float dist    = 12.f;
-    float fov     = 20.f;
-    float target[3] = { 0.f, 0.f, 0.f };
-    float eye[3]  = { 0.f, 0.f, 0.f };
-    bool  dirty   = true;
-
-    void update_eye() {
-        float ct = cosf(theta), st = sinf(theta);
-        float cp = cosf(phi),   sp = sinf(phi);
-        eye[0] = target[0] + dist * cp * st;
-        eye[1] = target[1] + dist * sp;
-        eye[2] = target[2] + dist * cp * ct;
-        dirty = false;
-    }
-};
-
-// ── YAML scene overrides for camera (optional) ─────────────────────────
-struct SceneCameraOverrides {
-    float pos[3]  = { 13.f, 2.f, 3.f };
-    float look_at[3] = { 0.f, 0.f, 0.f };
-    float vfov    = 20.f;
-    float defocus = 0.f;
-};
-
 // ── main ───────────────────────────────────────────────────────────────
-int main() {
+int main(int argc, char** argv) {
+    // ---- CLI args ----
+    args::ArgumentParser parser("sycl-sandbox");
+    args::ValueFlag<std::string> backend_arg(parser, "cpu|gpu", "SYCL backend", {'b', "backend"});
+    try { parser.ParseCLI(argc, argv); }
+    catch (const args::Help&) { std::cerr << parser; return 0; }
+    catch (const args::ParseError& e) { spdlog::error("{}", e.what()); std::cerr << parser; return 1; }
+
+    std::string backend = backend_arg ? backend_arg.Get() : "gpu";
+    if (backend != "cpu" && backend != "gpu") {
+        spdlog::error("backend must be 'cpu' or 'gpu', got '{}'", backend);
+        return 1;
+    }
+
     // ---- GLFW window ----
     glfwSetErrorCallback(glfw_error_cb);
     if (!glfwInit()) return 1;
@@ -89,9 +98,12 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT,
                                           "sycl-sandbox", nullptr, nullptr);
-    if (!window) { fprintf(stderr, "glfwCreateWindow failed\n"); return 1; }
+    if (!window) { spdlog::error("glfwCreateWindow failed"); return 1; }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    // Use actual framebuffer size
+    glfwGetFramebufferSize(window, &WIDTH, &HEIGHT);
 
     // ---- ImGui ----
     IMGUI_CHECKVERSION();
@@ -103,33 +115,40 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    // ---- Render texture ----
-    GLuint tex = create_render_texture(WIDTH, HEIGHT);
+    // ---- SYCL queue ----
+    spdlog::info("[startup] creating queue (backend={})", backend);
+    sycl::queue q = sycl::queue(sycl::default_selector_v);
+    if (backend == "gpu") {
+        try {
+            sycl::queue gq(sycl::gpu_selector_v);
+            q = std::move(gq);
+        } catch (const std::exception& e) {
+            spdlog::warn("[startup] gpu selector failed ({}), keeping default", e.what());
+        }
+    }
+    spdlog::info("[startup] device: {}",
+                 q.get_device().get_info<sycl::info::device::name>().c_str());
+
+    // ---- Render buffers ----
+    spdlog::debug("[startup] creating render buffers...");
+    GLuint tex = 0;
+    size_t pixel_count = 0;
+    float* d_accum = nullptr;
+    float* h_accum = nullptr;
+    recreate_render_buffers(q, tex, d_accum, h_accum, pixel_count, WIDTH, HEIGHT);
 
     // ---- Scene system ----
+    spdlog::debug("[startup] loading scenes...");
     SceneRegistry  scenes("scenes");
     KernelLibrary  kernels("build");
     SourceWatcher  watcher;
+    spdlog::info("[startup] {} scenes loaded", scenes.all().size());
 
-    for (auto& s : scenes.all())
+    for (auto& s : scenes.all()) {
+        spdlog::debug("[startup] watch kernel: {}", s.kernel);
         watcher.watch_kernel(s.kernel,
                              std::string("kernels/") + s.kernel);
-
-    // ---- SYCL queue ----
-    sycl::queue q;
-    try {
-        q = sycl::queue(sycl::gpu_selector_v);
-    } catch (...) {
-        fprintf(stderr, "[sycl] GPU not available, falling back to default device\n");
-        q = sycl::queue{};
     }
-    fprintf(stderr, "[sycl] device: %s\n",
-            q.get_device().get_info<sycl::info::device::name>().c_str());
-
-    // ---- Device buffers ----
-    const size_t pixel_count = WIDTH * HEIGHT;
-    float* d_accum = sycl::malloc_device<float>(pixel_count * 4, q);
-    float* h_accum = new float[pixel_count * 4];
 
     // ---- Active state ----
     const SceneDef*     active_scene  = nullptr;
@@ -137,17 +156,59 @@ int main() {
     float*              h_params      = nullptr;
     float*              d_params      = nullptr;
     int                 current_spp   = 0;
+    int                 target_spp    = 1;
 
-    OrbitCamera         cam;
+    // Clear accumulator to black
+    q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+
+    // Auto-load first scene
+    if (!scenes.all().empty()) {
+        active_scene = &scenes.all().front();
+        spdlog::info("[startup] loading kernel: {}", active_scene->kernel);
+        active_kernel = kernels.load(active_scene->kernel);
+        spdlog::info("[startup] kernel loaded, target_spp={}, sz={}", active_kernel ? active_kernel->desc.max_spp : 0, active_kernel ? active_kernel->desc.params_buffer_size : 0);
+        if (active_kernel) {
+            target_spp = active_kernel->desc.max_spp;
+            auto sz = active_kernel->desc.params_buffer_size;
+            h_params = (float*)calloc(sz, 1);
+            spdlog::info("[startup] apply_params...");
+            scenes.apply_params(*active_scene, active_kernel->desc,
+                                h_params, sz);
+            spdlog::info("[startup] alloc d_params...");
+            d_params = sycl::malloc_host<float>(sz / 4, q);
+            spdlog::info("[startup] upload params...");
+            q.memcpy(d_params, h_params, sz).wait();
+            spdlog::info("[startup] init_kernel...");
+            call_init_kernel(active_kernel->handle, q,
+                             WIDTH, HEIGHT, d_params, sz);
+            spdlog::info("[startup] init_kernel done");
+        }
+    }
 
     // ---- Main loop ----
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
+        // 0. Check for window resize
+        int fb_w, fb_h;
+        glfwGetFramebufferSize(window, &fb_w, &fb_h);
+        if (fb_w != WIDTH || fb_h != HEIGHT) {
+            spdlog::info("[resize] {} x {} -> {} x {}", WIDTH, HEIGHT, fb_w, fb_h);
+            WIDTH = fb_w;
+            HEIGHT = fb_h;
+            recreate_render_buffers(q, tex, d_accum, h_accum, pixel_count, WIDTH, HEIGHT);
+            q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+            current_spp = 0;
+            if (active_kernel && d_params) {
+                call_init_kernel(active_kernel->handle, q,
+                                 WIDTH, HEIGHT, d_params,
+                                 active_kernel->desc.params_buffer_size);
+            }
+        }
+
         // 1. Check source changes → rebuild + reload
         for (auto& dirty_name : watcher.poll()) {
-            fprintf(stderr, "[watcher] %s changed, rebuilding...\n",
-                    dirty_name.c_str());
+            spdlog::info("[watcher] {} changed, rebuilding...", dirty_name);
             if (kernels.rebuild(dirty_name)) {
                 auto* new_kh = kernels.load(dirty_name);
                 if (new_kh && active_scene &&
@@ -158,10 +219,11 @@ int main() {
                     scenes.apply_params(*active_scene, new_kh->desc,
                                         h_params, sz);
                     if (d_params) sycl::free(d_params, q);
-                    d_params = sycl::malloc_device<float>(sz / 4, q);
+                    d_params = sycl::malloc_host<float>(sz / 4, q);
                     q.memcpy(d_params, h_params, sz).wait();
                     call_init_kernel(new_kh->handle, q,
                                      WIDTH, HEIGHT, d_params, sz);
+                    q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                     active_kernel = new_kh;
                     current_spp = 0;
                 }
@@ -172,6 +234,15 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        // 3. Render full-window background image (before UI windows)
+        {
+            auto disp = ImGui::GetIO().DisplaySize;
+            ImGui::GetBackgroundDrawList()->AddImage(
+                (ImTextureID)(intptr_t)tex,
+                ImVec2(0, 0), disp,
+                ImVec2(0, 1), ImVec2(1, 0)
+            );
+        }
 
         // ---- Scene / kernel selector ----
         ImGui::Begin("Controls");
@@ -190,11 +261,11 @@ int main() {
                             scenes.apply_params(s, active_kernel->desc,
                                                 h_params, sz);
                             if (d_params) sycl::free(d_params, q);
-                            d_params = sycl::malloc_device<float>(sz / 4, q);
+                            d_params = sycl::malloc_host<float>(sz / 4, q);
                             q.memcpy(d_params, h_params, sz).wait();
                             call_init_kernel(active_kernel->handle, q,
                                              WIDTH, HEIGHT, d_params, sz);
-                            q.memset(d_accum, 0, pixel_count * 4 * 4).wait();
+                            q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                             current_spp = 0;
                         }
                     }
@@ -209,6 +280,13 @@ int main() {
             if (render_param_controls(active_kernel->desc, h_params, false)) {
                 q.memcpy(d_params, h_params,
                          active_kernel->desc.params_buffer_size).wait();
+                try {
+                    call_init_kernel(active_kernel->handle, q,
+                                     WIDTH, HEIGHT, d_params,
+                                     active_kernel->desc.params_buffer_size);
+                } catch (const std::exception& e) {
+                    spdlog::error("[sycl] init error: {}", e.what());
+                }
                 q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                 current_spp = 0;
             }
@@ -219,87 +297,226 @@ int main() {
             ImGui::SeparatorText("Stats");
             ImGui::Text("%s  (gen %d)", active_kernel->desc.name,
                         active_kernel->generation);
-            ImGui::Text("SPP %d / %d", current_spp, MAX_SPP);
+            ImGui::Text("SPP %d / %d", current_spp, target_spp);
             ImGui::Text("%d x %d", WIDTH, HEIGHT);
-            if (ImGui::Button("Reset Accumulation")) {
+            int kernel_max = active_kernel->desc.max_spp;
+            if (ImGui::SliderInt("Target SPP", &target_spp, 1, kernel_max))
+                current_spp = std::min(current_spp, target_spp);
+            if (ImGui::Button("Reset")) {
                 q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                 current_spp = 0;
             }
         }
-        ImGui::End();
 
-        // ---- Camera ----
-        ImGui::Begin("Camera");
-        ImGui::Text("LMB drag = orbit  |  scroll = zoom");
-        if (ImGui::SliderFloat("fov", &cam.fov, 5.f, 90.f, "%.1f\u00b0"))
-            cam.dirty = true;
-        ImGui::End();
+        // ---- camera info & controls ----
+        if (active_kernel && h_params) {
+            ImGui::SeparatorText("Camera");
+            float* cx = find_param(h_params, active_kernel->desc, "center_x");
+            float* cy = find_param(h_params, active_kernel->desc, "center_y");
+            float* zm = find_param(h_params, active_kernel->desc, "zoom");
+            float* ce = find_param(h_params, active_kernel->desc, "cam_eye");
+            float* ca = find_param(h_params, active_kernel->desc, "cam_at");
+            float* cf = find_param(h_params, active_kernel->desc, "cam_fov");
 
-        // ---- mouse camera ----
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-            cam.theta -= d.x * 0.005f;
-            cam.phi   += d.y * 0.005f;
-            cam.phi    = std::max(-1.5f, std::min(1.5f, cam.phi));
-            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-            cam.dirty = true;
+            if (cx && cy && zm) {
+                ImGui::Text("LMB drag = pan  |  scroll = zoom  |  arrows = pan");
+                ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f", *cx, *cy, *zm);
+            } else if (ce && ca && cf) {
+                ImGui::Text("LMB drag = orbit  |  scroll = zoom");
+                ImGui::Text("Arrows = orbit  |  Shift+arrows = pan target");
+                ImGui::Text("WASD = move camera  |  Q/E = up/down");
+                ImGui::Text("Eye: (%.2f, %.2f, %.2f)", ce[0], ce[1], ce[2]);
+                ImGui::Text("FOV: %.1f\u00b0", *cf);
+                float* cap = find_param(h_params, active_kernel->desc, "cam_aperture");
+                if (cap) ImGui::Text("Aperture: %.3f", *cap);
+            }
         }
-        if (io.MouseWheel != 0.f) {
-            cam.dist *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
-            cam.dist  = std::max(1.f, std::min(100.f, cam.dist));
-            cam.dirty = true;
+
+        ImGui::End();
+
+        // ---- camera controls (2D pan / 3D orbit) ----
+        if (active_kernel && h_params) {
+            float* cx = find_param(h_params, active_kernel->desc, "center_x");
+            float* cy = find_param(h_params, active_kernel->desc, "center_y");
+            float* zm = find_param(h_params, active_kernel->desc, "zoom");
+            float* ce = find_param(h_params, active_kernel->desc, "cam_eye");
+            float* ca = find_param(h_params, active_kernel->desc, "cam_at");
+            float* cf = find_param(h_params, active_kernel->desc, "cam_fov");
+
+            bool changed = false;
+
+            // ── 2D camera (center + zoom) ──────────────────────────
+            if (cx && cy && zm) {
+                if (!io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                    *cx -= d.x / WIDTH * *zm * ((float)WIDTH / HEIGHT);
+                    *cy += d.y / HEIGHT * *zm;
+                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                    changed = true;
+                }
+                if (!io.WantCaptureMouse && io.MouseWheel != 0.f) {
+                    *zm *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
+                    *zm = (*zm < 0.001f) ? 0.001f : (*zm > 1000.f ? 1000.f : *zm);
+                    changed = true;
+                }
+            }
+
+            // ── 3D orbit camera ────────────────────────────────────
+            if (ce && ca && cf) {
+                static OrbitCam orbit;
+                static bool     orbit_init = false;
+                if (!orbit_init) {
+                    float dx = ce[0] - ca[0], dy = ce[1] - ca[1], dz = ce[2] - ca[2];
+                    orbit.dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                    orbit.theta = atan2f(dx, dz);
+                    orbit.phi   = asinf(dy / orbit.dist);
+                    orbit.target[0] = ca[0]; orbit.target[1] = ca[1]; orbit.target[2] = ca[2];
+                    orbit.theta  = std::fmod(orbit.theta, 2.f * 3.14159265f);
+                    orbit.phi    = std::max(-1.5f, std::min(1.5f, orbit.phi));
+                    orbit_init = true;
+                }
+
+                if (!io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                    orbit.theta -= d.x * 0.005f;
+                    orbit.phi   += d.y * 0.005f;
+                    orbit.phi    = std::max(-1.5f, std::min(1.5f, orbit.phi));
+                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                    changed = true;
+                }
+                if (!io.WantCaptureMouse && io.MouseWheel != 0.f) {
+                    orbit.dist *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
+                    orbit.dist  = std::max(1.f, std::min(100.f, orbit.dist));
+                    changed = true;
+                }
+
+                if (!io.WantCaptureKeyboard) {
+                    float kspeed = 0.04f;
+                    bool shift = io.KeyShift;
+
+                    // Orbit
+                    if (!shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow))  { orbit.theta -= kspeed; changed = true; }
+                    if (!shift && ImGui::IsKeyDown(ImGuiKey_RightArrow)) { orbit.theta += kspeed; changed = true; }
+                    if (!shift && ImGui::IsKeyDown(ImGuiKey_UpArrow))    { orbit.phi += kspeed; orbit.phi = std::min(1.5f, orbit.phi); changed = true; }
+                    if (!shift && ImGui::IsKeyDown(ImGuiKey_DownArrow))  { orbit.phi -= kspeed; orbit.phi = std::max(-1.5f, orbit.phi); changed = true; }
+
+                    // Pan target
+                    if (shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow))  { orbit.target[0] -= 0.2f * cosf(orbit.theta); orbit.target[2] -= 0.2f * sinf(orbit.theta); changed = true; }
+                    if (shift && ImGui::IsKeyDown(ImGuiKey_RightArrow)) { orbit.target[0] += 0.2f * cosf(orbit.theta); orbit.target[2] += 0.2f * sinf(orbit.theta); changed = true; }
+                    if (shift && ImGui::IsKeyDown(ImGuiKey_UpArrow))    { orbit.target[1] += 0.2f; changed = true; }
+                    if (shift && ImGui::IsKeyDown(ImGuiKey_DownArrow))  { orbit.target[1] -= 0.2f; changed = true; }
+
+                    // WASD translate camera (move eye + target together)
+                    float ct = cosf(orbit.theta), st = sinf(orbit.theta);
+                    float cp = cosf(orbit.phi),   sp = sinf(orbit.phi);
+                    float forward[3] = { cp * st, sp, cp * ct };
+                    float right[3]   = { ct, 0.f, -st };
+                    float tspeed = 0.3f;
+
+                    if (ImGui::IsKeyDown(ImGuiKey_W)) {
+                        orbit.target[0] += forward[0] * tspeed;
+                        orbit.target[1] += forward[1] * tspeed;
+                        orbit.target[2] += forward[2] * tspeed;
+                        changed = true;
+                    }
+                    if (ImGui::IsKeyDown(ImGuiKey_S)) {
+                        orbit.target[0] -= forward[0] * tspeed;
+                        orbit.target[1] -= forward[1] * tspeed;
+                        orbit.target[2] -= forward[2] * tspeed;
+                        changed = true;
+                    }
+                    if (ImGui::IsKeyDown(ImGuiKey_A)) {
+                        orbit.target[0] -= right[0] * tspeed;
+                        orbit.target[1] -= right[1] * tspeed;
+                        orbit.target[2] -= right[2] * tspeed;
+                        changed = true;
+                    }
+                    if (ImGui::IsKeyDown(ImGuiKey_D)) {
+                        orbit.target[0] += right[0] * tspeed;
+                        orbit.target[1] += right[1] * tspeed;
+                        orbit.target[2] += right[2] * tspeed;
+                        changed = true;
+                    }
+                    if (ImGui::IsKeyDown(ImGuiKey_Q)) { orbit.target[1] -= 0.3f; changed = true; }
+                    if (ImGui::IsKeyDown(ImGuiKey_E)) { orbit.target[1] += 0.3f; changed = true; }
+                }
+
+                if (changed) {
+                    float eye[3];
+                    orbit_to_eye(orbit, eye);
+                    ce[0] = eye[0]; ce[1] = eye[1]; ce[2] = eye[2];
+                    ca[0] = orbit.target[0]; ca[1] = orbit.target[1]; ca[2] = orbit.target[2];
+                }
+            }
+
+            if (changed) {
+            q.memcpy(d_params, h_params,
+                     active_kernel->desc.params_buffer_size).wait();
+            try {
+                call_init_kernel(active_kernel->handle, q,
+                                 WIDTH, HEIGHT, d_params,
+                                 active_kernel->desc.params_buffer_size);
+            } catch (const std::exception& e) {
+                spdlog::error("[sycl] init error: {}", e.what());
+            }
+            q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+            current_spp = 0;
+            }
         }
 
         // ---- render ----
-        if (active_kernel && current_spp < MAX_SPP) {
-            if (cam.dirty) {
-                cam.update_eye();
-                q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
-                current_spp = 0;
+        bool rendered = false;
+        if (active_kernel && current_spp < target_spp) {
+            try {
+                call_render_kernel(active_kernel->handle, q,
+                                   WIDTH, HEIGHT, d_params, d_accum, current_spp);
+                current_spp++;
+                rendered = true;
+            } catch (const std::exception& e) {
+                spdlog::error("[sycl] render error: {}", e.what());
+                current_spp = target_spp;
             }
-            call_render_kernel(active_kernel->handle, q,
-                               WIDTH, HEIGHT, d_params, d_accum, current_spp);
-            current_spp++;
         }
 
-        // ---- tonemap + display ----
-        q.memcpy(h_accum, d_accum, pixel_count * 4 * sizeof(float)).wait();
+        // Only update display when rendering happened or on first frame
+        if (rendered || current_spp == 0) {
+            try {
+                q.memcpy(h_accum, d_accum, pixel_count * 4 * sizeof(float)).wait();
+            } catch (const std::exception& e) {
+                spdlog::error("[sycl] memcpy error: {}", e.what());
+                continue;
+            }
 
-        std::vector<float> display(pixel_count * 3);
-        float inv_spp = 1.f / std::max(current_spp, 1);
-        for (size_t i = 0; i < pixel_count; i++) {
-            float r = h_accum[i * 4 + 0] * inv_spp;
-            float g = h_accum[i * 4 + 1] * inv_spp;
-            float b = h_accum[i * 4 + 2] * inv_spp;
-            r = r / (1.f + r);
-            g = g / (1.f + g);
-            b = b / (1.f + b);
-            r = powf(r, 1.f / 2.2f);
-            g = powf(g, 1.f / 2.2f);
-            b = powf(b, 1.f / 2.2f);
-            display[i * 3 + 0] = r;
-            display[i * 3 + 1] = g;
-            display[i * 3 + 2] = b;
+            std::vector<uint8_t> display(pixel_count * 4);
+            float inv_spp = 1.f / std::max(current_spp, 1);
+            for (size_t i = 0; i < pixel_count; i++) {
+                size_t src = i * 4, dst = i * 4;
+                float r = h_accum[src + 0] * inv_spp;
+                float g = h_accum[src + 1] * inv_spp;
+                float b = h_accum[src + 2] * inv_spp;
+                r = r / (1.f + r);
+                g = g / (1.f + g);
+                b = b / (1.f + b);
+                r = powf(r, 1.f / 2.2f);
+                g = powf(g, 1.f / 2.2f);
+                b = powf(b, 1.f / 2.2f);
+                display[dst + 0] = (uint8_t)(r * 255.f);
+                display[dst + 1] = (uint8_t)(g * 255.f);
+                display[dst + 2] = (uint8_t)(b * 255.f);
+                display[dst + 3] = 255;
+            }
+
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, WIDTH, HEIGHT,
+                            GL_RGBA, GL_UNSIGNED_BYTE, display.data());
         }
-
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, WIDTH, HEIGHT,
-                        GL_RGB, GL_FLOAT, display.data());
-
-        // ---- viewport ----
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGui::Begin("Viewport");
-        ImVec2 vp = ImGui::GetContentRegionAvail();
-        ImGui::Image((ImTextureID)(intptr_t)tex, vp);
-        ImGui::End();
-        ImGui::PopStyleVar();
 
         // ---- render ImGui ----
         ImGui::Render();
         int dw, dh;
         glfwGetFramebufferSize(window, &dw, &dh);
         glViewport(0, 0, dw, dh);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.f);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
@@ -325,7 +542,7 @@ static void call_init_kernel(void* handle, sycl::queue& q,
     using fn_t = void(*)(sycl::queue*, int, int, const void*, size_t);
     auto* fn = reinterpret_cast<fn_t>(dlsym(handle, "init_kernel"));
     if (fn) fn(&q, w, h, params, sz);
-    else fprintf(stderr, "[kernel] init_kernel not found\n");
+    else spdlog::error("[kernel] init_kernel not found");
 }
 
 static void call_render_kernel(void* handle, sycl::queue& q,
@@ -335,5 +552,33 @@ static void call_render_kernel(void* handle, sycl::queue& q,
     using fn_t = void(*)(sycl::queue*, int, int, const void*, void*, int);
     auto* fn = reinterpret_cast<fn_t>(dlsym(handle, "render_kernel"));
     if (fn) fn(&q, w, h, params, accum, sample);
-    else fprintf(stderr, "[kernel] render_kernel not found\n");
+    else spdlog::error("[kernel] render_kernel not found");
+}
+
+static void recreate_render_buffers(sycl::queue& q, GLuint& tex,
+                                     float*& d_accum, float*& h_accum,
+                                     size_t& pixel_count,
+                                     int w, int h) {
+    spdlog::debug("[buf] recreate {}x{}", w, h);
+    if (tex) { spdlog::trace("[buf] delete tex"); glDeleteTextures(1, &tex); }
+    if (d_accum) { spdlog::trace("[buf] free d_accum"); sycl::free(d_accum, q); }
+    delete[] h_accum;
+
+    pixel_count = (size_t)w * h;
+    spdlog::debug("[buf] create tex");
+    tex = create_render_texture(w, h);
+    spdlog::debug("[buf] alloc {} floats", pixel_count * 4);
+    d_accum = sycl::malloc_device<float>(pixel_count * 4, q);
+    spdlog::trace("[buf] alloc h_accum");
+    h_accum = new float[pixel_count * 4]();
+    spdlog::trace("[buf] done");
+}
+
+static float* find_param(float* params, const KernelDesc& desc, const char* name) {
+    for (int i = 0; i < desc.param_count; i++) {
+        if (std::strcmp(desc.params[i].name, name) == 0) {
+            return params + desc.params[i].buffer_offset / sizeof(float);
+        }
+    }
+    return nullptr;
 }

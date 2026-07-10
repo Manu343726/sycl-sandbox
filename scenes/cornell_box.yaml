@@ -1,0 +1,8 @@
+name: "Cornell Box"
+kernel: cornell_box
+
+params:
+  spp_frame: 1
+  max_bounces: 10
+  light_color: [1.0, 1.0, 1.0]
+  light_strength: 15.0

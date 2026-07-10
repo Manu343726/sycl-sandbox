@@ -9,6 +9,7 @@ struct KernelDesc {
     int32_t          param_count;
     const ParamMeta* params;
     size_t           params_buffer_size;
+    int32_t          max_spp;       // max samples/pixel this kernel benefits from (1 = single-frame)
     int32_t          source_count;
     const char**     sources;
 };

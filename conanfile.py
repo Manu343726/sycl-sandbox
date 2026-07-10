@@ -12,6 +12,7 @@ class SyclSandboxConan(ConanFile):
         "glfw/3.4",
         "imgui/1.92.8",
         "adaptivecpp/25.10.0",
+        "spdlog/1.17.0",
     ]
 
     tool_requires = [

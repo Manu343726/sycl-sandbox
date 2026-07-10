@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 
@@ -15,7 +16,7 @@ SceneRegistry::SceneRegistry(std::string scenes_dir)
 void SceneRegistry::rescan() {
     scenes_.clear();
     if (!fs::is_directory(scenes_dir_)) {
-        fprintf(stderr, "[scenes] directory not found: %s\n", scenes_dir_.c_str());
+        spdlog::error("[scenes] directory not found: {}", scenes_dir_);
         return;
     }
     for (auto& entry : fs::directory_iterator(scenes_dir_)) {
@@ -27,11 +28,10 @@ void SceneRegistry::rescan() {
             if (!def.name.empty() && !def.kernel.empty())
                 scenes_.push_back(std::move(def));
             else
-                fprintf(stderr, "[scenes] skipping %s (missing name/kernel)\n",
-                        def.yaml_path.c_str());
+                spdlog::warn("[scenes] skipping {} (missing name/kernel)", def.yaml_path);
         }
     }
-    fprintf(stderr, "[scenes] loaded %zu scene(s)\n", scenes_.size());
+    spdlog::info("[scenes] loaded {} scene(s)", scenes_.size());
 }
 
 const SceneDef* SceneRegistry::find(const std::string& name) const {
@@ -55,7 +55,7 @@ void SceneRegistry::load_yaml(const std::string& path, SceneDef& def) {
             def.has_overrides = true;
         }
     } catch (const std::exception& e) {
-        fprintf(stderr, "[scenes] YAML error %s: %s\n", path.c_str(), e.what());
+        spdlog::error("[scenes] YAML error {}: {}", path, e.what());
     }
 }
 
@@ -71,10 +71,14 @@ void SceneRegistry::apply_params(const SceneDef& scene,
         case ParamType::FLOAT:
             std::memcpy(dst, &p.default_f, 4); break;
         case ParamType::INT:
-        case ParamType::ENUM:
-            std::memcpy(dst, &p.default_i, 4); break;
-        case ParamType::BOOL:
-            std::memcpy(dst, &p.default_b, 4); break;
+        case ParamType::ENUM: {
+            float v = (float)p.default_i;
+            std::memcpy(dst, &v, 4); break;
+        }
+        case ParamType::BOOL: {
+            float v = p.default_b ? 1.0f : 0.0f;
+            std::memcpy(dst, &v, 4); break;
+        }
         case ParamType::COLOR_RGB:
             std::memcpy(dst, &p.default_c3, 12); break;
         case ParamType::COLOR_RGBA:
@@ -103,10 +107,10 @@ void SceneRegistry::apply_params(const SceneDef& scene,
                 break;
             case ParamType::INT:
             case ParamType::ENUM:
-                *reinterpret_cast<int32_t*>(dst) = val.as<int32_t>();
+                *reinterpret_cast<float*>(dst) = (float)val.as<int32_t>();
                 break;
             case ParamType::BOOL:
-                *reinterpret_cast<int32_t*>(dst) = val.as<bool>() ? 1 : 0;
+                *reinterpret_cast<float*>(dst) = val.as<bool>() ? 1.0f : 0.0f;
                 break;
             case ParamType::COLOR_RGB: {
                 auto v = val.as<std::vector<float>>();
@@ -129,6 +133,6 @@ void SceneRegistry::apply_params(const SceneDef& scene,
             }
         }
     } catch (const std::exception& e) {
-        fprintf(stderr, "[scenes] error applying overrides: %s\n", e.what());
+        spdlog::error("[scenes] error applying overrides: {}", e.what());
     }
 }

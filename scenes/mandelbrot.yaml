@@ -1,0 +1,8 @@
+name: "Mandelbrot Fractal"
+kernel: mandelbrot
+
+params:
+  center_x: -0.5
+  center_y: 0.0
+  zoom: 3.0
+  max_iterations: 500

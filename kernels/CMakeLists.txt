@@ -1,5 +1,5 @@
 # known kernel subdirectories — add new ones here
-set(KERNEL_DIRS one_weekend)
+set(KERNEL_DIRS one_weekend mandelbrot cornell_box)
 
 foreach(kdir ${KERNEL_DIRS})
     file(GLOB_RECURSE ksources "${kdir}/*.cpp")
