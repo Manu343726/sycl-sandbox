@@ -7,14 +7,6 @@
 template <AllocatorTag Tag>
 struct Buffer {
     void   *data = nullptr;
-    size_t  size = 0;   ///< usable bytes
-
+    size_t  size = 0;
     bool is_valid() const { return data != nullptr; }
-};
-
-/// Type-erased buffer that carries its tag at runtime.
-struct AnyBuffer {
-    void      *data = nullptr;
-    size_t     size = 0;
-    AllocatorTag tag;
 };
