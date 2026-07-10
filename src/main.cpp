@@ -320,7 +320,26 @@ int main(int argc, char **argv) {
         ImGui::NewFrame();
 
         // 3. Dockspace (full-window, always-on background)
-        ImGui::DockSpaceOverViewport();
+        {
+            ImGuiViewport *viewport = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(viewport->WorkPos);
+            ImGui::SetNextWindowSize(viewport->WorkSize);
+            ImGui::SetNextWindowViewport(viewport->ID);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+            ImGui::Begin("##dockspace",
+                         nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoBringToFrontOnFocus |
+                             ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground |
+                             ImGuiWindowFlags_NoMouseInputs);
+            ImGui::PopStyleVar(3);
+            ImGui::DockSpace(ImGui::GetID("dockspace"), ImVec2(0.f, 0.f),
+                             ImGuiDockNodeFlags_PassthruCentralNode);
+            ImGui::End();
+        }
 
         // 4. Render full-window background image (behind all docks)
         {
