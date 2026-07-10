@@ -33,10 +33,15 @@ by the library.
 
 ## Anatomy of a minimal raytracer kernel
 
+Standard params (SPP, bounces, camera) are **implicit** — kernels don't
+declare them in `params_meta[]`.  The host allocates space for them at
+fixed `rt_std_param` indices and fills defaults via `init_std_params()`.
+Kernels only declare their own kernel-specific params.
+
 ```cpp
 #include "rt/types.h"        // Object, Hittable, Material
 #include "rt/trace.h"        // rt::render_main()
-#include "rt/params.h"       // rt_std_param enum
+#include "rt/params.h"       // rt_std_param enum (implicit)
 #include "rt/scene.h"        // add_quad, add_box, Axis
 #include "rt/hittables/quad.h"
 #include "rt/materials/lambertian.h"
@@ -46,16 +51,13 @@ using namespace rt;
 using rt::materials::lambertian;
 using rt::materials::diffuse_light;
 
-// ── Params (standard 0–12, kernel-specific 13+) ───────────────────────
+// ── Params (kernel-specific only; standard 0–12 are implicit) ──────────
 static ParamMeta params_meta[] = {
-    // 7 standard params (exact order from rt_std_param)
-    {"spp_frame",…}, {"max_bounces",…},
-    {"cam_eye",…}, {"cam_at",…},
-    {"cam_fov",…}, {"cam_aperture",…}, {"cam_up",…},
-    // kernel-specific after index 13
     {"light_color",…}, {"light_strength",…},
 };
-enum { PARAM_LIGHT_COLOR = RT_NUM_STD_PARAMS, … };
+// The standard param area (13 floats) is at the start of the buffer.
+// Kernel-specific params start at index RT_NUM_STD_PARAMS.
+enum { PARAM_LIGHT_COLOR = 0, PARAM_LIGHT_STRENGTH = PARAM_LIGHT_COLOR + 3 };
 
 // ── Scene state ───────────────────────────────────────────────────────
 static Object* g_scene_objects = nullptr;

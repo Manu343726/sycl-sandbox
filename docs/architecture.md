@@ -84,15 +84,19 @@ extern "C" void        shutdown_kernel(sycl::queue*);
 
 Return a `KernelDesc` containing:
 - `name`, `description` — human-readable identifiers.
-- `param_count`, `params` — the `ParamMeta[]` array describing every parameter.
-- `params_buffer_size` — computed by summing `param_buffer_size()` for each param.
+- `param_count`, `params` — the `ParamMeta[]` array describing **kernel-specific**
+  parameters only.  Standard params (SPP, bounces, camera) are **implicit**
+  — they occupy the first `RT_NUM_STD_PARAMS * sizeof(float)` bytes of the
+  buffer at fixed `rt_std_param` indices, but kernels don't declare them.
+- `params_buffer_size` — total buffer size, including the standard param area
+  (`RT_NUM_STD_PARAMS * sizeof(float)`) plus kernel-specific params.
 - `max_spp` — how many samples per pixel this kernel benefits from.
   `1` means single-frame (Mandelbrot), `4096` means progressive (raytracers).
 - `source_count`, `sources` — source files to watch for hot-reload.
 
-The host uses this metadata to build the ImGui parameter controls and validate
-the params buffer size.  This function is the only way the host knows what
-parameters a kernel expects.
+The host uses the `ParamMeta[]` to build ImGui parameter controls and to
+validate the buffer size.  Standard params are never shown in the generic
+"Parameters" section — they have dedicated UI (stats, camera controls).
 
 ### `init_kernel()`
 
