@@ -158,6 +158,29 @@ target enabled** (or at least verify compilation) before committing,
 because the CUDA backend is stricter and will catch portability issues
 that `generic` silently accepts.
 
+## Fully qualified names in library headers
+
+Library headers (`include/alloc/`, `include/containers/`, `include/rt/`) must
+use fully qualified names — no `using namespace` or `using X::y` declarations
+(exceptions: type aliases like `using Allocator = …`).  Every symbol reference
+must spell out its full path:
+
+```cpp
+// Bad
+using namespace alloc::raw;
+LinearAllocator<Tag> a;
+
+// Bad
+using alloc::raw::LinearAllocator;
+LinearAllocator<Tag> a;
+
+// Good
+alloc::raw::LinearAllocator<alloc::Target::Host> a;
+```
+
+Kernel code (`.cpp` files under `kernels/`) may use `using namespace` for
+brevity, but library headers must not pollute the global namespace.
+
 ## AGENTS.md
 
 `AGENTS.md` is the entry point for AI agents working on this repository.
