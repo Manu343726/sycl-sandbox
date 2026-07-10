@@ -36,7 +36,7 @@ find_package(imgui REQUIRED)
 find_package(OpenGL REQUIRED)
 
 # ------------------------------------------------------------------ Tracy profiler
-option(TRACY_PROFILER "Enable Tracy profiler integration (CPU zones + GPU timeline)" OFF)
+option(TRACY_PROFILER "Enable Tracy profiler integration (CPU zones + GPU timeline)" ON)
 
 if(TRACY_PROFILER)
     include(FetchContent)

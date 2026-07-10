@@ -1,3 +1,5 @@
+cmake_policy(SET CMP0169 OLD)
+
 # ---- args (header-only CLI parser) ----
 include(FetchContent)
 FetchContent_Declare(args

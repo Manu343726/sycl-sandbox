@@ -49,7 +49,11 @@ foreach(_guess
     "${CMAKE_BINARY_DIR}"
 )
     if(EXISTS "${_guess}")
-        set(_PC_PATH "${_guess}${_PC_PATH:+:}${_PC_PATH}")
+        if(_PC_PATH)
+            set(_PC_PATH "${_guess}:${_PC_PATH}")
+        else()
+            set(_PC_PATH "${_guess}")
+        endif()
     endif()
 endforeach()
 

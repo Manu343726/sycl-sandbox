@@ -14,7 +14,7 @@
 #define PROF_FRAME_MARK            FrameMark
 #define PROF_FRAME_MARK_N(name)    FrameMarkNamed(name)
 #define PROF_ZONE_SCOPED           ZoneScoped
-#define PROF_ZONE_SCOPED_N(name)   ZoneNamedN(name, true)
+#define PROF_ZONE_SCOPED_N(name)   ZoneScopedN(name)
 
 #else
 

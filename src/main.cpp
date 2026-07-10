@@ -1,10 +1,10 @@
 #include <sycl-sandbox/profiling.h>
-#include <sandbox_api.h>
+#include <sycl-sandbox/sandbox_api.h>
 #include "watcher.h"
 #include "kernel_library.h"
 #include "scene_registry.h"
 #include "param_ui.h"
-#include <rt/params.h>
+#include <sycl-sandbox/rt/params.h>
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"

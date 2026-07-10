@@ -17,7 +17,7 @@ class SyclSandboxConan(ConanFile):
         # pkg-config and skips its own CPM downloads when present.
         "capstone/5.0.7",
         "freetype/2.13.3",
-        "curl/8.12.1",
+        "libcurl/8.12.1",
         "pugixml/1.14",
         "nlohmann_json/3.12.0",
         "zstd/1.5.7",
