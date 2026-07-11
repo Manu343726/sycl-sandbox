@@ -103,9 +103,9 @@ validate the buffer size.  Standard params are never shown in the generic
 Called when the scene is selected, after params have been uploaded to device
 memory.  Typical actions:
 1. Read kernel-specific params from the float buffer.
-2. Build scene geometry on the host (allocate with `new`).
-3. Upload geometry to device via `sycl::malloc_device` + `memcpy`.
-4. Store device pointers in static globals for later use in `render_kernel()`.
+2. Build scene geometry using `SceneBuilder` (add hittable-material pairs).
+3. Call `scene.build(queue)` to upload per-type arrays to device memory.
+4. Store the returned `SceneView` in a static global for `render_kernel()`.
 
 The params buffer (`d_params`) is allocated with `sycl::malloc_host` —
 accessible from both host and device — so `init_kernel()` reads params
@@ -123,16 +123,17 @@ For raytracers this is typically a one-liner delegating to the shared library:
 extern "C" void render_kernel(sycl::queue* queue, int w, int h,
                                const void* params, void* accum, int si) {
     rt::render_main(queue, w, h, (const float*)params, (float*)accum, si,
-                    g_scene_objects, g_num_objects,
+                    scene_view,
                     [](const rt::Ray& ray) -> rt::float3 {
                         return background_colour(ray);
                     });
 }
 ```
 
-The kernel only provides its scene (`Object[]`) and a background function.
-The shared library handles camera setup, ray generation, path tracing,
-and accumulation (see [docs/raytracing.md](raytracing.md)).
+The kernel provides its `SceneView` (per-type device arrays + handles)
+and a background function.  The shared library handles camera setup,
+ray generation, path tracing, and accumulation (see
+[docs/raytracing.md](raytracing.md)).
 
 For non-raytracing kernels (e.g. Mandelbrot), `render_kernel()` implements
 its own computation directly.

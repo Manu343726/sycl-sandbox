@@ -22,6 +22,17 @@ public:
         return Quad(a, sub(b, a), sub(c, a));
     }
 
+    /// Return the axis-aligned bounding box enclosing this quad.
+    Aabb aabb() const {
+        float3 corner_a = base;
+        float3 corner_b = add(base, edge_u);
+        float3 corner_c = add(base, edge_v);
+        float3 corner_d = add(add(base, edge_u), edge_v);
+        Aabb box = aabb_from_points(corner_a, corner_b);
+        box = aabb_merge(box, aabb_from_points(corner_c, corner_d));
+        return box;
+    }
+
     /// Ray-quad intersection using barycentric (α, β) coordinates.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the ray-plane intersection; reject rays parallel to the plane

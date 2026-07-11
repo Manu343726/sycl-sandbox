@@ -4,6 +4,7 @@
 #include "kernel_library.h"
 #include "scene_registry.h"
 #include "param_ui.h"
+#include "scene_debug.h"
 #include <sycl-sandbox/rt/params.h>
 
 #include "imgui.h"
@@ -50,6 +51,12 @@ static void call_render_kernel(void *handle,
 static float *find_param(float *params, const KernelDesc &desc, const char *name);
 static void init_std_params(float *buf, size_t buf_size);
 static void apply_yaml_std_params(const SceneDef &scene, float *buf, size_t buf_size);
+
+/// Try to resolve get_scene_debug_info() from a loaded kernel.
+using get_scene_debug_info_fn = const SceneDebugInfo *(*)();
+static get_scene_debug_info_fn resolve_scene_debug(void *handle) {
+    return reinterpret_cast<get_scene_debug_info_fn>(dlsym(handle, "get_scene_debug_info"));
+}
 
 // ── GLFW error callback ────────────────────────────────────────────────
 static void glfw_error_cb(int error, const char *desc) {
@@ -131,8 +138,10 @@ int main(int argc, char **argv) {
     // ---- CLI args ----
     args::ArgumentParser parser("sycl-sandbox");
     args::ValueFlag<std::string> backend_arg(parser, "cpu|gpu", "SYCL backend", {'b', "backend"});
-    args::ValueFlag<std::string> log_level_arg(parser, "trace|debug|info|warn|error",
-                                               "spdlog log level", {'l', "log-level"});
+    args::ValueFlag<std::string> log_level_arg(parser,
+                                               "trace|debug|info|warn|error",
+                                               "spdlog log level",
+                                               {'l', "log-level"});
     try {
         parser.ParseCLI(argc, argv);
     } catch ( const args::Help & ) {
@@ -188,6 +197,7 @@ int main(int argc, char **argv) {
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+    init_scene_debug();
 
     // ---- SYCL queue ----
     spdlog::info("[startup] creating queue (backend={})", backend);
@@ -230,6 +240,7 @@ int main(int argc, char **argv) {
     float *d_params = nullptr;
     int current_spp = 0;
     int target_spp = 1;
+    get_scene_debug_info_fn scene_debug_fn = nullptr;
 
     // Clear accumulator to black
     q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
@@ -239,7 +250,9 @@ int main(int argc, char **argv) {
     if ( !scenes.all().empty() ) {
         active_scene = &scenes.all().front();
         spdlog::info("[startup] first scene: name='{}' kernel='{}' yaml='{}'",
-                     active_scene->name, active_scene->kernel, active_scene->yaml_path);
+                     active_scene->name,
+                     active_scene->kernel,
+                     active_scene->yaml_path);
         spdlog::info("[startup] loading kernel: {}", active_scene->kernel);
         active_kernel = kernels.load(active_scene->kernel);
         spdlog::info("[startup] kernel loaded, target_spp={}, sz={}",
@@ -264,32 +277,13 @@ int main(int argc, char **argv) {
             spdlog::info("[startup] init_kernel...");
             call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params, sz);
             spdlog::info("[startup] init_kernel done");
+            scene_debug_fn = resolve_scene_debug(active_kernel->handle);
         }
     }
 
     // ---- Main loop ----
     while ( !glfwWindowShouldClose(window) ) {
         glfwPollEvents();
-
-        // 0. Check for window resize
-        int fb_w, fb_h;
-        glfwGetFramebufferSize(window, &fb_w, &fb_h);
-        if ( fb_w != WIDTH || fb_h != HEIGHT ) {
-            spdlog::info("[resize] {} x {} -> {} x {}", WIDTH, HEIGHT, fb_w, fb_h);
-            WIDTH = fb_w;
-            HEIGHT = fb_h;
-            recreate_render_buffers(q, tex, d_accum, h_accum, pixel_count, WIDTH, HEIGHT);
-            q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
-            current_spp = 0;
-            if ( active_kernel && d_params ) {
-                call_init_kernel(active_kernel->handle,
-                                 q,
-                                 WIDTH,
-                                 HEIGHT,
-                                 d_params,
-                                 active_kernel->desc.params_buffer_size);
-            }
-        }
 
         // 1. Check source changes → rebuild + reload
         for ( auto &dirty_name : watcher.poll() ) {
@@ -313,6 +307,7 @@ int main(int argc, char **argv) {
                     q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                     active_kernel = new_kh;
                     current_spp = 0;
+                    scene_debug_fn = resolve_scene_debug(active_kernel->handle);
                 }
             }
         }
@@ -336,24 +331,18 @@ int main(int argc, char **argv) {
                          nullptr,
                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
                              ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoBringToFrontOnFocus |
-                             ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground |
-                             ImGuiWindowFlags_NoMouseInputs);
+                             ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMouseInputs);
             ImGui::PopStyleVar(3);
-            ImGui::DockSpace(ImGui::GetID("dockspace"), ImVec2(0.f, 0.f),
+            ImGui::DockSpace(ImGui::GetID("dockspace"),
+                             ImVec2(0.f, 0.f),
                              ImGuiDockNodeFlags_PassthruCentralNode);
             ImGui::End();
         }
 
-        // 4. Render full-window background image (behind all docks)
-        {
-            auto disp = ImGui::GetIO().DisplaySize;
-            ImGui::GetBackgroundDrawList()->AddImage((ImTextureID)(intptr_t)tex,
-                                                     ImVec2(0, 0),
-                                                     disp,
-                                                     ImVec2(0, 1),
-                                                     ImVec2(1, 0));
-        }
+        // ---- orbit camera state (shared between Controls panel and Viewport) ----
+        static OrbitCam orbit;
+        static bool orbit_init = false;
 
         // ---- Scene / kernel selector ----
         ImGui::Begin("Controls");
@@ -380,6 +369,7 @@ int main(int argc, char **argv) {
                             call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params, sz);
                             q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                             current_spp = 0;
+                            scene_debug_fn = resolve_scene_debug(active_kernel->handle);
                         }
                     }
                 }
@@ -418,13 +408,23 @@ int main(int argc, char **argv) {
             if ( ImGui::SliderInt("Target SPP", &target_spp, 1, kernel_max) ) {
                 current_spp = std::min(current_spp, target_spp);
             }
+            if ( h_params &&
+                 active_kernel->desc.params_buffer_size >= RT_NUM_STD_PARAMS * sizeof(float) ) {
+                int max_bounces = (int)h_params[RT_MAX_BOUNCES];
+                if ( ImGui::SliderInt("Max bounces", &max_bounces, 1, 32) ) {
+                    h_params[RT_MAX_BOUNCES] = (float)max_bounces;
+                    q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
+                    q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+                    current_spp = 0;
+                }
+            }
             if ( ImGui::Button("Reset") ) {
                 q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                 current_spp = 0;
             }
         }
 
-        // ── camera info & controls ──────────────────────────────────
+        // ── camera state ───────────────────────────────────────────
         bool has_std_params =
             active_kernel && h_params &&
             active_kernel->desc.params_buffer_size >= RT_NUM_STD_PARAMS * sizeof(float);
@@ -433,230 +433,60 @@ int main(int argc, char **argv) {
         float *fov_ptr = has_std_params ? h_params + RT_CAM_FOV : nullptr;
         float *aperture_ptr = has_std_params ? h_params + RT_CAM_APERTURE : nullptr;
         float *camera_up_ptr = has_std_params ? h_params + RT_CAM_UP : nullptr;
-        bool has_2d = false;
+        float *center_x_ptr = active_kernel && h_params ? find_param(h_params, active_kernel->desc, "center_x") : nullptr;
+        float *center_y_ptr = active_kernel && h_params ? find_param(h_params, active_kernel->desc, "center_y") : nullptr;
+        float *zoom_ptr = active_kernel && h_params ? find_param(h_params, active_kernel->desc, "zoom") : nullptr;
+        bool has_2d = center_x_ptr && center_y_ptr && zoom_ptr;
 
-        if ( active_kernel && h_params ) {
+        // ── Camera controls panel ──────────────────────────────────
+        if ( camera_eye_ptr && camera_at_ptr && fov_ptr ) {
             ImGui::SeparatorText("Camera");
-            float *center_x_ptr = find_param(h_params, active_kernel->desc, "center_x");
-            float *center_y_ptr = find_param(h_params, active_kernel->desc, "center_y");
-            float *zoom_ptr = find_param(h_params, active_kernel->desc, "zoom");
+            ImGui::Text("LMB drag = orbit  |  MMB drag = pan");
+            ImGui::Text("Scroll = zoom  |  Ctrl+scroll = aperture");
+            ImGui::Text("Ctrl+Shift+scroll = FOV  |  Ctrl+Alt+scroll = roll");
+            ImGui::Text("WASD = move  |  Arrows = orbit  |  Shift+arrows = pan");
+            ImGui::Text("Q/E = up/down");
 
-            if ( center_x_ptr && center_y_ptr && zoom_ptr ) {
-                has_2d = true;
-                ImGui::Text("LMB drag = pan  |  scroll = zoom  |  arrows = pan");
-                ImGui::Text("Center: (%.4f, %.4f)  Zoom: %.4f",
-                            *center_x_ptr,
-                            *center_y_ptr,
-                            *zoom_ptr);
-            } else if ( camera_eye_ptr && camera_at_ptr && fov_ptr ) {
-                ImGui::Text("LMB drag = orbit  |  scroll = zoom");
-                ImGui::Text("Ctrl+scroll = aperture  |  Ctrl+Shift+scroll = FOV");
-                ImGui::Text("Ctrl+Alt+scroll = roll  |  WASD = move camera");
-                ImGui::Text("Arrows = orbit  |  Shift+arrows = pan target");
-                ImGui::Text("Q/E = up/down");
-                ImGui::Text("Eye: (%.2f, %.2f, %.2f)",
-                            camera_eye_ptr[0],
-                            camera_eye_ptr[1],
-                            camera_eye_ptr[2]);
-                ImGui::Text("FOV: %.1f\u00b0", *fov_ptr);
-                ImGui::Text("Aperture: %.3f", *aperture_ptr);
+            bool cam_ui_changed = false;
+
+            ImGui::DragFloat3("Eye", camera_eye_ptr, 0.1f);
+            if ( ImGui::IsItemDeactivatedAfterEdit() ) {
+                cam_ui_changed = true;
+                orbit_init = false;
             }
-        }
-
-        ImGui::End();
-
-        // ---- camera controls (2D pan / 3D orbit) ----
-        if ( active_kernel && h_params ) {
-            float *center_x_ptr_ctrl =
-                has_2d ? find_param(h_params, active_kernel->desc, "center_x") : nullptr;
-            float *center_y_ptr_ctrl =
-                has_2d ? find_param(h_params, active_kernel->desc, "center_y") : nullptr;
-            float *zoom_ptr_ctrl =
-                has_2d ? find_param(h_params, active_kernel->desc, "zoom") : nullptr;
-
-            bool changed = false;
-
-            // ── 2D camera (center + zoom) ──────────────────────────
-            if ( center_x_ptr_ctrl && center_y_ptr_ctrl && zoom_ptr_ctrl ) {
-                if ( !io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
-                    auto delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                    *center_x_ptr_ctrl -=
-                        delta.x / WIDTH * *zoom_ptr_ctrl * ((float)WIDTH / HEIGHT);
-                    *center_y_ptr_ctrl += delta.y / HEIGHT * *zoom_ptr_ctrl;
-                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-                    changed = true;
+            ImGui::DragFloat3("Target", camera_at_ptr, 0.1f);
+            if ( ImGui::IsItemDeactivatedAfterEdit() ) {
+                cam_ui_changed = true;
+                orbit_init = false;
+            }
+            {
+                float fov_before = *fov_ptr;
+                ImGui::SliderFloat("FOV", fov_ptr, 1.f, 120.f, "%.0f\u00b0");
+                if ( *fov_ptr != fov_before ) {
+                    cam_ui_changed = true;
                 }
-                if ( !io.WantCaptureMouse && io.MouseWheel != 0.f ) {
-                    *zoom_ptr_ctrl *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
-                    *zoom_ptr_ctrl = (*zoom_ptr_ctrl < 0.001f)
-                                         ? 0.001f
-                                         : (*zoom_ptr_ctrl > 1000.f ? 1000.f : *zoom_ptr_ctrl);
-                    changed = true;
+            }
+            ImGui::SameLine();
+            if ( ImGui::SmallButton("1:1") ) {
+                // Pixel-perfect FOV: 2·tan(fov/2) = 1  ⇒  fov = 2·atan(0.5) ≈ 53.13°
+                *fov_ptr = 2.f * atanf(0.5f) * 180.f / 3.14159265f;
+                cam_ui_changed = true;
+                orbit_init = false;
+            }
+            if ( ImGui::IsItemHovered() )
+                ImGui::SetTooltip("Reset FOV so world viewport matches framebuffer 1:1");
+            {
+                float ap_before = *aperture_ptr;
+                ImGui::SliderFloat("Aperture", aperture_ptr, 0.f, 1.f, "%.3f");
+                if ( *aperture_ptr != ap_before ) {
+                    cam_ui_changed = true;
                 }
             }
 
-            // ── 3D orbit camera ────────────────────────────────────
-            if ( camera_eye_ptr && camera_at_ptr && fov_ptr ) {
-                static OrbitCam orbit;
-                static bool orbit_init = false;
-                if ( !orbit_init ) {
-                    float dx = camera_eye_ptr[0] - camera_at_ptr[0],
-                          dy = camera_eye_ptr[1] - camera_at_ptr[1],
-                          dz = camera_eye_ptr[2] - camera_at_ptr[2];
-                    orbit.dist = sqrtf(dx * dx + dy * dy + dz * dz);
-                    orbit.theta = atan2f(dx, dz);
-                    orbit.phi = asinf(dy / orbit.dist);
-                    orbit.target[0] = camera_at_ptr[0];
-                    orbit.target[1] = camera_at_ptr[1];
-                    orbit.target[2] = camera_at_ptr[2];
-                    orbit.theta = std::fmod(orbit.theta, 2.f * 3.14159265f);
-                    orbit.phi = std::max(-1.5f, std::min(1.5f, orbit.phi));
-                    orbit_init = true;
-                }
-
-                if ( !io.WantCaptureMouse && ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
-                    auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                    orbit.theta -= d.x * 0.005f;
-                    orbit.phi += d.y * 0.005f;
-                    orbit.phi = std::max(-1.5f, std::min(1.5f, orbit.phi));
-                    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-                    changed = true;
-                }
-
-                float mouse_wheel = io.MouseWheel;
-                if ( !io.WantCaptureMouse && mouse_wheel != 0.f ) {
-                    bool ctrl = io.KeyCtrl;
-                    bool shift = io.KeyShift;
-                    bool alt = io.KeyAlt;
-                    if ( ctrl && alt ) {
-                        orbit.roll += mouse_wheel * 0.05f;
-                        changed = true;
-                    } else if ( ctrl && shift && fov_ptr ) {
-                        *fov_ptr += mouse_wheel * 2.f;
-                        *fov_ptr = std::max(1.f, std::min(120.f, *fov_ptr));
-                        changed = true;
-                    } else if ( ctrl && aperture_ptr ) {
-                        *aperture_ptr += mouse_wheel * 0.02f;
-                        *aperture_ptr = std::max(0.f, std::min(1.f, *aperture_ptr));
-                        changed = true;
-                    } else {
-                        orbit.dist *= (mouse_wheel > 0.f) ? 0.9f : 1.1f;
-                        orbit.dist = std::max(1.f, std::min(100.f, orbit.dist));
-                        changed = true;
-                    }
-                }
-
-                if ( !io.WantCaptureKeyboard ) {
-                    float kspeed = 0.04f;
-                    bool shift = io.KeyShift;
-
-                    // Orbit
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) ) {
-                        orbit.theta -= kspeed;
-                        changed = true;
-                    }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) {
-                        orbit.theta += kspeed;
-                        changed = true;
-                    }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) ) {
-                        orbit.phi += kspeed;
-                        orbit.phi = std::min(1.5f, orbit.phi);
-                        changed = true;
-                    }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) ) {
-                        orbit.phi -= kspeed;
-                        orbit.phi = std::max(-1.5f, orbit.phi);
-                        changed = true;
-                    }
-
-                    // Pan target
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) ) {
-                        orbit.target[0] -= 0.2f * cosf(orbit.theta);
-                        orbit.target[2] -= 0.2f * sinf(orbit.theta);
-                        changed = true;
-                    }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) {
-                        orbit.target[0] += 0.2f * cosf(orbit.theta);
-                        orbit.target[2] += 0.2f * sinf(orbit.theta);
-                        changed = true;
-                    }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) ) {
-                        orbit.target[1] += 0.2f;
-                        changed = true;
-                    }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) ) {
-                        orbit.target[1] -= 0.2f;
-                        changed = true;
-                    }
-
-                    // WASD translate camera (move eye + target together)
-                    float ct = cosf(orbit.theta), st = sinf(orbit.theta);
-                    float cp = cosf(orbit.phi), sp = sinf(orbit.phi);
-                    float forward[3] = {cp * st, sp, cp * ct};
-                    float right[3] = {ct, 0.f, -st};
-                    float tspeed = 0.3f;
-
-                    if ( ImGui::IsKeyDown(ImGuiKey_W) ) {
-                        orbit.target[0] += forward[0] * tspeed;
-                        orbit.target[1] += forward[1] * tspeed;
-                        orbit.target[2] += forward[2] * tspeed;
-                        changed = true;
-                    }
-                    if ( ImGui::IsKeyDown(ImGuiKey_S) ) {
-                        orbit.target[0] -= forward[0] * tspeed;
-                        orbit.target[1] -= forward[1] * tspeed;
-                        orbit.target[2] -= forward[2] * tspeed;
-                        changed = true;
-                    }
-                    if ( ImGui::IsKeyDown(ImGuiKey_A) ) {
-                        orbit.target[0] -= right[0] * tspeed;
-                        orbit.target[1] -= right[1] * tspeed;
-                        orbit.target[2] -= right[2] * tspeed;
-                        changed = true;
-                    }
-                    if ( ImGui::IsKeyDown(ImGuiKey_D) ) {
-                        orbit.target[0] += right[0] * tspeed;
-                        orbit.target[1] += right[1] * tspeed;
-                        orbit.target[2] += right[2] * tspeed;
-                        changed = true;
-                    }
-                    if ( ImGui::IsKeyDown(ImGuiKey_Q) ) {
-                        orbit.target[1] -= 0.3f;
-                        changed = true;
-                    }
-                    if ( ImGui::IsKeyDown(ImGuiKey_E) ) {
-                        orbit.target[1] += 0.3f;
-                        changed = true;
-                    }
-                }
-
-                if ( changed ) {
-                    float eye[3], up[3];
-                    orbit_to_eye(orbit, eye);
-                    orbit_up(orbit, up);
-                    camera_eye_ptr[0] = eye[0];
-                    camera_eye_ptr[1] = eye[1];
-                    camera_eye_ptr[2] = eye[2];
-                    camera_at_ptr[0] = orbit.target[0];
-                    camera_at_ptr[1] = orbit.target[1];
-                    camera_at_ptr[2] = orbit.target[2];
-                    if ( camera_up_ptr ) {
-                        camera_up_ptr[0] = up[0];
-                        camera_up_ptr[1] = up[1];
-                        camera_up_ptr[2] = up[2];
-                    }
-                }
-            }
-
-            if ( changed ) {
+            if ( cam_ui_changed ) {
                 q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
                 try {
-                    call_init_kernel(active_kernel->handle,
-                                     q,
-                                     WIDTH,
-                                     HEIGHT,
-                                     d_params,
+                    call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params,
                                      active_kernel->desc.params_buffer_size);
                 } catch ( const std::exception &e ) {
                     spdlog::error("[sycl] init error: {}", e.what());
@@ -664,13 +494,248 @@ int main(int argc, char **argv) {
                 q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
                 current_spp = 0;
             }
+        } else if ( has_2d ) {
+            ImGui::SeparatorText("Camera");
+            ImGui::DragFloat("Zoom", zoom_ptr, 0.01f, 0.001f, 1000.f, "%.3f");
+            if ( ImGui::IsItemDeactivatedAfterEdit() ) {
+                q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
+                q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+                current_spp = 0;
+            }
+        }
+
+        ImGui::End();
+
+        // ---- Viewport window ----
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImVec2 region = ImGui::GetContentRegionAvail();
+            if ( region.x > 0 && region.y > 0 ) {
+                // Recreate render buffers at viewport pixel size if needed
+                ImVec2 scale = io.DisplayFramebufferScale;
+                int vp_w = std::max(1, (int)(region.x * scale.x));
+                int vp_h = std::max(1, (int)(region.y * scale.y));
+                if ( vp_w != WIDTH || vp_h != HEIGHT ) {
+                    spdlog::info("[viewport] resize {}x{} -> {}x{}", WIDTH, HEIGHT, vp_w, vp_h);
+                    WIDTH = vp_w;
+                    HEIGHT = vp_h;
+                    recreate_render_buffers(q, tex, d_accum, h_accum, pixel_count, WIDTH, HEIGHT);
+                    q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+                    current_spp = 0;
+                    if ( active_kernel && d_params ) {
+                        call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params,
+                                         active_kernel->desc.params_buffer_size);
+                    }
+                }
+
+                // Image fills the whole region (texture matches region size)
+                ImVec2 cursor = ImGui::GetCursorScreenPos();
+                ImVec2 p0 = cursor;
+                ImVec2 p1 = ImVec2(cursor.x + region.x, cursor.y + region.y);
+
+                // Hit-testable area
+                ImGui::InvisibleButton("##vp_area", region,
+                    ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+                bool vp_hovered = ImGui::IsItemHovered();
+
+                // Display kernel texture (Y-flipped for OpenGL)
+                ImGui::GetWindowDrawList()->AddImage(
+                    (ImTextureID)(intptr_t)tex,
+                    p0, p1,
+                    ImVec2(0, 1), ImVec2(1, 0));
+
+                // ---- camera controls (2D pan / 3D orbit) ----
+                // (mouse delta normalised by region size, same units as the displayed image)
+                if ( active_kernel && h_params ) {
+                    bool changed = false;
+
+                    // ── 2D camera (center + zoom) ──────────────────
+                    if ( has_2d ) {
+                        if ( vp_hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
+                            auto delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                            *center_x_ptr -= delta.x / region.x * *zoom_ptr * (region.x / region.y);
+                            *center_y_ptr += delta.y / region.y * *zoom_ptr;
+                            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                            changed = true;
+                        }
+                        if ( vp_hovered && io.MouseWheel != 0.f ) {
+                            *zoom_ptr *= (io.MouseWheel > 0.f) ? 0.9f : 1.1f;
+                            *zoom_ptr = std::max(0.001f, std::min(1000.f, *zoom_ptr));
+                            changed = true;
+                        }
+                    }
+
+                    // ── 3D orbit camera ────────────────────────────
+                    if ( camera_eye_ptr && camera_at_ptr && fov_ptr ) {
+                        if ( !orbit_init ) {
+                            float dx = camera_eye_ptr[0] - camera_at_ptr[0],
+                                  dy = camera_eye_ptr[1] - camera_at_ptr[1],
+                                  dz = camera_eye_ptr[2] - camera_at_ptr[2];
+                            orbit.dist = sqrtf(dx * dx + dy * dy + dz * dz);
+                            orbit.theta = atan2f(dx, dz);
+                            orbit.phi = asinf(dy / orbit.dist);
+                            orbit.target[0] = camera_at_ptr[0];
+                            orbit.target[1] = camera_at_ptr[1];
+                            orbit.target[2] = camera_at_ptr[2];
+                            orbit.theta = std::fmod(orbit.theta, 2.f * 3.14159265f);
+                            orbit.phi = std::max(-1.5f, std::min(1.5f, orbit.phi));
+                            orbit_init = true;
+                        }
+
+                        // Mouse controls (only when viewport hovered)
+                        if ( vp_hovered ) {
+                            // LMB = pan target
+                            if ( ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
+                                auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                                float ct = cosf(orbit.theta), st = sinf(orbit.theta);
+                                float cp = cosf(orbit.phi), sp = sinf(orbit.phi);
+                                float right[3] = {ct, 0.f, -st};
+                                float up[3] = {-sp * st, cp, -sp * ct};
+                                float speed = orbit.dist * 0.002f;
+                                orbit.target[0] += (-d.x * right[0] + d.y * up[0]) * speed;
+                                orbit.target[1] += (-d.x * right[1] + d.y * up[1]) * speed;
+                                orbit.target[2] += (-d.x * right[2] + d.y * up[2]) * speed;
+                                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                                changed = true;
+                            }
+                            // MMB = orbit
+                            if ( ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ) {
+                                auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+                                orbit.theta -= d.x * 0.005f;
+                                orbit.phi += d.y * 0.005f;
+                                orbit.phi = std::max(-1.5f, std::min(1.5f, orbit.phi));
+                                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+                                changed = true;
+                            }
+                            // Scroll: zoom / aperture / FOV / roll
+                            float mw = io.MouseWheel;
+                            if ( mw != 0.f ) {
+                                bool ctrl = io.KeyCtrl;
+                                bool shift = io.KeyShift;
+                                bool alt = io.KeyAlt;
+                                if ( ctrl && alt ) {
+                                    orbit.roll += mw * 0.05f;
+                                    changed = true;
+                                } else if ( ctrl && shift && fov_ptr ) {
+                                    *fov_ptr += mw * 2.f;
+                                    *fov_ptr = std::max(1.f, std::min(120.f, *fov_ptr));
+                                    changed = true;
+                                } else if ( ctrl && aperture_ptr ) {
+                                    *aperture_ptr += mw * 0.02f;
+                                    *aperture_ptr = std::max(0.f, std::min(1.f, *aperture_ptr));
+                                    changed = true;
+                                } else {
+                                    orbit.dist *= (mw > 0.f) ? 0.9f : 1.1f;
+                                    orbit.dist = std::max(1.f, std::min(100.f, orbit.dist));
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        // Keyboard controls (when viewport is hovered)
+                        if ( vp_hovered && !io.WantCaptureKeyboard ) {
+                            float kspeed = 0.04f;
+                            bool shift = io.KeyShift;
+
+                            if ( !shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) )  { orbit.theta -= kspeed; changed = true; }
+                            if ( !shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) { orbit.theta += kspeed; changed = true; }
+                            if ( !shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) )    { orbit.phi += kspeed; orbit.phi = std::min(1.5f, orbit.phi); changed = true; }
+                            if ( !shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) )  { orbit.phi -= kspeed; orbit.phi = std::max(-1.5f, orbit.phi); changed = true; }
+
+                            if ( shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) ) {
+                                orbit.target[0] -= 0.2f * cosf(orbit.theta);
+                                orbit.target[2] -= 0.2f * sinf(orbit.theta);
+                                changed = true;
+                            }
+                            if ( shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) {
+                                orbit.target[0] += 0.2f * cosf(orbit.theta);
+                                orbit.target[2] += 0.2f * sinf(orbit.theta);
+                                changed = true;
+                            }
+                            if ( shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) )    { orbit.target[1] += 0.2f; changed = true; }
+                            if ( shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) )  { orbit.target[1] -= 0.2f; changed = true; }
+
+                            // WASD
+                            float ct = cosf(orbit.theta), st = sinf(orbit.theta);
+                            float cp = cosf(orbit.phi), sp = sinf(orbit.phi);
+                            float forward[3]  = {cp * st, sp, cp * ct};
+                            float right[3]    = {ct, 0.f, -st};
+                            float tspeed = 0.3f;
+
+                            if ( ImGui::IsKeyDown(ImGuiKey_W) ) { orbit.target[0] += forward[0] * tspeed; orbit.target[1] += forward[1] * tspeed; orbit.target[2] += forward[2] * tspeed; changed = true; }
+                            if ( ImGui::IsKeyDown(ImGuiKey_S) ) { orbit.target[0] -= forward[0] * tspeed; orbit.target[1] -= forward[1] * tspeed; orbit.target[2] -= forward[2] * tspeed; changed = true; }
+                            if ( ImGui::IsKeyDown(ImGuiKey_A) ) { orbit.target[0] -= right[0] * tspeed;  orbit.target[1] -= right[1] * tspeed;  orbit.target[2] -= right[2] * tspeed; changed = true; }
+                            if ( ImGui::IsKeyDown(ImGuiKey_D) ) { orbit.target[0] += right[0] * tspeed;  orbit.target[1] += right[1] * tspeed;  orbit.target[2] += right[2] * tspeed; changed = true; }
+                            if ( ImGui::IsKeyDown(ImGuiKey_Q) ) { orbit.target[1] -= 0.3f; changed = true; }
+                            if ( ImGui::IsKeyDown(ImGuiKey_E) ) { orbit.target[1] += 0.3f; changed = true; }
+                        }
+
+                        if ( changed ) {
+                            float eye[3], up[3];
+                            orbit_to_eye(orbit, eye);
+                            orbit_up(orbit, up);
+                            camera_eye_ptr[0] = eye[0];
+                            camera_eye_ptr[1] = eye[1];
+                            camera_eye_ptr[2] = eye[2];
+                            camera_at_ptr[0] = orbit.target[0];
+                            camera_at_ptr[1] = orbit.target[1];
+                            camera_at_ptr[2] = orbit.target[2];
+                            if ( camera_up_ptr ) {
+                                camera_up_ptr[0] = up[0];
+                                camera_up_ptr[1] = up[1];
+                                camera_up_ptr[2] = up[2];
+                            }
+                        }
+                    }
+
+                    if ( changed ) {
+                        q.memcpy(d_params, h_params, active_kernel->desc.params_buffer_size).wait();
+                        try {
+                            call_init_kernel(active_kernel->handle, q, WIDTH, HEIGHT, d_params,
+                                             active_kernel->desc.params_buffer_size);
+                        } catch ( const std::exception &e ) {
+                            spdlog::error("[sycl] init error: {}", e.what());
+                        }
+                        q.memset(d_accum, 0, pixel_count * 4 * sizeof(float)).wait();
+                        current_spp = 0;
+                    }
+                }
+
+                // SPP counter overlay
+                {
+                    char info[64];
+                    snprintf(info, sizeof(info), "SPP: %d/%d", current_spp, target_spp);
+                    ImGui::GetWindowDrawList()->AddText(
+                        ImVec2(p0.x + 8, p0.y + 8),
+                        IM_COL32(200, 200, 200, 200), info);
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+
+        // ---- scene debug view (separate window, proper 3D rendering) ----
+        {
+            static DebugViewFlags debug_flags;
+            const SceneDebugInfo *dbg = scene_debug_fn ? scene_debug_fn() : nullptr;
+
+            ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+            if ( ImGui::Begin("Scene Debug") ) {
+                render_scene_debug(dbg,
+                                   camera_eye_ptr,
+                                   camera_at_ptr,
+                                   camera_up_ptr,
+                                   fov_ptr ? *fov_ptr : 45.f,
+                                   (float)WIDTH / (float)HEIGHT,
+                                   debug_flags);
+            }
+            ImGui::End();
         }
 
         // ---- render ----
         bool rendered = false;
-        spdlog::trace("[frame] spp={}/{} kernel={}", current_spp, target_spp, active_kernel ? active_kernel->name : "null");
         if ( active_kernel && current_spp < target_spp ) {
-            spdlog::trace("[frame] calling render_kernel sample={}", current_spp);
             try {
                 call_render_kernel(active_kernel->handle,
                                    q,
@@ -681,20 +746,14 @@ int main(int argc, char **argv) {
                                    current_spp);
                 current_spp++;
                 rendered = true;
-                spdlog::trace("[frame] render_kernel OK, spp now {}", current_spp);
             } catch ( const std::exception &e ) {
                 spdlog::error("[sycl] render error: {}", e.what());
                 current_spp = target_spp;
             }
-        } else {
-            spdlog::trace("[frame] skip render: kernel={} spp={}/{}",
-                          active_kernel ? active_kernel->name : "null",
-                          current_spp, target_spp);
         }
 
         // Only update display when rendering happened or on first frame
         if ( rendered || current_spp == 0 ) {
-            spdlog::trace("[frame] display upload (rendered={}, spp={})", rendered, current_spp);
             PROF_ZONE_SCOPED_N("Display upload");
             try {
                 q.memcpy(h_accum, d_accum, pixel_count * 4 * sizeof(float)).wait();
@@ -739,17 +798,21 @@ int main(int argc, char **argv) {
 
         // ---- render ImGui ----
         ImGui::Render();
+
+        // Main viewport
         int dw, dh;
         glfwGetFramebufferSize(window, &dw, &dh);
         glViewport(0, 0, dw, dh);
         glClearColor(0.0f, 0.0f, 0.0f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
         glfwSwapBuffers(window);
         PROF_FRAME_MARK;
     }
 
     // ---- cleanup ----
+    shutdown_scene_debug();
     sycl::free(d_accum, q);
     if ( d_params ) {
         sycl::free(d_params, q);
@@ -859,7 +922,7 @@ static void recreate_render_buffers(sycl::queue &q,
                                     float *&h_accum,
                                     size_t &pixel_count,
                                     int w,
-                                     int h) {
+                                    int h) {
     PROF_ZONE_SCOPED;
     spdlog::debug("[buf] recreate {}x{}", w, h);
     if ( tex ) {

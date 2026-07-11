@@ -2,41 +2,16 @@
 #include <sycl-sandbox/rt/types.h>
 #include <sycl-sandbox/rt/camera.h>
 #include <sycl-sandbox/rt/params.h>
-#include <sycl-sandbox/rt/variant.h>
+#include <sycl-sandbox/rt/scene_data.h>
 
 namespace rt {
 
-// ── Object dispatch via visit ──────────────────────────────────────────
-
-inline optional<HitRecord> Object::hit(const Ray &ray, float t_min, float t_max) const {
-    optional<HitRecord> result;
-    visit(hittable, [&](const auto &h) {
-        result = h.hit(ray, t_min, t_max);
-    });
-    return result;
-}
-
-inline optional<ScatterRecord>
-Object::scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
-    optional<ScatterRecord> result;
-    visit(material, [&](const auto &m) {
-        result = m.scatter(incoming_ray, hit, rng);
-    });
-    return result;
-}
-
-inline float3 Object::emit(const HitRecord &hit) const {
-    float3 emitted = {0, 0, 0};
-    visit(material, [&](const auto &m) {
-        emitted = m.emit(hit);
-    });
-    return emitted;
-}
-
 // ── Path tracing ───────────────────────────────────────────────────────
 
-inline float3
-trace(const Ray &ray, const Object *objects, int num_objects, int max_bounces, RNG &rng) {
+/// Trace a ray through the scene and return the accumulated colour.
+/// Uses per-handle dispatch to hit, scatter, and emit on the correct
+/// per-type arrays.
+inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces, RNG &rng) {
     // Initialise the path throughput (attenuation) and the working ray
     float3 attenuation = {1, 1, 1};
     Ray ray_in_out = ray;
@@ -45,13 +20,17 @@ trace(const Ray &ray, const Object *objects, int num_objects, int max_bounces, R
     for ( int bounce = 0; bounce < max_bounces; bounce++ ) {
         // Find the closest object hit by the ray within [0.001, ∞)
         optional<HitRecord> closest_hit;
-        int hit_index = -1;
+        Handle hit_handle = {};
 
-        for ( int i = 0; i < num_objects; i++ ) {
-            auto hit = objects[i].hit(ray_in_out, 0.001f, closest_hit ? closest_hit->t : 1e30f);
+        for ( int i = 0; i < scene.num_handles; i++ ) {
+            auto hit = handle_hit(scene.handles[i],
+                                  ray_in_out,
+                                  0.001f,
+                                  closest_hit ? closest_hit->t : 1e30f,
+                                  scene);
             if ( hit ) {
                 closest_hit = hit;
-                hit_index = i;
+                hit_handle = scene.handles[i];
             }
         }
 
@@ -61,13 +40,13 @@ trace(const Ray &ray, const Object *objects, int num_objects, int max_bounces, R
         }
 
         // If the hit object emits light, return the attenuated emission
-        float3 emitted = objects[hit_index].emit(*closest_hit);
+        float3 emitted = handle_emit(hit_handle, *closest_hit, scene);
         if ( emitted.x != 0 || emitted.y != 0 || emitted.z != 0 ) {
             return mul(attenuation, emitted);
         }
 
         // Scatter the ray; if the material absorbs it, terminate the path
-        auto scattered = objects[hit_index].scatter(ray_in_out, *closest_hit, rng);
+        auto scattered = handle_scatter(hit_handle, ray_in_out, *closest_hit, rng, scene);
         if ( !scattered ) {
             return {0, 0, 0};
         }
@@ -88,8 +67,7 @@ void render_main(sycl::queue *queue,
                  const float *params,
                  float *accum_buffer,
                  int sample_index,
-                 const Object *scene_objects,
-                 int num_objects,
+                 const SceneView &scene,
                  BgFn &&background_fn) {
     // Read standard camera and render parameters from the params buffer
     int samples_per_frame = (int)params[RT_SPP_FRAME];
@@ -140,7 +118,7 @@ void render_main(sycl::queue *queue,
                                        ray_origin));
 
                     // Trace the ray and accumulate its colour
-                    float3 colour = trace(ray, scene_objects, num_objects, max_bounces, rng);
+                    float3 colour = trace(ray, scene, max_bounces, rng);
 
                     // If the ray hit nothing (colour is black), use the background colour
                     if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {

@@ -5,6 +5,7 @@
 #include <sycl-sandbox/rt/camera.h>
 #include <sycl-sandbox/rt/trace.h>
 #include <sycl-sandbox/rt/params.h>
+#include <sycl-sandbox/rt/scene_data.h>
 #include <sycl-sandbox/rt/hittables/sphere.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/metal.h>
@@ -50,9 +51,9 @@ extern "C" KernelDesc *get_kernel_desc() {
     return &desc;
 }
 
-static Object *g_scene_objects = nullptr;
-static int g_num_objects = 0;
-static float3 g_background = {0.5f, 0.7f, 1.0f};
+static SceneBuilder scene;
+static SceneView scene_view = {};
+static float3 background = {0.5f, 0.7f, 1.0f};
 
 static float random_float() {
     return (float)rand() * (1.f / 2147483647.f);
@@ -64,19 +65,16 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     int num_spheres = (int)params[offset + PARAM_NUM_SPHERES];
     float3 ground_color;
     memcpy(&ground_color, params + offset + PARAM_GROUND_COLOR, 12);
-    memcpy(&g_background, params + offset + PARAM_BACKGROUND, 12);
+    memcpy(&background, params + offset + PARAM_BACKGROUND, 12);
 
-    if ( g_scene_objects ) {
-        sycl::free(g_scene_objects, *queue);
-        g_scene_objects = nullptr;
+    if ( scene_view.handles ) {
+        scene_view.free(*queue);
     }
     srand(42);
 
-    int max_objects = num_spheres + 4 + 3;
-    auto *objects = new Object[max_objects];
-    int object_count = 0;
+    scene = SceneBuilder();
 
-    objects[object_count++] = {sphere({0, -1000, 0}, 1000), lambertian(ground_color)};
+    scene.add({sphere({0, -1000, 0}, 1000), lambertian(ground_color)});
 
     for ( int k = 0; k < num_spheres; ) {
         float x = -10.0f + 20.0f * random_float();
@@ -92,23 +90,22 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
         float choice = random_float();
 
         if ( choice < 0.6f ) {
-            objects[object_count++] = {sphere(center, 0.2f), lambertian(color)};
+            scene.add({sphere(center, 0.2f), lambertian(color)});
         } else if ( choice < 0.85f ) {
-            objects[object_count++] = {sphere(center, 0.2f), metal(color, 0.5f * random_float())};
+            scene.add({sphere(center, 0.2f), metal(color, 0.5f * random_float())});
         } else {
-            objects[object_count++] = {sphere(center, 0.2f), dielectric(1.5f)};
+            scene.add({sphere(center, 0.2f), dielectric(1.5f)});
         }
         k++;
     }
 
-    objects[object_count++] = {sphere({4, 1, 0}, 1), metal({0.7f, 0.6f, 0.5f}, 0)};
-    objects[object_count++] = {sphere({-4, 1, 0}, 1), lambertian({0.4f, 0.2f, 0.1f})};
-    objects[object_count++] = {sphere({0, 1, 0}, 1), dielectric(1.5f)};
+    scene.add({sphere({4, 1, 0}, 1), metal({0.7f, 0.6f, 0.5f}, 0)});
+    scene.add({sphere({-4, 1, 0}, 1), lambertian({0.4f, 0.2f, 0.1f})});
+    scene.add({sphere({0, 1, 0}, 1), dielectric(1.5f)});
 
-    g_scene_objects = sycl::malloc_device<Object>(object_count, *queue);
-    queue->memcpy(g_scene_objects, objects, object_count * sizeof(Object)).wait();
-    g_num_objects = object_count;
-    delete[] objects;
+    scene.build_bvh();
+    scene_view = scene.build(*queue);
+    scene.build_debug_geometry();
 }
 
 extern "C" void render_kernel(sycl::queue *queue,
@@ -124,17 +121,32 @@ extern "C" void render_kernel(sycl::queue *queue,
                 params,
                 (float *)accum_buffer,
                 sample_index,
-                g_scene_objects,
-                g_num_objects,
-                [background = g_background](const Ray &ray) -> float3 {
+                scene_view,
+                [background = background](const Ray &ray) -> float3 {
                     float t = 0.5f * (ray.dir.y + 1.0f);
                     return lerp({1, 1, 1}, background, t);
                 });
 }
 
 extern "C" void shutdown_kernel(sycl::queue *queue) {
-    if ( g_scene_objects ) {
-        sycl::free(g_scene_objects, *queue);
-        g_scene_objects = nullptr;
+    if ( scene_view.handles ) {
+        scene_view.free(*queue);
+        scene_view = {};
     }
+}
+
+extern "C" const SceneDebugInfo *get_scene_debug_info() {
+    if ( scene.debug_aabb_count() == 0 ) {
+        return nullptr;
+    }
+    static SceneDebugInfo info;
+    info.aabb_data = scene.debug_aabbs();
+    info.num_aabbs = scene.debug_aabb_count();
+    info.spheres = scene.debug_spheres();
+    info.num_spheres = scene.debug_sphere_count();
+    info.quads = scene.debug_quads();
+    info.num_quads = scene.debug_quad_count();
+    info.boxes = scene.debug_boxes();
+    info.num_boxes = scene.debug_box_count();
+    return &info;
 }

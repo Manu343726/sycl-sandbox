@@ -23,4 +23,49 @@ struct ScatterRecord {
     Ray scattered;      ///< New ray direction after scattering.
 };
 
+/// Axis-aligned bounding box: two extreme corners enclosing a volume.
+struct Aabb {
+    float3 min; ///< Minimum corner (most negative components).
+    float3 max; ///< Maximum corner (most positive components).
+};
+
+/// Build an Aabb from two arbitrary points (order-independent).
+inline Aabb aabb_from_points(float3 a, float3 b) {
+    return {{sycl::fmin(a.x, b.x), sycl::fmin(a.y, b.y), sycl::fmin(a.z, b.z)},
+            {sycl::fmax(a.x, b.x), sycl::fmax(a.y, b.y), sycl::fmax(a.z, b.z)}};
+}
+
+/// Merge two Aabbs into the smallest box containing both.
+inline Aabb aabb_merge(Aabb a, Aabb b) {
+    return {
+        {sycl::fmin(a.min.x, b.min.x), sycl::fmin(a.min.y, b.min.y), sycl::fmin(a.min.z, b.min.z)},
+        {sycl::fmax(a.max.x, b.max.x), sycl::fmax(a.max.y, b.max.y), sycl::fmax(a.max.z, b.max.z)}};
+}
+
+/// Ray-AABB intersection test using the slab method.
+/// Returns true if the ray intersects the box within [t_min, t_max].
+inline bool aabb_hit(Aabb box, const Ray &ray, float t_min, float t_max) {
+    for ( int axis = 0; axis < 3; axis++ ) {
+        float orig = (axis == 0) ? ray.orig.x : (axis == 1) ? ray.orig.y : ray.orig.z;
+        float dir = (axis == 0) ? ray.dir.x : (axis == 1) ? ray.dir.y : ray.dir.z;
+        float bmin = (axis == 0) ? box.min.x : (axis == 1) ? box.min.y : box.min.z;
+        float bmax = (axis == 0) ? box.max.x : (axis == 1) ? box.max.y : box.max.z;
+
+        float inv_dir = 1.f / dir;
+        float t0 = (bmin - orig) * inv_dir;
+        float t1 = (bmax - orig) * inv_dir;
+        if ( inv_dir < 0.f ) {
+            float tmp = t0;
+            t0 = t1;
+            t1 = tmp;
+        }
+        t_min = (t0 > t_min) ? t0 : t_min;
+        t_max = (t1 < t_max) ? t1 : t_max;
+        if ( t_max <= t_min ) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace rt

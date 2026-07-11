@@ -89,21 +89,46 @@ using rt::materials::lambertian;
 
 ## Enums
 
-- **Plain `enum`** when values are used as array indices or bit flags
-  and need implicit conversion to `int`.
+Prefer `enum class` over plain `enum` in all new code.  `enum class`
+prevents implicit conversions and makes code self-documenting — the type
+name is always visible at the call site.
+
+- **Plain `enum`** only when values are used as direct array indices or
+  buffer offsets and need implicit `int` conversion.
 
   ```cpp
   enum rt_std_param { RT_SPP_FRAME = 0, RT_MAX_BOUNCES = 1, … };
   // Used as:  params[RT_SPP_FRAME]
   ```
 
-- **`enum class`** when values represent a distinct choice that should
-  not be used as an integer by accident.
+- **`enum class`** for everything else — type tags, discriminants,
+  configuration choices, dispatch keys.  Always.
 
   ```cpp
-  enum class Axis : int { X = 0, Y = 1, Z = 2 };
-  // Used as:  add_quad(…, Axis::Y, …)
+  // Bad — magic integer, meaning is unclear
+  uint32_t type = 0;
+  switch (type) {
+      case 0: return spheres[idx].hit(ray, t_min, t_max);
+      case 1: return triangles[idx].hit(ray, t_min, t_max);
+  }
+
+  // Bad — plain enum pollutes enclosing namespace
+  enum HittableTag { TAG_SPHERE = 0, TAG_TRIANGLE = 1 };
+  HittableTag tag = TAG_SPHERE;
+
+  // Good — enum class is scoped, self-documenting, and type-safe
+  enum class HittableType : uint32_t { Sphere = 0, Triangle = 1, Quad = 2, Box = 3 };
+  auto type = static_cast<HittableType>(handle_tag(h.hittable));
+  switch (type) {
+      case HittableType::Sphere:   return scene.spheres[idx].hit(ray, t_min, t_max);
+      case HittableType::Triangle: return scene.triangles[idx].hit(ray, t_min, t_max);
+      case HittableType::Quad:     return scene.quads[idx].hit(ray, t_min, t_max);
+      case HittableType::Box:      return scene.boxes[idx].hit(ray, t_min, t_max);
+  }
   ```
+
+  The explicit `static_cast` when packing/unpacking is a feature, not a
+  bug — it makes the bit manipulation visible and auditable.
 
 ## Function signatures
 

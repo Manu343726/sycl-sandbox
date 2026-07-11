@@ -16,6 +16,12 @@ public:
         normal = norm(cross(ab, ac));
     }
 
+    /// Return the axis-aligned bounding box enclosing this triangle.
+    Aabb aabb() const {
+        Aabb box = aabb_from_points(a, b);
+        return aabb_merge(box, aabb_from_points(c, c));
+    }
+
     /// Ray-triangle intersection using barycentric coordinates (Cramer's rule).
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the ray-plane intersection; reject rays parallel to the plane

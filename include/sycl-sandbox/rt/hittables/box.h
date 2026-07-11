@@ -16,6 +16,8 @@ namespace rt::hittables {
 
 class Box {
 public:
+    float3 box_min; ///< Minimum corner of the enclosing AABB.
+    float3 box_max; ///< Maximum corner of the enclosing AABB.
     std::array<Quad, 6> faces;
 
     Box() = default;
@@ -25,12 +27,19 @@ public:
         float x0 = cx, x1 = cx + sx;
         float y0 = cy, y1 = cy + sy;
         float z0 = cz, z1 = cz + sz;
+        box_min = {x0, y0, z0};
+        box_max = {x1, y1, z1};
         faces[0] = Quad({x0, y1, z0}, {sx, 0, 0}, {0, 0, sz}); // top    (+Y)
         faces[1] = Quad({x0, y0, z0}, {0, 0, sz}, {sx, 0, 0}); // bottom (-Y)
         faces[2] = Quad({x0, y0, z0}, {0, sy, 0}, {sx, 0, 0}); // front  (-Z)
         faces[3] = Quad({x0, y0, z1}, {sx, 0, 0}, {0, sy, 0}); // back   (+Z)
         faces[4] = Quad({x0, y0, z0}, {0, sy, 0}, {0, 0, sz}); // left   (-X)
         faces[5] = Quad({x1, y0, z0}, {0, 0, sz}, {0, sy, 0}); // right  (+X)
+    }
+
+    /// Return the axis-aligned bounding box (precomputed from constructor).
+    Aabb aabb() const {
+        return {box_min, box_max};
     }
 
     /// Iterate over all six faces and return the closest hit.

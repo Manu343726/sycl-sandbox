@@ -15,6 +15,9 @@ struct Camera {
 };
 
 /// Build a Camera from standard lookAt parameters.
+///
+/// The world viewport (at focus_dist=1) has height = 2·tan(vfov/2) and
+/// width = aspect × height.  Changing FOV zooms in/out on the scene.
 inline Camera
 lookat(float3 from, float3 at, float3 up, float vfov_deg, float aspect, float focus_dist = 1.f) {
     // Convert vertical FOV from degrees to radians and compute viewport dimensions

@@ -14,6 +14,12 @@ public:
     Sphere(float3 center_, float radius_) : center(center_), radius(radius_) {
     }
 
+    /// Return the axis-aligned bounding box enclosing this sphere.
+    Aabb aabb() const {
+        return aabb_from_points(sub(center, {radius, radius, radius}),
+                                add(center, {radius, radius, radius}));
+    }
+
     /// Ray-sphere intersection using the reduced quadratic formula.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
         // Compute the vector from the sphere centre to the ray origin

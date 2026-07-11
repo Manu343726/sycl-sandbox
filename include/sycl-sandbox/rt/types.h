@@ -24,8 +24,8 @@ using Material = std::variant<materials::Lambertian,
                               materials::DiffuseLight>;
 
 /// A scene Object is a geometry + material pair, stored inline (no pointers).
-/// Dispatch to the active variant type is handled by visit() — a
-/// compile-time if/else-if chain that works on all SYCL backends.
+/// Used as a convenience type for SceneBuilder::add() — dispatch is now
+/// handled by Handle + per-type arrays in the data-oriented layout.
 class Object {
 public:
     Hittable hittable;
@@ -34,10 +34,6 @@ public:
     Object() = default;
     Object(Hittable h, Material m) : hittable(std::move(h)), material(std::move(m)) {
     }
-
-    optional<HitRecord> hit(const Ray &r, float t_min, float t_max) const;
-    optional<ScatterRecord> scatter(const Ray &in, const HitRecord &rec, RNG &rng) const;
-    float3 emit(const HitRecord &rec) const;
 };
 
 } // namespace rt

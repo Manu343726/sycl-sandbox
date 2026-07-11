@@ -103,6 +103,7 @@ add_executable(sandbox
     kernel_library.cpp
     scene_registry.cpp
     param_ui.cpp
+    scene_debug.cpp
 )
 
 target_compile_options(sandbox PRIVATE -Werror -Wno-c99-designator)

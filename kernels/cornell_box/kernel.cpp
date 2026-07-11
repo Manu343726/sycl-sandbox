@@ -3,7 +3,7 @@
 #include <sycl-sandbox/rt/types.h>
 #include <sycl-sandbox/rt/trace.h>
 #include <sycl-sandbox/rt/params.h>
-#include <sycl-sandbox/rt/scene.h>
+#include <sycl-sandbox/rt/scene_data.h>
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/rt/hittables/box.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
@@ -42,10 +42,9 @@ extern "C" KernelDesc *get_kernel_desc() {
     return &desc;
 }
 
-static constexpr int NUM_OBJECTS = 8;
-static Object *g_scene_host = nullptr;
-static Object *g_scene_device = nullptr;
-static sycl::queue *g_queue = nullptr;
+static SceneBuilder scene;
+static SceneView scene_view = {};
+static sycl::queue *queue_ref = nullptr;
 
 extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buffer, size_t) {
     const float *params = (const float *)params_buffer;
@@ -54,7 +53,12 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     memcpy(&light_color, params + std_offset + PARAM_LIGHT_COLOR, 12);
     float light_strength = params[std_offset + PARAM_LIGHT_STRENGTH];
 
-    g_queue = queue;
+    if ( queue_ref && scene_view.handles ) {
+        scene_view.free(*queue);
+    }
+    queue_ref = queue;
+
+    scene = SceneBuilder();
 
     float3 white = {0.73f, 0.73f, 0.73f};
     float3 red = {0.65f, 0.05f, 0.05f};
@@ -64,23 +68,18 @@ extern "C" void init_kernel(sycl::queue *queue, int, int, const void *params_buf
     using hittables::quad;
     using hittables::box;
 
-    g_scene_host = sycl::malloc_host<Object>(NUM_OBJECTS, *queue);
+    scene.add({quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)});
+    scene.add({quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)});
+    scene.add({quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)});
+    scene.add({quad(0, -2.0f, 0, 3, -2, 2), lambertian(red)});
+    scene.add({quad(0, 2.0f, 0, 3, -2, 2), lambertian(green)});
+    scene.add({quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)});
+    scene.add({box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f), lambertian({0.55f, 0.55f, 0.55f})});
+    scene.add({box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f), lambertian({0.55f, 0.55f, 0.55f})});
 
-    g_scene_host[0] = {quad(1, 0.0f, -2, 2, -2, 2), lambertian(white)};
-    g_scene_host[1] = {quad(1, 3.0f, -2, 2, -2, 2), lambertian(white)};
-    g_scene_host[2] = {quad(2, -2.0f, -2, 2, 0, 3), lambertian(white)};
-    g_scene_host[3] = {quad(0, -2.0f, 0, 3, -2, 2), lambertian(red)};
-    g_scene_host[4] = {quad(0, 2.0f, 0, 3, -2, 2), lambertian(green)};
-    g_scene_host[5] = {quad(1, 2.99f, -1, 1, -1, 1), diffuse_light(light_emission)};
-    g_scene_host[6] = {box(-0.8f, 0.0f, -0.8f, 0.6f, 1.5f, 0.6f),
-                       lambertian({0.55f, 0.55f, 0.55f})};
-    g_scene_host[7] = {box(0.8f, 0.0f, -0.3f, 0.6f, 0.6f, 1.2f),
-                       lambertian({0.55f, 0.55f, 0.55f})};
-
-    g_scene_device = sycl::malloc_device<Object>(NUM_OBJECTS, *queue);
-    queue->memcpy(g_scene_device, g_scene_host, NUM_OBJECTS * sizeof(Object)).wait();
-    sycl::free(g_scene_host, *queue);
-    g_scene_host = nullptr;
+    scene.build_bvh();
+    scene_view = scene.build(*queue);
+    scene.build_debug_geometry();
 }
 
 extern "C" void render_kernel(sycl::queue *queue,
@@ -96,16 +95,31 @@ extern "C" void render_kernel(sycl::queue *queue,
                 params,
                 (float *)accum_buffer,
                 sample_index,
-                g_scene_device,
-                NUM_OBJECTS,
+                scene_view,
                 [](const Ray &) -> float3 {
                     return {0, 0, 0};
                 });
 }
 
 extern "C" void shutdown_kernel(sycl::queue *queue) {
-    if (g_scene_host)   sycl::free(g_scene_host, *queue);
-    if (g_scene_device) sycl::free(g_scene_device, *queue);
-    g_scene_host   = nullptr;
-    g_scene_device = nullptr;
+    if ( scene_view.handles ) {
+        scene_view.free(*queue);
+        scene_view = {};
+    }
+}
+
+extern "C" const SceneDebugInfo *get_scene_debug_info() {
+    if ( scene.debug_aabb_count() == 0 ) {
+        return nullptr;
+    }
+    static SceneDebugInfo info;
+    info.aabb_data = scene.debug_aabbs();
+    info.num_aabbs = scene.debug_aabb_count();
+    info.spheres = scene.debug_spheres();
+    info.num_spheres = scene.debug_sphere_count();
+    info.quads = scene.debug_quads();
+    info.num_quads = scene.debug_quad_count();
+    info.boxes = scene.debug_boxes();
+    info.num_boxes = scene.debug_box_count();
+    return &info;
 }
