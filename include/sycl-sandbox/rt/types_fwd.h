@@ -1,5 +1,6 @@
 #pragma once
 #include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/math.h>
 
 /// Forward declarations used by individual hittable/material headers.
 namespace rt {
@@ -31,15 +32,15 @@ struct Aabb {
 
 /// Build an Aabb from two arbitrary points (order-independent).
 inline Aabb aabb_from_points(float3 a, float3 b) {
-    return {{sycl::fmin(a.x, b.x), sycl::fmin(a.y, b.y), sycl::fmin(a.z, b.z)},
-            {sycl::fmax(a.x, b.x), sycl::fmax(a.y, b.y), sycl::fmax(a.z, b.z)}};
+    return {{math::fmin(a.x, b.x), math::fmin(a.y, b.y), math::fmin(a.z, b.z)},
+            {math::fmax(a.x, b.x), math::fmax(a.y, b.y), math::fmax(a.z, b.z)}};
 }
 
 /// Merge two Aabbs into the smallest box containing both.
 inline Aabb aabb_merge(Aabb a, Aabb b) {
     return {
-        {sycl::fmin(a.min.x, b.min.x), sycl::fmin(a.min.y, b.min.y), sycl::fmin(a.min.z, b.min.z)},
-        {sycl::fmax(a.max.x, b.max.x), sycl::fmax(a.max.y, b.max.y), sycl::fmax(a.max.z, b.max.z)}};
+        {math::fmin(a.min.x, b.min.x), math::fmin(a.min.y, b.min.y), math::fmin(a.min.z, b.min.z)},
+        {math::fmax(a.max.x, b.max.x), math::fmax(a.max.y, b.max.y), math::fmax(a.max.z, b.max.z)}};
 }
 
 /// Ray-AABB intersection test using the slab method.

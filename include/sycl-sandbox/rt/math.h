@@ -1,6 +1,7 @@
 #pragma once
-#include <sycl/sycl.hpp>
+#include <sycl-sandbox/math.h>
 #include <cstdint>
+#include <cmath>
 
 /// 3D vector math and RNG for SYCL device code.
 namespace rt {
@@ -42,7 +43,7 @@ inline float len2(float3 a) {
 
 /// Euclidean length:  ‖a‖ = √(a·a).
 inline float len(float3 a) {
-    return sycl::sqrt(len2(a));
+    return math::sqrt(len2(a));
 }
 
 /// Unit vector in the same direction as a:  â = a / ‖a‖.

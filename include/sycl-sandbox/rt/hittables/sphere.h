@@ -1,7 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/math.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::hittables {
 
@@ -22,6 +25,8 @@ public:
 
     /// Ray-sphere intersection using the reduced quadratic formula.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        PROFILER_FUNCTION();
+        PROFILER_ZONE("Sphere_hit");
         // Compute the vector from the sphere centre to the ray origin
         float3 oc = sub(ray.orig, center);
 
@@ -37,7 +42,7 @@ public:
             return nullopt;
         }
 
-        float sqrt_d = sycl::sqrt(discriminant);
+        float sqrt_d = math::sqrt(discriminant);
         float t = (-half_b - sqrt_d) / a;
         if ( t < t_min || t > t_max ) {
             t = (-half_b + sqrt_d) / a;

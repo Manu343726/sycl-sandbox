@@ -4,14 +4,14 @@
         {
             "label": "build release",
             "type": "shell",
-            "command": "cmake --preset conan-release -B build && make -C build -j$(nproc)",
+            "command": "cmake --preset conan-release -B build && make -C build -j4",
             "group": "build",
             "problemMatcher": ["$gcc"]
         },
         {
             "label": "build debug",
             "type": "shell",
-            "command": "cmake --preset conan-debug -B build_debug && make -C build_debug -j$(nproc)",
+            "command": "cmake --preset conan-debug -B build_debug && make -C build_debug -j4",
             "group": "build",
             "problemMatcher": ["$gcc"]
         },

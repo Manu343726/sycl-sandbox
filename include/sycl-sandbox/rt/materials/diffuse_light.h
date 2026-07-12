@@ -1,7 +1,9 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::materials {
 
@@ -13,9 +15,12 @@ public:
     }
 
     optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
+        PROFILER_ZONE("DiffuseLight_scatter");
         return nullopt;
     }
     float3 emit(const HitRecord &) const {
+
+        PROFILER_ZONE("DiffuseLight_emit");
         return emit_color;
     }
 };

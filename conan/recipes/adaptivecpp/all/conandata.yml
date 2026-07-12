@@ -1,0 +1,9 @@
+sources:
+  "25.10.0":
+    url: "https://github.com/AdaptiveCpp/AdaptiveCpp/archive/da2463e45aa90aa36306c45abcfc05b87de51bc6.tar.gz"
+    sha256: "c38cf1e36fb033221d3f6b096b62a4211265c4110874bbcdfb195bb1cc60d008"
+patches:
+  "25.10.0":
+    - patch_file: "patches/set_stream_logging.patch"
+      patch_description: "Add output_stream::set_stream() to redirect HIPSYCL_DEBUG_* logging to spdlog"
+      patch_type: "portability"

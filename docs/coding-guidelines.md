@@ -97,8 +97,8 @@ name is always visible at the call site.
   buffer offsets and need implicit `int` conversion.
 
   ```cpp
-  enum rt_std_param { RT_SPP_FRAME = 0, RT_MAX_BOUNCES = 1, … };
-  // Used as:  params[RT_SPP_FRAME]
+  enum { SLOT_A = 0, SLOT_B = 1, SLOT_C = 2 };
+  // Used as:  array[SLOT_A]
   ```
 
 - **`enum class`** for everything else — type tags, discriminants,

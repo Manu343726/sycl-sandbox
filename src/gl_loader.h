@@ -71,4 +71,8 @@ extern void              glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRG
 extern void              glLineWidth(GLfloat width);
 extern void              glPointSize(GLfloat size);
 
+// ── Matrix stack (OpenGL 1.x compat — used by scene_debug for fixed-function 3D) ─
+extern void              glMultMatrixf(const GLfloat *m);
+extern void              glTranslatef(GLfloat x, GLfloat y, GLfloat z);
+
 } // extern "C"

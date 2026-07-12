@@ -1,0 +1,20 @@
+{
+    // Clangd memory and performance tuning
+    "clangd.arguments": [
+        // Enable reading .clangd YAML config file
+        "--enable-config",
+        // Store PCHs on disk instead of memory
+        "--pch-storage=disk",
+        // Release memory periodically via malloc_trim
+        "--malloc-trim",
+        // Disable background index entirely (huge RAM savings)
+        "--background-index=true",
+        // Limit async worker threads
+        "-j",
+        "2",
+        // Reduce max number of completion results
+        "--limit-results=100",
+        // Reduce max number of references returned
+        "--limit-references=200"
+    ]
+}

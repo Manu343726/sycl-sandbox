@@ -30,27 +30,61 @@ Interactive GPU/CPU rendering sandbox with hot-reloadable SYCL kernels. Built wi
 - [Tracy](https://github.com/wolfpld/tracy) — profiler (optional, `-DTRACY_PROFILER=ON`)
 - OpenGL 3.3+
 
-## Build
+## Building
+
+### 1. Register the local recipes index
+
+The project ships a patched version of AdaptiveCpp in `conan/recipes/`
+that adds an `output_stream::set_stream()` API for redirecting AdaptiveCpp's
+internal logging through spdlog.  Register it as a local Conan remote:
 
 ```bash
-# Install dependencies
-conan install . -of build --build missing
+conan remote add sycl-sandbox-dependencies ./conan --allowed-packages="adaptivecpp/*"
+```
 
-# Build Release
+This must be done once after cloning — the remote is local and stays in your
+Conan configuration.
+
+### 2. Build the patched AdaptiveCpp package
+
+Build the patched AdaptiveCpp once so it's cached locally:
+
+```bash
+# Release build (used by ./build/src/sycl-sandbox)
+conan create conan/recipes/adaptivecpp/all \
+    -o '&:with_cuda=True' -o '&:with_openmp=True' -o '&:experimental_llvm=True'
+
+# Debug build (used by ./build_debug/src/sycl-sandbox, for gdb)
+conan create conan/recipes/adaptivecpp/all \
+    -s build_type=Debug \
+    -o '&:with_cuda=True' -o '&:with_openmp=True' -o '&:experimental_llvm=True'
+```
+
+### 3. Install dependencies and build
+
+```bash
+conan install . -of build --build missing
 cmake --preset conan-release -B build
 make -C build -j$(nproc)
 
+# Build Debug (for debugging with gdb)
+conan install . -of build_debug -s build_type=Debug --build missing
+cmake --preset conan-debug -B build_debug
+make -C build_debug -j$(nproc)
+```
+
+> **Note:** AdaptiveCpp is compiled from source by Conan and may take several
+> minutes.  The result is cached in your local Conan cache.
+
+### 4. Tracy (optional profiler support)
+
+```bash
 # Build with Tracy profiler support
 cmake --preset conan-release -B build -DTRACY_PROFILER=ON
 make -C build -j$(nproc)
 
 # Build the Tracy server UI (standalone profiler application)
 cmake --build build --target tracy-server
-
-# Build Debug (for debugging with gdb)
-conan install . -of build_debug -s build_type=Debug --build missing
-cmake --preset conan-debug -B build_debug
-make -C build_debug -j$(nproc)
 ```
 
 ### CUDA libdevice note
@@ -65,9 +99,9 @@ sudo ln -sf /opt/cuda/nvvm/libdevice/libdevice.10.bc /opt/cuda/lib64/libdevice.1
 ## Usage
 
 ```bash
-./build/src/sandbox                  # default: GPU backend
-./build/src/sandbox -b cpu           # force CPU (OpenMP) backend
-./build/src/sandbox --help           # show help
+./build/src/sycl-sandbox                  # default: GPU backend
+./build/src/sycl-sandbox -b cpu           # force CPU (OpenMP) backend
+./build/src/sycl-sandbox --help           # show help
 ```
 
 ### VS Code

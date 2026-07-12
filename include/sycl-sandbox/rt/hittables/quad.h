@@ -1,7 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/math.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::hittables {
 
@@ -35,9 +38,11 @@ public:
 
     /// Ray-quad intersection using barycentric (α, β) coordinates.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        PROFILER_FUNCTION();
+        PROFILER_ZONE("Quad_hit");
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
-        if ( sycl::fabs(denom) < 1e-8f ) {
+        if ( math::fabs(denom) < 1e-8f ) {
             return nullopt;
         }
 
@@ -60,7 +65,7 @@ public:
         float d20 = dot(pa, edge_u);
         float d21 = dot(pa, edge_v);
         float denominator = d00 * d11 - d01 * d01;
-        if ( sycl::fabs(denominator) < 1e-12f ) {
+        if ( math::fabs(denominator) < 1e-12f ) {
             return nullopt;
         }
 

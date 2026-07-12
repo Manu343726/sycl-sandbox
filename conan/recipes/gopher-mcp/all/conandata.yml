@@ -1,0 +1,9 @@
+sources:
+  "0.1.1":
+    url: "https://github.com/GopherSecurity/gopher-mcp/archive/refs/tags/v0.1.1.tar.gz"
+    sha256: "231ffa0f9ec939a7b47bf21c0726bae7cc137ab5ecda2198663d577a82f3b714"
+patches:
+  "0.1.1":
+    - patch_file: "patches/find_package_deps.patch"
+      patch_description: "Replace FetchContent with find_package for all dependencies"
+      patch_type: "portability"

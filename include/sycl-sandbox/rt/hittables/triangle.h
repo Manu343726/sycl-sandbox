@@ -1,7 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/math.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::hittables {
 
@@ -24,9 +27,11 @@ public:
 
     /// Ray-triangle intersection using barycentric coordinates (Cramer's rule).
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        PROFILER_FUNCTION();
+        PROFILER_ZONE("Triangle_hit");
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
-        if ( sycl::fabs(denom) < 1e-8f ) {
+        if ( math::fabs(denom) < 1e-8f ) {
             return nullopt;
         }
 
@@ -49,7 +54,7 @@ public:
         float d00 = dot(ba, ba), d01 = dot(ba, ca), d11 = dot(ca, ca);
         float d20 = dot(pa, ba), d21 = dot(pa, ca);
         float denominator = d00 * d11 - d01 * d01; // |ba × ca|²  (twice the triangle area)
-        if ( sycl::fabs(denominator) < 1e-12f ) {
+        if ( math::fabs(denominator) < 1e-12f ) {
             return nullopt;
         }
 

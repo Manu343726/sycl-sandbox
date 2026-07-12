@@ -2,7 +2,7 @@
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <variant>
-#include <sycl-sandbox/rt/variant.h>
+#include <sycl-sandbox/variant.h>
 #include <sycl-sandbox/rt/hittables/sphere.h>
 #include <sycl-sandbox/rt/hittables/triangle.h>
 #include <sycl-sandbox/rt/hittables/quad.h>

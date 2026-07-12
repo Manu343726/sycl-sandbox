@@ -1,5 +1,7 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/math.h>
 
 /// Shared math helpers for raytracing.
 namespace rt {
@@ -7,6 +9,8 @@ namespace rt {
 /// Returns a random point uniformly distributed inside the unit sphere
 /// using rejection sampling (expected ~52% acceptance rate).
 inline float3 random_in_unit_sphere(RNG &rng) {
+    PROFILER_FUNCTION();
+    PROFILER_ZONE("random_in_unit_sphere");
     for ( int i = 0; i < 100; i++ ) {
         float3 candidate = {2 * rng.next() - 1, 2 * rng.next() - 1, 2 * rng.next() - 1};
         if ( len2(candidate) < 1 ) {
@@ -41,7 +45,7 @@ inline bool refract(float3 incident, float3 surface_normal, float eta, float3 &o
 
     // Compute the refracted direction:  η·(v − n·(v·n)) − n·√(discriminant)
     out_direction = sub(scale(sub(unit_incident, scale(surface_normal, cos_theta_i)), eta),
-                        scale(surface_normal, sycl::sqrt(discriminant)));
+                        scale(surface_normal, math::sqrt(discriminant)));
     return true;
 }
 
@@ -49,7 +53,7 @@ inline bool refract(float3 incident, float3 surface_normal, float eta, float3 &o
 inline float schlick(float cosine, float refractive_index) {
     float r0 = (1 - refractive_index) / (1 + refractive_index);
     r0 *= r0;
-    return r0 + (1 - r0) * sycl::pow(1 - cosine, 5);
+    return r0 + (1 - r0) * math::pow(1 - cosine, 5);
 }
 
 } // namespace rt

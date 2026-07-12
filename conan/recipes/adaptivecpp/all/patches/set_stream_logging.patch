@@ -1,0 +1,35 @@
+--- a/include/hipSYCL/common/debug.hpp
++++ b/include/hipSYCL/common/debug.hpp
+@@ -41,13 +41,19 @@
+     return ostr;
+   }
+ 
+-  std::ostream &get_stream() const { return _output_stream; }
++  std::ostream &get_stream() const {
++    return _output_stream_ptr ? *_output_stream_ptr : std::cerr;
++  }
+   int get_debug_level() const { return _debug_level; }
+ 
++  /// Redirect all subsequent HIPSYCL_DEBUG_* output to the given stream.
++  void set_stream(std::ostream &s) { _output_stream_ptr = &s; }
++
+ private:
+ 
+   output_stream()
+-  : _debug_level {HIPSYCL_DEBUG_LEVEL}, _output_stream{std::cerr} {
++  : _debug_level{HIPSYCL_DEBUG_LEVEL},
++    _output_stream_ptr{&std::cerr} {
+ #if !defined(HIPSYCL_COMPILER_COMPONENT) && !defined(HIPSYCL_TOOL_COMPONENT)
+     _debug_level =
+         rt::application::get_settings().get<rt::setting::debug_level>();
+@@ -68,8 +74,8 @@
+ #endif
+   }
+ 
+-  int _debug_level;
+-  std::ostream& _output_stream;
++  int             _debug_level;
++  std::ostream   *_output_stream_ptr;
+ };
+ 
+ }

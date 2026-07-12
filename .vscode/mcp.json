@@ -1,0 +1,9 @@
+{
+    "servers": {
+        "conan": {
+            "type": "stdio",
+            "command": "conan-mcp",
+            "args": []
+        }
+    }
+}

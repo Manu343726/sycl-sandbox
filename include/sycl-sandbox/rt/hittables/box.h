@@ -1,9 +1,11 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/optional.h>
 #include <array>
+#include <sycl-sandbox/profiler.h>
 
 /// Box primitive composed from six Quad faces.
 ///
@@ -44,6 +46,8 @@ public:
 
     /// Iterate over all six faces and return the closest hit.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+        PROFILER_FUNCTION();
+        PROFILER_ZONE("Box_hit");
         optional<HitRecord> closest;
         for ( int i = 0; i < 6; i++ ) {
             auto hit = faces[i].hit(ray, t_min, closest ? closest->t : t_max);

@@ -1,8 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::materials {
 
@@ -17,6 +19,7 @@ public:
     /// Refract or reflect the incoming ray using Snell's law + Schlick Fresnel.
     optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
+        PROFILER_ZONE("Dielectric_scatter");
         // Determine whether the ray is entering the dielectric or exiting it
         float3 outward_normal;
         float eta_ratio;
@@ -47,6 +50,8 @@ public:
     }
 
     float3 emit(const HitRecord &) const {
+
+        PROFILER_ZONE("Dielectric_emit");
         return {0, 0, 0};
     }
 };

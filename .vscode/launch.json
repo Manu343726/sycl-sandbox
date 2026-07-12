@@ -2,52 +2,40 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run CPU (Release)",
+            "name": "Run (Release)",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/src/sandbox",
-            "args": ["-b", "cpu", "--log-level", "debug"],
+            "program": "${workspaceFolder}/build/src/sycl-sandbox",
+            "args": ["--log-level", "debug", "--backend", "software"],
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "preLaunchTask": "build release"
         },
         {
-            "name": "Run CPU (Debug + gdb)",
+            "name": "Run (Debug + gdb)",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/src/sandbox",
-            "args": ["-b", "cpu", "--log-level", "trace"],
+            "program": "${workspaceFolder}/build_debug/src/sycl-sandbox",
+            "args": ["--log-level", "trace", "--backend", "software"],
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "preLaunchTask": "build debug",
             "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb"
-        },
-        {
-            "name": "Run GPU (Release)",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/src/sandbox",
-            "args": ["-b", "gpu", "--log-level", "trace"],
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "preLaunchTask": "build release"
-        },
-        {
-            "name": "Run GPU (Debug + gdb)",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/src/sandbox",
-            "args": ["-b", "gpu", "--log-level", "trace"],
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "preLaunchTask": "build debug",
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb"
+            "miDebuggerPath": "/usr/bin/gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable GDB pretty-printing",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Load system GDB auto-load scripts (pretty printers, .gdbinit)",
+                    "text": "set auto-load safe-path /",
+                    "ignoreFailures": true
+                }
+            ]
         }
     ]
 }

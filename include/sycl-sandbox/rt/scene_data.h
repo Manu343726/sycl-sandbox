@@ -1,17 +1,13 @@
 #pragma once
-#include <sycl-sandbox/rt/types.h>
-#include <sycl-sandbox/sandbox_api.h>
-#include <sycl-sandbox/variant.h>
-#include <sycl/sycl.hpp>
-#include <algorithm>
-#include <vector>
+// Forwarding header — the canonical definition now lives in
+// <sycl-sandbox/scene/data.h>
+#include <sycl-sandbox/scene/data.h>
 
 /// Data-oriented scene representation: per-type arrays, handle-based dispatch,
 /// optional BVH acceleration and light list for importance sampling.
 ///
 /// Kernel init code builds the scene via SceneBuilder (host only).
 /// The render loop reads SceneView (device only, trivially copyable).
-namespace rt {
 
 // ── Type tags ──────────────────────────────────────────────────────────
 
@@ -127,6 +123,8 @@ struct MaterialTag<materials::DiffuseLight> {
 /// Read-only scene data passed to device kernels by value (captured in
 /// SYCL lambdas).  All pointers are sycl::malloc_device allocations.
 /// Nullable arrays with counts — unset features have null + zero.
+/// For the software (non-SYCL) path, use build(Runtime*) and free(Runtime*)
+/// instead, which treat pointers as regular heap allocations.
 struct SceneView {
     // ── Handles (always present) ──────────────────────────────────────
     Handle *handles;
@@ -164,8 +162,13 @@ struct SceneView {
     LightInfo *lights;
     int num_lights;
 
-    /// Free all device memory held by this view.
+    /// Free all device memory held by this view (SYCL path).
+#ifndef KERNEL_NATIVE
     void free(sycl::queue &queue) const;
+#endif
+
+    /// Free all memory using the Runtime abstraction (SYCL or software).
+    void free(Runtime *rt);
 };
 
 // ── Dispatch functions (device-capable) ────────────────────────────────
@@ -173,6 +176,7 @@ struct SceneView {
 /// Test a handle's hittable against a ray.
 inline optional<HitRecord>
 handle_hit(Handle h, const Ray &ray, float t_min, float t_max, const SceneView &scene) {
+    PROFILER_FUNCTION();
     auto type = static_cast<HittableType>(handle_tag(h.hittable));
     uint32_t idx = handle_index(h.hittable);
     switch ( type ) {
@@ -194,6 +198,7 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
                                               const HitRecord &hit,
                                               RNG &rng,
                                               const SceneView &scene) {
+    PROFILER_FUNCTION();
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
@@ -211,6 +216,7 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
 
 /// Emit light from a handle's material.
 inline float3 handle_emit(Handle h, const HitRecord &hit, const SceneView &scene) {
+    PROFILER_FUNCTION();
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
@@ -239,6 +245,7 @@ struct BvhHitResult {
 /// [t_min, t_max], or nullopt if the ray misses the entire BVH.
 inline optional<BvhHitResult>
 bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene) {
+    PROFILER_FUNCTION();
     if ( !scene.bvh_nodes || scene.bvh_root < 0 ) {
         return nullopt;
     }
@@ -304,9 +311,12 @@ public:
     /// Must be called before build().
     void build_bvh();
 
-    /// Upload all accumulated data to device memory and return a SceneView.
+    /// Upload all accumulated data to device/host memory using the Runtime
+    /// abstraction and return a SceneView.  When rt->queue is non-null the
+    /// arrays are allocated via SYCL device memory; when null they are plain
+    /// heap allocations (software mode).
     /// Computes per-handle AABBs and builds a light list if lights exist.
-    SceneView build(sycl::queue &queue);
+    SceneView build(rt::Runtime *rt);
 
     /// Return a pointer to the host-side AABB array (for debug visualization).
     const float *debug_aabbs() const {
@@ -376,55 +386,54 @@ private:
     /// Compute the surface area of a hittable referenced by a handle.
     float compute_area(Handle h) const;
 
-    /// Allocate a device array and copy a host vector into it.
+    /// Allocate a device/host array and copy a host vector into it (via Runtime).
     template <typename T>
-    static T *upload_array(sycl::queue &queue, const std::vector<T> &host_vec);
+    static T *upload_array(rt::Runtime *rt, const std::vector<T> &host_vec);
 };
 
 // ── SceneView::free implementation ─────────────────────────────────────
 
+#ifndef KERNEL_NATIVE
 inline void SceneView::free(sycl::queue &queue) const {
-    if ( handles ) {
-        sycl::free(handles, queue);
-    }
-    if ( spheres ) {
-        sycl::free(spheres, queue);
-    }
-    if ( triangles ) {
-        sycl::free(triangles, queue);
-    }
-    if ( quads ) {
-        sycl::free(quads, queue);
-    }
-    if ( boxes ) {
-        sycl::free(boxes, queue);
-    }
-    if ( lambertians ) {
-        sycl::free(lambertians, queue);
-    }
-    if ( metals ) {
-        sycl::free(metals, queue);
-    }
-    if ( dielectrics ) {
-        sycl::free(dielectrics, queue);
-    }
-    if ( diffuse_lights ) {
-        sycl::free(diffuse_lights, queue);
-    }
-    if ( aabbs ) {
-        sycl::free(aabbs, queue);
-    }
-    if ( bvh_nodes ) {
-        sycl::free(bvh_nodes, queue);
-    }
-    if ( lights ) {
-        sycl::free(lights, queue);
-    }
+    PROFILER_FUNCTION();
+    if ( handles )  { sycl::free(handles, queue); }
+    if ( spheres )  { sycl::free(spheres, queue); }
+    if ( triangles ) { sycl::free(triangles, queue); }
+    if ( quads )    { sycl::free(quads, queue); }
+    if ( boxes )    { sycl::free(boxes, queue); }
+    if ( lambertians ) { sycl::free(lambertians, queue); }
+    if ( metals )   { sycl::free(metals, queue); }
+    if ( dielectrics ) { sycl::free(dielectrics, queue); }
+    if ( diffuse_lights ) { sycl::free(diffuse_lights, queue); }
+    if ( aabbs )    { sycl::free(aabbs, queue); }
+    if ( bvh_nodes ) { sycl::free(bvh_nodes, queue); }
+    if ( lights )   { sycl::free(lights, queue); }
+}
+#endif
+
+/// Free all scene memory using the Runtime abstraction.
+/// Uses rt->dealloc (which handles SYCL device or plain delete[]).
+inline void SceneView::free(rt::Runtime *rt) {
+    PROFILER_ZONE("SceneView_free");
+    auto de = [&](auto *&ptr) { if (ptr) { rt->dealloc(ptr); ptr = nullptr; } };
+    de(handles);
+    de(spheres);
+    de(triangles);
+    de(quads);
+    de(boxes);
+    de(lambertians);
+    de(metals);
+    de(dielectrics);
+    de(diffuse_lights);
+    de(aabbs);
+    de(bvh_nodes);
+    de(lights);
 }
 
 // ── SceneBuilder::add implementation ───────────────────────────────────
 
 inline void SceneBuilder::add(Hittable h, Material m) {
+    PROFILER_ZONE("SceneBuilder_add");
     Handle handle;
     Aabb box;
 
@@ -473,13 +482,13 @@ inline void SceneBuilder::add(Hittable h, Material m) {
 // ── SceneBuilder helper methods ────────────────────────────────────────
 
 template <typename T>
-T *SceneBuilder::upload_array(sycl::queue &queue, const std::vector<T> &host_vec) {
+T *SceneBuilder::upload_array(rt::Runtime *rt, const std::vector<T> &host_vec) {
     if ( host_vec.empty() ) {
         return nullptr;
     }
-    T *device_ptr = sycl::malloc_device<T>((int)host_vec.size(), queue);
-    queue.memcpy(device_ptr, host_vec.data(), host_vec.size() * sizeof(T)).wait();
-    return device_ptr;
+    T *ptr = rt->template alloc_device<T>((int)host_vec.size());
+    rt->copy_to_device(ptr, host_vec.data(), host_vec.size() * sizeof(T));
+    return ptr;
 }
 
 inline float SceneBuilder::compute_area(Handle h) const {
@@ -527,7 +536,7 @@ static float3 debug_material_color(const Handle &h,
         case MaterialType::DiffuseLight: {
             // Clamp emission to [0, 1] range for display
             float3 e = lights[midx].emit_color;
-            float max_c = sycl::fmax(sycl::fmax(e.x, e.y), e.z);
+            float max_c = math::fmax(math::fmax(e.x, e.y), e.z);
             if ( max_c > 1.f ) {
                 e = scale(e, 1.f / max_c);
             }
@@ -547,6 +556,7 @@ static void copy_float3(float dst[3], float3 src) {
 // ── SceneBuilder::build_debug_geometry ─────────────────────────────────
 
 inline void SceneBuilder::build_debug_geometry() {
+    PROFILER_ZONE("SceneBuilder_debug_geom");
     debug_spheres_.clear();
     debug_quads_.clear();
     debug_boxes_.clear();
@@ -598,6 +608,7 @@ inline void SceneBuilder::build_debug_geometry() {
 // ── SceneBuilder::build_bvh ────────────────────────────────────────────
 
 inline void SceneBuilder::build_bvh() {
+    PROFILER_ZONE("SceneBuilder_build_bvh");
     if ( handles_.empty() ) {
         return;
     }
@@ -716,37 +727,36 @@ inline void SceneBuilder::build_bvh() {
 
 // ── SceneBuilder::build ────────────────────────────────────────────────
 
-inline SceneView SceneBuilder::build(sycl::queue &queue) {
+inline SceneView SceneBuilder::build(rt::Runtime *rt) {
+    PROFILER_ZONE("SceneBuilder_build");
     SceneView view = {};
 
     // Upload per-type hittable arrays
-    view.spheres = upload_array(queue, spheres_);
-    view.num_spheres = (int)spheres_.size();
-    view.triangles = upload_array(queue, triangles_);
-    view.num_triangles = (int)triangles_.size();
-    view.quads = upload_array(queue, quads_);
-    view.num_quads = (int)quads_.size();
-    view.boxes = upload_array(queue, boxes_);
-    view.num_boxes = (int)boxes_.size();
+    auto upload = [&](const auto &vec, auto *&ptr, int &count) {
+        ptr = upload_array(rt, vec);
+        count = (int)vec.size();
+    };
 
-    // Upload per-type material arrays
-    view.lambertians = upload_array(queue, lambertians_);
-    view.num_lambertians = (int)lambertians_.size();
-    view.metals = upload_array(queue, metals_);
-    view.num_metals = (int)metals_.size();
-    view.dielectrics = upload_array(queue, dielectrics_);
-    view.num_dielectrics = (int)dielectrics_.size();
-    view.diffuse_lights = upload_array(queue, diffuse_lights_);
-    view.num_diffuse_lights = (int)diffuse_lights_.size();
+    upload(spheres_,        view.spheres,        view.num_spheres);
+    upload(triangles_,      view.triangles,      view.num_triangles);
+    upload(quads_,          view.quads,          view.num_quads);
+    upload(boxes_,          view.boxes,          view.num_boxes);
+    upload(lambertians_,    view.lambertians,    view.num_lambertians);
+    upload(metals_,         view.metals,         view.num_metals);
+    upload(dielectrics_,    view.dielectrics,    view.num_dielectrics);
+    upload(diffuse_lights_, view.diffuse_lights, view.num_diffuse_lights);
+    upload(handles_,        view.handles,        view.num_handles);
 
-    // Upload handles and per-handle AABBs
-    view.handles = upload_array(queue, handles_);
-    view.num_handles = (int)handles_.size();
-    view.aabbs = upload_array(queue, aabbs_);
+    // AABBs
+    if ( !aabbs_.empty() ) {
+        view.aabbs = upload_array(rt, aabbs_);
+    } else {
+        view.aabbs = nullptr;
+    }
 
     // BVH (upload if built via build_bvh())
     if ( !bvh_nodes_.empty() ) {
-        view.bvh_nodes = upload_array(queue, bvh_nodes_);
+        view.bvh_nodes = upload_array(rt, bvh_nodes_);
         view.num_bvh_nodes = num_bvh_nodes_;
         view.bvh_root = bvh_root_;
     } else {
@@ -767,7 +777,7 @@ inline SceneView SceneBuilder::build(sycl::queue &queue) {
             info.emission = diffuse_lights_[material_idx].emit_color;
             light_infos.push_back(info);
         }
-        view.lights = upload_array(queue, light_infos);
+        view.lights = upload_array(rt, light_infos);
         view.num_lights = (int)light_infos.size();
     } else {
         view.lights = nullptr;

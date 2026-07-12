@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <cstddef>
 
 enum class ParamType : uint8_t {
     FLOAT,
@@ -11,41 +10,42 @@ enum class ParamType : uint8_t {
     VEC3,
     ENUM,
 };
+// ── Type compatibility ────────────────────────────────────────────────
+// Maps C++ types to their canonical ParamType for compile-time dispatch.
+// Used by ParamLookup::read<T>() and StatWriter::write<T>() to validate
+// that the caller's C++ type matches the declared ParamType at runtime.
 
-struct ParamMeta {
-    const char*      name;
-    const char*      description;
-    ParamType        type;
+template <typename T> struct ParamTypeOf;
 
-    union {
-        struct { float   min_f, max_f, step_f; } f;
-        struct { int32_t min_i, max_i, step_i; } i;
-    } range;
+template <> struct ParamTypeOf<float>  { static constexpr ParamType value = ParamType::FLOAT; };
+template <> struct ParamTypeOf<int>    { static constexpr ParamType value = ParamType::INT; };
+template <> struct ParamTypeOf<bool>   { static constexpr ParamType value = ParamType::BOOL; };
 
-    union {
-        float                     default_f;
-        int32_t                   default_i;
-        bool                      default_b;
-        struct { float r,g,b; }   default_c3;
-        struct { float r,g,b,a; } default_c4;
-    };
+/// Check whether a declared ParamType is compatible with the requested
+/// read/write type.  The request parameter is the ParamType that the
+/// C++ type T would map to (e.g. float → FLOAT, int → INT).
+///
+/// Compatibility rules:
+///   - Identical types are always compatible.
+///   - Scalar types (FLOAT, INT, BOOL, ENUM) share 4-byte storage and
+///     are mutually compatible — kernels frequently read an INT param as
+///     float for arithmetic, or vice versa.
+///   - VEC3 and COLOR_RGB share 12-byte (3×float) storage.
+///   - COLOR_RGBA is 16 bytes and only compatible with itself.
+inline constexpr bool is_type_compatible(ParamType declared, ParamType requested) {
+    if (declared == requested) return true;
 
-    int32_t          enum_count;
-    const char**     enum_labels;
+    // 4-byte scalar group: FLOAT, INT, BOOL, ENUM
+    bool dec_scalar = (declared == ParamType::FLOAT  || declared == ParamType::INT ||
+                       declared == ParamType::BOOL   || declared == ParamType::ENUM);
+    bool req_scalar = (requested == ParamType::FLOAT  || requested == ParamType::INT ||
+                       requested == ParamType::BOOL   || requested == ParamType::ENUM);
+    if (dec_scalar && req_scalar) return true;
 
-    uint32_t         buffer_offset;
-    uint32_t         buffer_size;
-};
+    // 12-byte vector group: VEC3, COLOR_RGB
+    if ((declared == ParamType::VEC3 || declared == ParamType::COLOR_RGB) &&
+        (requested == ParamType::VEC3 || requested == ParamType::COLOR_RGB))
+        return true;
 
-static constexpr uint32_t param_buffer_size(const ParamMeta& p) {
-    switch (p.type) {
-    case ParamType::FLOAT:    return 4;
-    case ParamType::INT:      return 4;
-    case ParamType::BOOL:     return 4;
-    case ParamType::COLOR_RGB: return 12;
-    case ParamType::COLOR_RGBA: return 16;
-    case ParamType::VEC3:     return 12;
-    case ParamType::ENUM:     return 4;
-    }
-    return 0;
+    return false;
 }

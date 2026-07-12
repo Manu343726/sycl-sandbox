@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build *)",
+      "Bash(cmake --preset *)",
+      "Bash(make -C build *)",
+      "Bash(make -C build_debug *)",
+      "Bash(ACPP=/home/manu343726/.conan2/p/b/adapt677a56f031ae7/p)"
+    ]
+  }
+}

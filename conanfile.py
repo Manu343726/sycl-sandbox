@@ -19,7 +19,7 @@ class SyclSandboxConan(ConanFile):
         "freetype/2.13.3",
         "libcurl/8.12.1",
         "pugixml/1.14",
-        "nlohmann_json/3.12.0",
+        "nlohmann_json/3.11.3",
         "zstd/1.5.7",
     ]
 

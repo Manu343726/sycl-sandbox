@@ -1,0 +1,14 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,13 @@
+ cmake_minimum_required(VERSION 3.10)
++
++message(STATUS "============================================================")
++message(STATUS "NOTE: This is a patched AdaptiveCpp build from sycl-sandbox")
++message(STATUS "This build includes configurable log output via output_stream::set_stream(std::ostream&)")
++message(STATUS "Patch: conan/recipes/adaptivecpp/all/patches/set_stream_logging.patch")
++message(STATUS "============================================================")
+ 
+ if(POLICY CMP0074) # Since CMake 3.12
+   cmake_policy(SET CMP0074 NEW) # Don't complain about using OpenMP_ROOT...
+ endif()

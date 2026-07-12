@@ -1,8 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/profiler.h>
 
 namespace rt::materials {
 
@@ -14,11 +16,15 @@ public:
     }
 
     optional<ScatterRecord> scatter(const Ray &, const HitRecord &rec, RNG &rng) const {
+
+        PROFILER_ZONE("Lambertian_scatter");
         float3 target = add(rec.p, add(rec.normal, random_in_unit_sphere(rng)));
         return ScatterRecord {albedo, Ray {rec.p, sub(target, rec.p)}};
     }
 
     float3 emit(const HitRecord &) const {
+
+        PROFILER_ZONE("Lambertian_emit");
         return {0, 0, 0};
     }
 };

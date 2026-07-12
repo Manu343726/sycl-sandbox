@@ -1,8 +1,10 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
 #include <sycl-sandbox/optional.h>
+#include <sycl-sandbox/profiler.h>
 
 /// Metallic (reflective) material: reflects incoming rays with a fuzzy
 /// perturbation controlled by `fuzz`.  fuzz=0 gives a perfect mirror.
@@ -24,6 +26,7 @@ public:
     /// ray points into the surface (absorption).
     optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
+        PROFILER_ZONE("Metal_scatter");
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
         if ( dot(scattered.dir, hit.normal) <= 0 ) {
@@ -33,6 +36,8 @@ public:
     }
 
     float3 emit(const HitRecord &) const {
+
+        PROFILER_ZONE("Metal_emit");
         return {0, 0, 0};
     }
 };

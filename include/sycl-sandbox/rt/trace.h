@@ -1,10 +1,23 @@
 #pragma once
+#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/profiler_device.h>
 #include <sycl-sandbox/rt/types.h>
-#include <sycl-sandbox/rt/camera.h>
-#include <sycl-sandbox/rt/params.h>
-#include <sycl-sandbox/rt/scene_data.h>
+#include <sycl-sandbox/scene/camera.h>
+#include <sycl-sandbox/kernel/params.h>
+#include <sycl-sandbox/scene/data.h>
+#include <sycl-sandbox/kernel/execution_context.h>
 
 namespace rt {
+
+constexpr const char *KEY_SPP_FRAME    = "spp_frame";
+constexpr const char *KEY_MAX_BOUNCES  = "max_bounces";
+constexpr const char *KEY_CAM_EYE      = "cam_eye";
+constexpr const char *KEY_CAM_AT       = "cam_at";
+constexpr const char *KEY_CAM_UP       = "cam_up";
+constexpr const char *KEY_CAM_FOV      = "cam_fov";
+constexpr const char *KEY_CAM_APERTURE = "cam_aperture";
+constexpr const char *KEY_TICK         = "tick";
+constexpr const char *KEY_TIME         = "time";
 
 // ── Path tracing ───────────────────────────────────────────────────────
 
@@ -12,6 +25,7 @@ namespace rt {
 /// Uses per-handle dispatch to hit, scatter, and emit on the correct
 /// per-type arrays.
 inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces, RNG &rng) {
+    PROFILER_ZONE("trace_path");
     // Initialise the path throughput (attenuation) and the working ray
     float3 attenuation = {1, 1, 1};
     Ray ray_in_out = ray;
@@ -60,80 +74,85 @@ inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces, RNG
 
 // ── Render entry point ─────────────────────────────────────────────────
 
-template <typename BgFn>
-void render_main(sycl::queue *queue,
+/// KernelName is an explicit SYCL kernel name tag, unique per calling
+/// kernel .so — see rt::Runtime::foreach_pixel() for why this is required
+/// (AdaptiveCpp's kernel identity is derived from the mangled name of the
+/// enclosing function, which collides across .so's that reuse the same
+/// function name, e.g. every kernel's `render_kernel` entry point).
+template <typename KernelName, typename BgFn>
+void render_main(const Runtime &rt,
                  int width,
                  int height,
-                 const float *params,
+                 const ParamLookup &reader,
                  float *accum_buffer,
-                 int sample_index,
+                 uint32_t spp_total,
                  const SceneView &scene,
-                 BgFn &&background_fn) {
-    // Read standard camera and render parameters from the params buffer
-    int samples_per_frame = (int)params[RT_SPP_FRAME];
-    int max_bounces = (int)params[RT_MAX_BOUNCES];
+                 BgFn &&background_fn,
+                 profiler::DeviceRing prof = {}) {
+    PROFILER_FUNCTION();
+    // Read all parameters by name using the type-safe ParamLookup API.
+    // These reads happen on the host (before the pixel loop), so there
+    // is zero per-pixel lookup overhead.
+    int samples_per_frame = reader.read<int>(KEY_SPP_FRAME);
+    int max_bounces = reader.read<int>(KEY_MAX_BOUNCES);
 
-    float3 camera_eye, camera_at, camera_up;
-    memcpy(&camera_eye, params + RT_CAM_EYE, 12);
-    memcpy(&camera_at, params + RT_CAM_AT, 12);
-    memcpy(&camera_up, params + RT_CAM_UP, 12);
-    float field_of_view = params[RT_CAM_FOV];
-    float aperture_size = params[RT_CAM_APERTURE];
-    float aspect_ratio = (float)width / (float)height;
+    float3 camera_eye   = reader.read_vec3<float3>(KEY_CAM_EYE);
+    float3 camera_at    = reader.read_vec3<float3>(KEY_CAM_AT);
+    float3 camera_up    = reader.read_vec3<float3>(KEY_CAM_UP);
+    float field_of_view = reader.read<float>(KEY_CAM_FOV);
+    float aperture_size = reader.read<float>(KEY_CAM_APERTURE);
+    float aspect_ratio  = (float)width / (float)height;
 
     // Build the camera frustum from the lookAt parameters
     Camera camera = lookat(camera_eye, camera_at, camera_up, field_of_view, aspect_ratio);
 
-    // Launch a SYCL parallel_for over all pixels
-    queue
-        ->parallel_for(
-            sycl::range<2> {(size_t)height, (size_t)width},
-            [=](sycl::item<2> pixel) {
-                int x = pixel[1], y = pixel[0], flat_index = y * width + x;
+    // Iterate over every pixel through the Runtime abstraction.
+    // In SYCL mode this uses queue->parallel_for; in software mode it
+    // uses plain nested for-loops — no OpenMP, no SYCL in the kernel.
+    rt.foreach_pixel<KernelName>(width, height, [=](int x, int y, int flat_index) {
+        PROFILER_DEVICE_ZONE(prof, "trace_px", flat_index);
+        for ( int sample = 0; sample < samples_per_frame; sample++ ) {
+            // Initialise the per-pixel, per-sample RNG from the pixel index and
+            // total accumulated samples for stream decorrelation.
+            RNG rng {static_cast<uint32_t>(flat_index * 6364136223846793005ull +
+                                           (uint64_t)(spp_total * 2654435761u) +
+                                           sample)};
 
-                for ( int sample = 0; sample < samples_per_frame; sample++ ) {
-                    // Initialise the per-pixel, per-sample RNG from the pixel index and frame
-                    // number
-                    RNG rng {static_cast<uint32_t>(flat_index * 6364136223846793005ull +
-                                                   (uint64_t)(sample_index * 2654435761u) +
-                                                   sample)};
+            // Generate stratified pixel coordinates with random offsets
+            float u = (x + rng.next()) / (float)width;
+            float v = (y + rng.next()) / (float)height;
 
-                    // Generate stratified pixel coordinates with random offsets
-                    float u = (x + rng.next()) / (float)width;
-                    float v = (y + rng.next()) / (float)height;
+            // Optionally jitter the ray origin for depth-of-field effects
+            float3 ray_origin = camera.origin;
+            if ( aperture_size > 0.f ) {
+                float3 jitter = scale(random_in_unit_sphere(rng), aperture_size * 0.5f);
+                ray_origin.x += jitter.x;
+                ray_origin.y += jitter.y;
+            }
 
-                    // Optionally jitter the ray origin for depth-of-field effects
-                    float3 ray_origin = camera.origin;
-                    if ( aperture_size > 0.f ) {
-                        float3 jitter = scale(random_in_unit_sphere(rng), aperture_size * 0.5f);
-                        ray_origin.x += jitter.x;
-                        ray_origin.y += jitter.y;
-                    }
+            // Construct the primary ray from the camera frustum
+            Ray ray;
+            ray.orig = ray_origin;
+            ray.dir = norm(sub(add(add(camera.lower_left, scale(camera.horizontal, u)),
+                                   scale(camera.vertical, v)),
+                               ray_origin));
 
-                    // Construct the primary ray from the camera frustum
-                    Ray ray;
-                    ray.orig = ray_origin;
-                    ray.dir = norm(sub(add(add(camera.lower_left, scale(camera.horizontal, u)),
-                                           scale(camera.vertical, v)),
-                                       ray_origin));
+            // Trace the ray and accumulate its colour
+            float3 colour = trace(ray, scene, max_bounces, rng);
 
-                    // Trace the ray and accumulate its colour
-                    float3 colour = trace(ray, scene, max_bounces, rng);
+            // If the ray hit nothing (colour is black), use the background colour
+            if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
+                colour = background_fn(ray);
+            }
 
-                    // If the ray hit nothing (colour is black), use the background colour
-                    if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
-                        colour = background_fn(ray);
-                    }
-
-                    // Accumulate the sample into the RGBA output buffer
-                    int base = flat_index * 4;
-                    accum_buffer[base + 0] += colour.x;
-                    accum_buffer[base + 1] += colour.y;
-                    accum_buffer[base + 2] += colour.z;
-                    accum_buffer[base + 3] += 1.0f;
-                }
-            })
-        .wait();
+            // Accumulate the sample into the RGBA output buffer
+            int base = flat_index * 4;
+            accum_buffer[base + 0] += colour.x;
+            accum_buffer[base + 1] += colour.y;
+            accum_buffer[base + 2] += colour.z;
+            accum_buffer[base + 3] += 1.0f;
+        }
+    });
 }
 
 } // namespace rt

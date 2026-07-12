@@ -104,15 +104,13 @@ auto scattered = handle_scatter(winning_handle, ray, *closest_hit, rng, scene);
 
 ## Anatomy of a minimal raytracer kernel
 
-Standard params (SPP, bounces, camera) are **implicit** — kernels don't
-declare them in `params_meta[]`.  The host allocates space for them at
-fixed `rt_std_param` indices and fills defaults via `init_std_params()`.
-Kernels only declare their own kernel-specific params.
+All parameters (including standard ones like SPP, bounces, camera) are
+declared in the YAML scene file and managed by `SceneDescriptor`.  Kernels
+read parameters by name via `ParamLookup::read<T>("name")`.
 
 ```cpp
 #include <sycl-sandbox/rt/types.h>      // Object, Hittable, Material
 #include <sycl-sandbox/rt/trace.h>      // rt::render_main()
-#include <sycl-sandbox/rt/params.h>     // rt_std_param enum (implicit)
 #include <sycl-sandbox/rt/scene_data.h> // SceneBuilder, SceneView
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
@@ -122,11 +120,7 @@ using namespace rt;
 using rt::materials::lambertian;
 using rt::materials::diffuse_light;
 
-// ── Params (kernel-specific only; standard 0–12 are implicit) ──────────
-static ParamMeta params_meta[] = {
-    {"light_color",…}, {"light_strength",…},
-};
-enum { PARAM_LIGHT_COLOR = 0, PARAM_LIGHT_STRENGTH = PARAM_LIGHT_COLOR + 3 };
+// ── Kernel-specific params are read by name from the buffer ───────────
 
 // ── Scene state ───────────────────────────────────────────────────────
 static SceneBuilder scene;
@@ -135,8 +129,10 @@ static SceneView scene_view = {};
 // ── Scene builder (host, called by init_kernel) ────────────────────────
 extern "C" void init_kernel(sycl::queue* queue, int, int,
                             const void* params, size_t) {
-    const float* p = (const float*)params;
-    // read kernel-specific params, build geometry with scene.add(…)
+    rt::ParamLookup lookup(/* ... */);
+    // Read kernel-specific params by name — type-safe
+    // float3 light_color = lookup.read<float3>("light_color");
+    // Build geometry with scene.add(…)
     scene = SceneBuilder();
     scene.add({hittables::quad(axis, value, …), lambertian(color)});
     scene.add({hittables::box(cx, cy, cz, sx, sy, sz), lambertian(color)});
@@ -197,23 +193,24 @@ optional<ScatterRecord>  scatter(const Ray&, const HitRecord&, RNG&) const;
 
 ## Standard parameter layout
 
-Every raytracer kernel's params buffer starts with these seven values
-(`enum rt_std_param` in `params.h`), in this exact order:
+All parameters are declared in the YAML scene file.  Camera parameters
+(`cam_eye`, `cam_at`, `cam_up`, `cam_fov`, `cam_aperture` for 3D; 
+`center_x`, `center_y`, `zoom` for 2D) are auto-generated from `scene_type`.
+Standard render params (`spp_frame`, `max_bounces`, `tick`, `time`) are
+also auto-injected.
 
-| Index | Name            | Type   | Description                     |
-|-------|-----------------|--------|---------------------------------|
-| 0     | RT_SPP_FRAME    | int    | Samples per frame               |
-| 1     | RT_MAX_BOUNCES  | int    | Maximum ray path depth          |
-| 2–4   | RT_CAM_EYE      | VEC3   | Camera position                 |
-| 5–7   | RT_CAM_AT       | VEC3   | Look-at target                  |
-| 8     | RT_CAM_FOV      | float  | Vertical field of view (deg)    |
-| 9     | RT_CAM_APERTURE | float  | Depth-of-field aperture         |
-| 10–12 | RT_CAM_UP       | VEC3   | Camera up vector                |
-| 13+   | —               | —      | Kernel-specific parameters      |
+The host builds the buffer layout via `SceneDescriptor::build_layout()` and
+provides a `ParamLookup` for kernel-side name-based reads:
 
-`rt::render_main()` reads indices 0–12 directly from the params buffer and
-ignores everything beyond.  Kernel-specific params use a plain anonymous
-`enum { PARAM_X = RT_NUM_STD_PARAMS, … }` for implicit int conversion.
+```cpp
+// Kernel-side: read by name, type-checked at compile time
+rt::ParamLookup lookup(/* entries from SceneDescriptor */);
+int spp = lookup.read<int>("spp_frame");
+float3 eye = lookup.read<float3>("cam_eye");
+```
+
+Kernel-specific params are declared in the YAML under `params:` and read
+by name — no enum indexing needed.
 
 ## File structure
 
@@ -227,7 +224,6 @@ include/sycl-sandbox/
     helpers.h         — random_in_unit_sphere, reflect, refract, schlick
     variant.h         — forward to sycl-sandbox/variant.h
     camera.h          — Camera struct, lookat()
-    params.h          — rt_std_param enum
     scene_data.h      — Handle, SceneView, SceneBuilder, handle dispatch
     trace.h           — trace(), render_main<>()
     scene.h           — Axis enum, quad_corner

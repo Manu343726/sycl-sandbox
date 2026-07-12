@@ -1,9 +1,0 @@
-sources:
-  "25.10.0":
-    url: "https://github.com/AdaptiveCpp/AdaptiveCpp/archive/da2463e45aa90aa36306c45abcfc05b87de51bc6.tar.gz"
-    sha256: "c38cf1e36fb033221d3f6b096b62a4211265c4110874bbcdfb195bb1cc60d008"
-patches:
-  "25.10.0":
-    - patch_file: "patches/llvm22-pass-plugin.patch"
-      patch_description: "Fix include path for LLVM 22 (PassPlugin.h moved to llvm/Plugins/)"
-      patch_type: "portability"
