@@ -2,6 +2,15 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "capture vgl env",
+            "type": "shell",
+            "command": "env VGL_DISPLAY=egl vglrun bash -c 'env | grep -iE \"vgl|ld_preload|display\"' | grep -vE '^\\[VGL\\]' > .env",
+            "runOptions": {
+                "runOn": "folderOpen"
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "build release",
             "type": "shell",
             "command": "cmake --preset conan-release -B build && make -C build -j4",

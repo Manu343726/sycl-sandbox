@@ -34,12 +34,75 @@ Interactive GPU/CPU rendering sandbox with hot-reloadable SYCL kernels. Built wi
 
 ### 1. Register the local recipes index
 
-The project ships a patched version of AdaptiveCpp in `conan/recipes/`
-that adds an `output_stream::set_stream()` API for redirecting AdaptiveCpp's
-internal logging through spdlog.  Register it as a local Conan remote:
+`conan/` is a [local-recipes-index](https://docs.conan.io/2/devops/devops_local_recipes_index.html)
+repository: a local Conan remote (mirroring the conan-center-index layout) that hosts the
+project's patched recipe for [AdaptiveCpp](https://github.com/AdaptiveCpp/AdaptiveCpp),
+which is not available on ConanCenter. The patch adds an `output_stream::set_stream()`
+API for redirecting AdaptiveCpp's internal logging through spdlog. Register it as a
+local Conan remote (once per machine, it points to this checkout):
 
 ```bash
-conan remote add sycl-sandbox-dependencies ./conan --allowed-packages="adaptivecpp/*"
+conan remote add sycl-sandbox-dependencies ./conan --type=local-recipes-index --allowed-packages="adaptivecpp/*"
+```
+
+- `--type=local-recipes-index` makes Conan read recipes from a local folder
+- `--allowed-packages=adaptivecpp/*` ensures Conan only ever resolves `adaptivecpp` from it
+
+This must be done once after cloning — the remote is local and stays in your
+Conan configuration. It is a recipes-only remote (no binaries), so `--build=missing`
+compiles AdaptiveCpp from source on first install.
+
+### 2. Build the patched AdaptiveCpp package
+
+Build the patched AdaptiveCpp once so it's cached locally:
+
+```bash
+# Release build (used by ./build/src/sycl-sandbox)
+conan create conan/recipes/adaptivecpp/all \
+    -o '&:with_cuda=True' -o '&:with_openmp=True' -o '&:experimental_llvm=True'
+
+# Debug build (used by ./build_debug/src/sycl-sandbox, for gdb)
+conan create conan/recipes/adaptivecpp/all \
+    -s build_type=Debug \
+    -o '&:with_cuda=True' -o '&:with_openmp=True' -o '&:experimental_llvm=True'
+```
+
+### 3. Install dependencies and build
+
+```bash
+conan install . -of build --build missing
+cmake --preset conan-release -B build
+make -C build -j$(nproc)
+
+# Build Debug (for debugging with gdb)
+conan install . -of build_debug -s build_type=Debug --build missing
+cmake --preset conan-debug -B build_debug
+make -C build_debug -j$(nproc)
+```
+
+> **Note:** AdaptiveCpp is compiled from source by Conan and may take several
+> minutes.  The result is cached in your local Conan cache.
+
+### 4. Tracy (optional profiler support)
+
+```bash
+# Build with Tracy profiler support
+cmake --preset conan-release -B build -DTRACY_PROFILER=ON
+make -C build -j$(nproc)
+
+# Build the Tracy server UI (standalone profiler application)
+cmake --build build --target tracy-server
+```
+
+### Recipe changes
+
+Once a recipe revision is cached locally, Conan keeps using it and won't re-export from the
+local repository. After editing a recipe under `conan/recipes/`, purge the cached revision so
+it's re-exported and rebuilt on next install:
+
+```bash
+conan remove adaptivecpp/25.10.0 -c
+conan install . -of build --build missing
 ```
 
 This must be done once after cloning — the remote is local and stays in your
@@ -87,13 +150,22 @@ make -C build -j$(nproc)
 cmake --build build --target tracy-server
 ```
 
-### CUDA libdevice note
+### CUDA toolkit detection
 
-AdaptiveCpp's JIT compiler needs `libdevice.10.bc` to compile kernels to PTX for GPU execution.
-If you get `Could not open file /opt/cuda/lib64/libdevice.10.bc`:
+The AdaptiveCpp recipe auto-detects the CUDA toolkit among `$CUDA_HOME`, `$CUDA_PATH`,
+`/usr/local/cuda`, and `/opt/cuda` (set `CUDA_HOME` to override). AdaptiveCpp's JIT compiler
+also needs `libdevice.10.bc` to compile kernels to PTX for GPU execution. If you get
+`Could not open file ... libdevice.10.bc`, the CUDA toolkit stores it in `nvvm/libdevice/`
+— symlink it next to the toolkit's other libs:
 
 ```bash
-sudo ln -sf /opt/cuda/nvvm/libdevice/libdevice.10.bc /opt/cuda/lib64/libdevice.10.bc
+sudo ln -sf /usr/local/cuda/nvvm/libdevice/libdevice.10.bc /usr/local/cuda/lib64/libdevice.10.bc
+```
+
+On systems without a CUDA toolkit, build without the CUDA backend instead:
+
+```bash
+conan install . -of build --build missing -o adaptivecpp/*:with_cuda=False
 ```
 
 ## Usage
@@ -132,6 +204,14 @@ The camera controls only appear when the active kernel exposes the relevant para
 ```
 ├── CMakeLists.txt           # Root build file
 ├── conanfile.py             # Conan dependency recipe
+├── conan/                   # Local Conan repository (local-recipes-index remote)
+│   └── recipes/
+│       └── adaptivecpp/     # Custom AdaptiveCpp recipe (not on ConanCenter)
+│           ├── config.yml   # Maps versions to recipe folders
+│           └── all/
+│               ├── conanfile.py
+│               ├── conandata.yml
+│               └── patches/ # set_stream_logging + LLVM 22 compat patches
 ├── scenes/*.yaml            # Scene definitions (kernel + parameter overrides)
 ├── kernels/                 # SYCL kernel shared libraries
 │   ├── mandelbrot/          # Mandelbrot fractal

@@ -72,6 +72,12 @@ class AdaptiveCppConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
+        llvm_root = os.environ.get(
+            "ACPP_LLVM_ROOT", "/usr/lib/llvm-22")
+        llvm_dir = os.path.join(llvm_root, "lib", "cmake", "llvm")
+        if os.path.isdir(llvm_dir):
+            tc.variables["LLVM_ROOT"] = llvm_root
+            tc.variables["LLVM_DIR"] = llvm_dir
         tc.variables["WITH_CUDA_BACKEND"] = self.options.with_cuda
         tc.variables["WITH_ROCM_BACKEND"] = False
         tc.variables["WITH_LEVEL_ZERO_BACKEND"] = False
@@ -79,10 +85,27 @@ class AdaptiveCppConan(ConanFile):
         tc.variables["ACPP_EXPERIMENTAL_LLVM"] = self.options.experimental_llvm
 
         if self.options.with_cuda:
-            tc.variables["CUDA_TOOLKIT_ROOT_DIR"] = "/opt/cuda"
-            tc.variables["CUDA_DEVICE_LIBS_PATH"] = "/opt/cuda/lib64"
+            cuda_root = self._cuda_toolkit_root()
+            if cuda_root is None:
+                raise ConanException(
+                    "with_cuda=True but no CUDA toolkit found. Set CUDA_HOME or install the "
+                    "CUDA toolkit, or build with '-o adaptivecpp/*:with_cuda=False'."
+                )
+            tc.variables["CUDA_TOOLKIT_ROOT_DIR"] = cuda_root
+            device_libs = os.path.join(cuda_root, "nvvm", "libdevice")
+            if not os.path.isdir(device_libs):
+                device_libs = os.path.join(cuda_root, "lib64")
+            tc.variables["CUDA_DEVICE_LIBS_PATH"] = device_libs
 
         tc.generate()
+
+    @staticmethod
+    def _cuda_toolkit_root():
+        for candidate in (os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH"),
+                          "/usr/local/cuda", "/opt/cuda"):
+            if candidate and os.path.isdir(os.path.join(candidate, "bin")):
+                return candidate
+        return None
 
     def build(self):
         cmake = CMake(self)
