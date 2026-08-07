@@ -14,7 +14,12 @@ public:
     explicit DiffuseLight(float3 e) : emit_color(e) {
     }
 
-    optional<ScatterRecord> scatter(const Ray &, const HitRecord &, RNG &) const {
+    optional<ScatterRecord> scatter(const Ray &incoming_ray, const HitRecord &rec, RNG &) const {
+        // Portal records teleport (emission is checked before scatter, so
+        // an emissive portal terminates the path instead).
+        if ( rec.is_portal ) {
+            return portal_scatter(incoming_ray, rec);
+        }
         PROFILER_ZONE("DiffuseLight_scatter");
         return nullopt;
     }

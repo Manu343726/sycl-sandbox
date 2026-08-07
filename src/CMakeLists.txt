@@ -1,4 +1,6 @@
-cmake_policy(SET CMP0169 OLD)
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
 
 # ---- args (header-only CLI parser) ----
 include(FetchContent)

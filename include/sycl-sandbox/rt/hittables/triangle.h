@@ -72,6 +72,24 @@ public:
         rec.p = hit_point;
         rec.normal = (denom < 0) ? normal : scale(normal, -1.f);
         rec.front_face = denom < 0;
+        // Barycentric coordinates double as texture (u, v): u weights
+        // vertex b, v weights vertex c (both in [0,1] inside the triangle).
+        rec.u = u;
+        rec.v = v;
+        return rec;
+    }
+
+    /// Map parametric coordinates back onto the triangle surface (inverse
+    /// of hit()'s barycentric mapping): p = a + u·(b−a) + v·(c−a).  Used by
+    /// portals to place the exit hit at the entry hit's UVs.
+    HitRecord point_at_uv(float u, float v) const {
+        HitRecord rec;
+        rec.p = add(add(a, scale(sub(b, a), u)), scale(sub(c, a), v));
+        rec.normal = normal;
+        rec.t = 0.f;
+        rec.front_face = true;
+        rec.u = u;
+        rec.v = v;
         return rec;
     }
 };

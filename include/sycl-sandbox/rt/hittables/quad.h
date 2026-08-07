@@ -83,6 +83,24 @@ public:
         rec.p = hit_point;
         rec.normal = (denom < 0) ? normal : scale(normal, -1.f);
         rec.front_face = denom < 0;
+        // Parametric coordinates: (α, β) are already in [0,1] within the
+        // quad, so they double as texture (u, v) directly.
+        rec.u = alpha;
+        rec.v = beta;
+        return rec;
+    }
+
+    /// Map parametric coordinates back onto the quad surface (inverse of
+    /// hit()'s α/β): p = base + u·edge_u + v·edge_v.  Used by portals to
+    /// place the exit hit at the entry hit's parametric coordinates.
+    HitRecord point_at_uv(float u, float v) const {
+        HitRecord rec;
+        rec.p = add(add(base, scale(edge_u, u)), scale(edge_v, v));
+        rec.normal = normal;
+        rec.t = 0.f;
+        rec.front_face = true;
+        rec.u = u;
+        rec.v = v;
         return rec;
     }
 };

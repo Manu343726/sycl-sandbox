@@ -82,6 +82,7 @@ inline void render_thread_func(AppState &state) {
     // Resolve device zone-id hashes for the profiler UI.
     state.kernel_profiler.register_device_zone("trace_px");
     state.kernel_profiler.register_device_zone("tonemap_px");
+    state.kernel_profiler.register_device_zone("colorchecker_px");
 
     while ( state.render_running.load() ) {
         // ── Wait until kernel is fully initialized ───────────────
@@ -203,6 +204,43 @@ inline void render_thread_func(AppState &state) {
 
         uint64_t host_t0 = profiler::DeviceRing::timestamp();
 
+        // ── Debug pipeline overrides (standard scene params) ───────
+        // debug_colorchecker:     bypass kernel execution, render a
+        //                         ColorChecker chart instead — the
+        //                         tone-map + swapchain continue as usual.
+        // debug_colorchecker_raw: bypass kernel AND tone-map, write the
+        //                         chart directly (raw sRGB) to the
+        //                         display slot.
+        bool dbg_colorchecker = false;
+        bool dbg_colorchecker_raw = false;
+        if ( auto *desc = state.kr->scene_desc() ) {
+            auto read_flag = [&](const char *name) {
+                auto ref = desc->find_param_ref(name);
+                if ( !ref.valid() ) return false;
+                return *(const float *)((const char *)state.kr->d_params() +
+                                        ref.offset()) != 0.f;
+            };
+            dbg_colorchecker = read_flag("debug_colorchecker");
+            dbg_colorchecker_raw = read_flag("debug_colorchecker_raw");
+        }
+
+        // ── Tone-map settings (standard scene params) ───────────────
+        // tonemap_enabled / tonemap_operator / tonemap_exposure /
+        // tonemap_gamma — auto-generated, scenes may override defaults.
+        tonemap::Params tmap;
+        if ( auto *desc = state.kr->scene_desc() ) {
+            auto read_f = [&](const char *name) -> const float * {
+                auto ref = desc->find_param_ref(name);
+                if ( !ref.valid() || !state.kr->d_params() ) return nullptr;
+                return (const float *)((const char *)state.kr->d_params() +
+                                       ref.offset());
+            };
+            if ( auto *p = read_f("tonemap_enabled") ) tmap.enabled = *p != 0.f;
+            if ( auto *p = read_f("tonemap_operator") ) tmap.operator_id = (int)*p;
+            if ( auto *p = read_f("tonemap_exposure") ) tmap.exposure = *p;
+            if ( auto *p = read_f("tonemap_gamma") ) tmap.gamma = *p;
+        }
+
         RenderContext ctx = {
             w, h,
             state.kr->d_params(),
@@ -213,16 +251,44 @@ inline void render_thread_func(AppState &state) {
             ring,
             state.kr->stat_writer()
         };
-        call_render_kernel(state.kr->kernel()->handle, q, ctx);
+        if ( !dbg_colorchecker && !dbg_colorchecker_raw )
+            call_render_kernel(state.kr->kernel()->handle, q, ctx);
 
         sycl::event done{};
         if ( slot >= 0 && staging ) {
             if ( q ) {
-                done = tonemap::enqueue(*q, state.kr->d_accum(), staging,
-                                        w, h, ring);
+                if ( dbg_colorchecker_raw ) {
+                    done = tonemap::enqueue_colorchecker_raw(*q, staging,
+                                                             w, h);
+                } else if ( dbg_colorchecker ) {
+                    // Fill accum with the inverse tone-mapped chart, then
+                    // run the standard tone-map — the displayed frame is
+                    // exactly the reference chart through the unmodified
+                    // pipeline.  The fill is calibrated against Reinhard +
+                    // gamma 2.2, so force those settings regardless of the
+                    // live tone-map params.
+                    tonemap::enqueue_colorchecker_fill(*q,
+                                                       state.kr->d_accum(),
+                                                       w, h, ring);
+                    tonemap::Params cal{true};   // enabled, Reinhard, 2.2
+                    done = tonemap::enqueue(*q, state.kr->d_accum(), staging,
+                                            w, h, cal, ring);
+                } else {
+                    done = tonemap::enqueue(*q, state.kr->d_accum(), staging,
+                                            w, h, tmap, ring);
+                }
             } else {
                 // Software backend: render already completed synchronously.
-                tonemap::run_cpu(state.kr->d_accum(), staging, w, h);
+                if ( dbg_colorchecker_raw ) {
+                    tonemap::run_cpu_colorchecker_raw(staging, w, h);
+                } else if ( dbg_colorchecker ) {
+                    tonemap::run_cpu_colorchecker_fill(state.kr->d_accum(),
+                                                       w, h);
+                    tonemap::Params cal{true};   // calibrated fill path
+                    tonemap::run_cpu(state.kr->d_accum(), staging, w, h, cal);
+                } else {
+                    tonemap::run_cpu(state.kr->d_accum(), staging, w, h, tmap);
+                }
             }
         }
 

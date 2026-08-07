@@ -17,7 +17,7 @@ static void render_top_zones(KernelProfiler& profiler, TimelineState& ts) {
     ImGui::Text("Total"); ImGui::NextColumn();
     ImGui::Text("Avg"); ImGui::NextColumn();
     ImGui::Text("Max"); ImGui::NextColumn();
-    ImGui::Text("% Total"); ImGui::NextColumn();
+    ImGui::Text("%% Total"); ImGui::NextColumn();
     ImGui::Separator();
 
     uint64_t grand_total = 0;

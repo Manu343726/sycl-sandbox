@@ -16,6 +16,7 @@ using rt::materials::lambertian;
 using rt::materials::metal;
 using rt::materials::dielectric;
 using rt::materials::diffuse_light;
+using rt::materials::textured_lambertian;
 
 namespace scene_loader {
 
@@ -286,6 +287,91 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
         desc.params.push_back(std::move(tm));
     }
 
+    // ── 1c. Auto-generated debug params ───────────────────────────
+    // Standard debugging switches for the kernel processing and rendering
+    // pipeline.  Consumed by the render thread; see render_loop.h.
+    {
+        ParamDescriptor dbg;
+        dbg.name = "debug_colorchecker";
+        dbg.description =
+            "Bypass kernel execution and render a standard 24-patch "
+            "ColorChecker chart instead. The tone-mapping step and the "
+            "display swapchain continue as usual.";
+        dbg.type = ParamType::BOOL;
+        dbg.category = ParamCategory::Render;
+        dbg.default_b = false;
+        desc.params.push_back(std::move(dbg));
+    }
+    {
+        ParamDescriptor dbg;
+        dbg.name = "debug_colorchecker_raw";
+        dbg.description =
+            "Bypass kernel execution AND the tone-mapping step; display "
+            "the ColorChecker chart directly (raw sRGB, no gamma).";
+        dbg.type = ParamType::BOOL;
+        dbg.category = ParamCategory::Render;
+        dbg.default_b = false;
+        desc.params.push_back(std::move(dbg));
+    }
+
+    // ── 1d. Auto-generated tone-map params ─────────────────────────
+    // Standard display-pipeline settings, consumed by the render
+    // thread (see render_loop.h).  Scenes may override the defaults
+    // through the YAML `params:` section (merged in step 3).
+    {
+        ParamDescriptor tm;
+        tm.name = "tonemap_enabled";
+        tm.description =
+            "Enable the tone-mapping stage of the display pipeline. "
+            "When disabled, accumulated linear values are normalized "
+            "and hard-clamped to [0,1] with no operator or gamma.";
+        tm.type = ParamType::BOOL;
+        tm.category = ParamCategory::Render;
+        tm.default_b = false;
+        desc.params.push_back(std::move(tm));
+    }
+    {
+        ParamDescriptor tm;
+        tm.name = "tonemap_operator";
+        tm.description =
+            "Tone-map operator: 0 = Reinhard (x/(1+x)), "
+            "1 = ACES fitted (Narkowicz 2015), "
+            "2 = Filmic (Hable / Uncharted 2 curve).";
+        tm.type = ParamType::ENUM;
+        tm.category = ParamCategory::Render;
+        tm.default_i = 0;
+        tm.enum_options = {"Reinhard", "ACES (fitted)", "Filmic (Hable)"};
+        desc.params.push_back(std::move(tm));
+    }
+    {
+        ParamDescriptor tm;
+        tm.name = "tonemap_exposure";
+        tm.description =
+            "Exposure multiplier applied to the linear HDR value "
+            "before the tone-map operator.";
+        tm.type = ParamType::FLOAT;
+        tm.category = ParamCategory::Render;
+        tm.default_f = 1.0f;
+        tm.has_range = true;
+        tm.range_min_f = 0.0f;
+        tm.range_max_f = 8.0f;
+        desc.params.push_back(std::move(tm));
+    }
+    {
+        ParamDescriptor tm;
+        tm.name = "tonemap_gamma";
+        tm.description =
+            "Display gamma for the final sRGB-like correction "
+            "(value = pow(clamp(c), 1/gamma)).";
+        tm.type = ParamType::FLOAT;
+        tm.category = ParamCategory::Render;
+        tm.default_f = 2.2f;
+        tm.has_range = true;
+        tm.range_min_f = 1.0f;
+        tm.range_max_f = 4.0f;
+        desc.params.push_back(std::move(tm));
+    }
+
     // ── 2. Auto-generated camera params  ────────────────────────────
     if (desc.scene_type == "2d") {
         for (auto &p : auto_camera_params_2d())
@@ -296,24 +382,20 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
     }
 
     // ── 3. Kernel-specific params from YAML ─────────────────────────
+    // YAML-declared params may also OVERRIDE the default value, range,
+    // description, or enum choices of an auto-generated standard param
+    // (e.g. `tonemap_enabled: true` in a scene that wants tone-mapping
+    // on by default).  The merge keeps the auto-generated layout/type.
     auto params_node = root["params"];
     if (params_node && params_node.IsMap()) {
         for (auto it = params_node.begin(); it != params_node.end(); ++it) {
             std::string pname = it->first.as<std::string>();
 
-            if (pname == "spp_frame" || pname == "max_bounces" ||
-                pname == "tick" || pname == "time" ||
-                pname == "cam_eye" || pname == "cam_at" || pname == "cam_up" ||
-                pname == "cam_fov" || pname == "cam_aperture" ||
-                pname == "center_x" || pname == "center_y" || pname == "zoom") {
-                spdlog::warn("[scene] '{}' conflicts with auto-generated param, skipping", pname);
-                continue;
-            }
-
             YAML::Node pval = it->second;
             ParamDescriptor pd;
             pd.name = pname;
             pd.category = ParamCategory::Kernel;
+            bool has_default = false;
 
             if (pval.IsMap() && pval["type"]) {
                 std::string ptype = pval["type"].as<std::string>();
@@ -321,6 +403,7 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
 
                 if (ptype == "int") {
                     pd.type = ParamType::INT;
+                    has_default = pval["default"].IsDefined();
                     pd.default_i = pval["default"] ? pval["default"].as<int>() : 0;
                     if (pval["range"] && pval["range"].size() == 2) {
                         pd.has_range = true;
@@ -329,6 +412,7 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
                     }
                 } else if (ptype == "float") {
                     pd.type = ParamType::FLOAT;
+                    has_default = pval["default"].IsDefined();
                     pd.default_f = pval["default"] ? pval["default"].as<float>() : 0.0f;
                     if (pval["range"] && pval["range"].size() == 2) {
                         pd.has_range = true;
@@ -338,6 +422,7 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
                 } else if (ptype == "color" || ptype == "color_rgb") {
                     pd.type = ParamType::COLOR_RGB;
                     pd.buffer_size = 12;
+                    has_default = pval["default"].IsDefined();
                     if (pval["default"] && pval["default"].IsSequence() && pval["default"].size() >= 3) {
                         pd.default_c3 = {pval["default"][0].as<float>(),
                                          pval["default"][1].as<float>(),
@@ -346,6 +431,7 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
                 } else if (ptype == "vec3") {
                     pd.type = ParamType::VEC3;
                     pd.buffer_size = 12;
+                    has_default = pval["default"].IsDefined();
                     if (pval["default"] && pval["default"].IsSequence() && pval["default"].size() >= 3) {
                         pd.default_c3 = {pval["default"][0].as<float>(),
                                          pval["default"][1].as<float>(),
@@ -353,7 +439,17 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
                     }
                 } else if (ptype == "bool") {
                     pd.type = ParamType::BOOL;
+                    has_default = pval["default"].IsDefined();
                     pd.default_b = pval["default"] ? pval["default"].as<bool>() : false;
+                } else if (ptype == "enum") {
+                    pd.type = ParamType::ENUM;
+                    has_default = pval["default"].IsDefined();
+                    pd.default_i = pval["default"] ? pval["default"].as<int>() : 0;
+                    if (pval["options"] && pval["options"].IsSequence()) {
+                        for (auto opt : pval["options"]) {
+                            pd.enum_options.push_back(opt.as<std::string>());
+                        }
+                    }
                 } else if (ptype == "string") {
                     pd.type = ParamType::ENUM;
                     pd.default_i = 0;
@@ -362,6 +458,7 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
             } else {
                 pd.description = "";
                 if (pval.IsScalar()) {
+                    has_default = true;
                     int int_val;
                     try { int_val = pval.as<int>(); pd.type = ParamType::INT; pd.default_i = int_val; }
                     catch (...) {
@@ -370,12 +467,62 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
                         pd.default_f = flt_val;
                     }
                 } else if (pval.IsSequence() && pval.size() == 3) {
+                    has_default = true;
                     pd.type = ParamType::COLOR_RGB;
                     pd.buffer_size = 12;
                     pd.default_c3 = {pval[0].as<float>(), pval[1].as<float>(), pval[2].as<float>()};
                 }
             }
             pd.buffer_size = param_buffer_size_for_type(pd.type);
+
+            // ── Merge into an auto-generated standard param? ────────
+            if ( auto *existing = desc.find(pname) ) {
+                // Keep the auto-generated layout/type/category; apply
+                // the YAML-provided default/range/description/options.
+                spdlog::info("[scene] '{}' overrides standard param defaults", pname);
+                if ( has_default ) {
+                    // The YAML parse may infer a different scalar type
+                    // (2 vs 2.0); convert numerically to the standard
+                    // param's declared type.
+                    switch ( existing->type ) {
+                        case ParamType::INT:
+                        case ParamType::ENUM:
+                            existing->default_i =
+                                (pd.type == ParamType::FLOAT) ? (int)pd.default_f : pd.default_i;
+                            break;
+                        case ParamType::FLOAT:
+                            existing->default_f =
+                                (pd.type == ParamType::FLOAT) ? pd.default_f : (float)pd.default_i;
+                            break;
+                        case ParamType::BOOL:
+                            existing->default_b =
+                                (pd.type == ParamType::BOOL) ? pd.default_b
+                                                            : (pd.default_f != 0.0f || pd.default_i != 0);
+                            break;
+                        case ParamType::COLOR_RGB:
+                        case ParamType::VEC3:
+                            existing->default_c3 = pd.default_c3;
+                            break;
+                        case ParamType::COLOR_RGBA:
+                            existing->default_c4 = {pd.default_c3[0], pd.default_c3[1],
+                                                    pd.default_c3[2], 1.0f};
+                            break;
+                    }
+                }
+                if ( pd.has_range ) {
+                    existing->has_range = true;
+                    existing->range_min_f = pd.range_min_f;
+                    existing->range_max_f = pd.range_max_f;
+                    existing->range_min_i = pd.range_min_i;
+                    existing->range_max_i = pd.range_max_i;
+                }
+                if ( !pd.description.empty() )
+                    existing->description = pd.description;
+                if ( !pd.enum_options.empty() )
+                    existing->enum_options = pd.enum_options;
+                continue;
+            }
+
             desc.params.push_back(std::move(pd));
         }
     }
@@ -908,6 +1055,22 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
         } else if (type == "diffuse_light") {
             float intensity = node["intensity"] ? resolve_float(node["intensity"], config) : 1.0f;
             return diffuse_light(scale(float3(col.x, col.y, col.z), intensity));
+        } else if (type == "textured_lambertian") {
+            // Texture-driven diffuse material.  The texture is named in
+            // `texture` (currently "colorchecker" or "solid"); UVs come
+            // from the hit point's parametric coordinates.  UV overflow
+            // behavior is defined by the texture itself (the colorchecker
+            // wraps and tiles infinitely).
+            std::string texture = node["texture"].as<std::string>("colorchecker");
+            float scale_u = node["scale_u"] ? resolve_float(node["scale_u"], config) : 1.0f;
+            float scale_v = node["scale_v"] ? resolve_float(node["scale_v"], config) : 1.0f;
+            if (texture == "colorchecker") {
+                return textured_lambertian(rt::textures::ColorChecker(scale_u, scale_v));
+            } else if (texture == "solid") {
+                return textured_lambertian(rt::textures::SolidColor(float3(col.x, col.y, col.z)));
+            }
+            // Unknown texture: fall back to the colorchecker.
+            return textured_lambertian(rt::textures::ColorChecker(scale_u, scale_v));
         }
         return lambertian(float3(col.x, col.y, col.z));
     };
@@ -918,6 +1081,55 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
         for (size_t i = 0; i < objects.size(); i++) {
             auto obj = objects[i];
             std::string type = obj["type"].as<std::string>("sphere");
+
+            // Portals are instanced as objects with a dummy material;
+            // handle them before the material resolution below (an
+            // optional `material:` node overrides the dummy, e.g.
+            // diffuse_light for an emissive portal).
+            if (type == "portal") {
+                auto parse_shape = [&](const YAML::Node &n) -> rt::hittables::PortalShape {
+                    if (!n || !n.IsMap()) {
+                        spdlog::warn("[scene] portal shape missing, defaulting to unit quad");
+                        return rt::hittables::Quad({0, 0, 0}, {1, 0, 0}, {0, 1, 0});
+                    }
+                    std::string stype = n["type"].as<std::string>("quad");
+                    float3 center{0, 0, 0};
+                    if (n["center"])
+                        center = resolve_vec3(n["center"], config);
+                    if (stype == "sphere") {
+                        float radius = n["radius"] ? resolve_float(n["radius"], config) : 0.5f;
+                        return rt::hittables::Sphere(center, radius);
+                    } else if (stype == "triangle") {
+                        float3 v0{0, 0, 0}, v1{1, 0, 0}, v2{0, 1, 0};
+                        if (n["v0"]) v0 = resolve_vec3(n["v0"], config);
+                        if (n["v1"]) v1 = resolve_vec3(n["v1"], config);
+                        if (n["v2"]) v2 = resolve_vec3(n["v2"], config);
+                        return rt::hittables::Triangle(v0, v1, v2);
+                    }
+                    float3 u{1, 0, 0}, v{0, 1, 0};
+                    if (n["u"]) u = resolve_vec3(n["u"], config);
+                    if (n["v"]) v = resolve_vec3(n["v"], config);
+                    return rt::hittables::Quad(center, u, v);
+                };
+
+                if (obj["entry"] && obj["exit"]) {
+                    auto entry = parse_shape(obj["entry"]);
+                    auto exit = parse_shape(obj["exit"]);
+                    if (obj["material"]) {
+                        // Real material, e.g. diffuse_light for an
+                        // emissive portal (glowing surface).
+                        builder.add_portal(std::move(entry), std::move(exit),
+                                           build_material(obj["material"]));
+                    } else {
+                        // Default: dummy white Lambertian, whose scatter()
+                        // teleports the ray (pure window).
+                        builder.add_portal(std::move(entry), std::move(exit));
+                    }
+                } else {
+                    spdlog::warn("[scene] portal object #{} missing entry/exit, skipping", i);
+                }
+                continue;
+            }
 
             // Resolve transform
             float3 center{0, 0, 0};

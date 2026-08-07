@@ -19,6 +19,9 @@ public:
     /// Refract or reflect the incoming ray using Snell's law + Schlick Fresnel.
     optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
+        if ( hit.is_portal ) {
+            return portal_scatter(incoming_ray, hit);
+        }
         PROFILER_ZONE("Dielectric_scatter");
         // Determine whether the ray is entering the dielectric or exiting it
         float3 outward_normal;

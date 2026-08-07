@@ -133,6 +133,9 @@ struct ParamDescriptor {
     float range_min_f = 0.0f, range_max_f = 0.0f;
     int32_t range_min_i = 0, range_max_i = 0;
 
+    // ── Optional choices (ENUM params — rendered as a combo box) ────
+    std::vector<std::string> enum_options;
+
     // ── Buffer layout (filled by SceneDescriptor::build_layout()) ────
     uint32_t buffer_offset = 0; ///< byte offset into flat float buffer
     uint32_t buffer_size   = 4; ///< size in bytes (4 for int/float, 12 for vec3, etc.)

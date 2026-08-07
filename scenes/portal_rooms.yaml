@@ -1,0 +1,136 @@
+name: "Portal Rooms"
+kernel: raytracer
+scene_type: 3d
+
+# ── Scene parameters ──────────────────────────────────────────────────
+# Two rooms connected by a portal (window): room 1 is the Cornell box,
+# room 2 sits behind it (z ∈ [-6, -2.1]).  The portal's entry quad is a
+# 2×2 window on room 1's back wall; its exit quad is on room 2's front
+# wall, so rays passing through keep travelling -z into room 2.
+params:
+  background:
+    type: color
+    description: "Background colour (ignored in enclosed rooms)"
+    default: [0.0, 0.0, 0.0]
+  light_color:
+    type: color
+    description: "Ceiling light colour (base tint, 0-1)"
+    default: [1.0, 1.0, 1.0]
+  light_intensity:
+    type: float
+    description: "Ceiling light intensity multiplier"
+    default: 15.0
+    range: [0, 50]
+  tonemap_enabled:
+    type: bool
+    description: "Enable the tone-mapping stage (Reinhard + gamma by default)"
+    default: true
+
+objects:
+  # ══ Room 1 — Cornell box ══════════════════════════════════════════
+  - type: quad
+    center: [-2, 0, -2]
+    u: [4, 0, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.73, 0.73, 0.73] }   # floor
+  - type: quad
+    center: [-2, 3, -2]
+    u: [4, 0, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.73, 0.73, 0.73] }   # ceiling
+  - type: quad
+    center: [-2, 0, -2]
+    u: [4, 0, 0]
+    v: [0, 3, 0]
+    material: { type: lambertian, color: [0.73, 0.73, 0.73] }   # back wall
+  - type: quad
+    center: [-2, 0, -2]
+    u: [0, 3, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.65, 0.05, 0.05] }   # left (red)
+  - type: quad
+    center: [2, 0, -2]
+    u: [0, 3, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.12, 0.45, 0.15] }   # right (green)
+  - type: quad
+    center: [-1, 2.99, -1]
+    u: [2, 0, 0]
+    v: [0, 0, 2]
+    material: { type: diffuse_light, color: $light_color, intensity: $light_intensity }
+  - type: box
+    center: [-0.8, 0, -0.8]
+    size: [0.6, 1.5, 0.6]
+    material: { type: lambertian, color: [0.55, 0.55, 0.55] }   # short box
+  - type: box
+    center: [0.8, 0, -0.3]
+    size: [0.6, 0.6, 1.2]
+    material: { type: lambertian, color: [0.55, 0.55, 0.55] }   # tall box
+
+  # ══ Portal: room 1 back wall → room 2 front wall ═════════════════
+  # Entry sits 0.01 in front of room 1's back wall (z=-2); exit on
+  # room 2's front wall (z=-2.1).  Parametric UVs map entry quad → exit
+  # quad, and the ray keeps its direction (-z), so it emerges inside
+  # room 2 and sees the red sphere.
+  - type: portal
+    entry:
+      type: quad
+      center: [-1, 0, -1.99]
+      u: [2, 0, 0]
+      v: [0, 2, 0]
+    exit:
+      type: quad
+      center: [-1, 0, -2.1]
+      u: [2, 0, 0]
+      v: [0, 2, 0]
+
+  # ══ Room 2 — gray room behind room 1 ═════════════════════════════
+  - type: quad
+    center: [-2, 0, -6]
+    u: [4, 0, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.6, 0.6, 0.6] }      # floor
+  - type: quad
+    center: [-2, 3, -6]
+    u: [4, 0, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.6, 0.6, 0.6] }      # ceiling
+  - type: quad
+    center: [-2, 0, -6]
+    u: [4, 0, 0]
+    v: [0, 3, 0]
+    material: { type: lambertian, color: [0.6, 0.6, 0.6] }      # back wall
+  - type: quad
+    center: [-2, 0, -6]
+    u: [0, 3, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.6, 0.6, 0.6] }      # left wall
+  - type: quad
+    center: [2, 0, -6]
+    u: [0, 3, 0]
+    v: [0, 0, 4]
+    material: { type: lambertian, color: [0.6, 0.6, 0.6] }      # right wall
+  - type: quad
+    center: [-1, 2.99, -5.5]
+    u: [2, 0, 0]
+    v: [0, 0, 2]
+    material: { type: diffuse_light, color: $light_color, intensity: $light_intensity }
+  - type: sphere
+    center: [0, 1, -4]
+    radius: 1.0
+    material: { type: lambertian, color: [0.8, 0.1, 0.1] }      # red sphere
+
+# ── Kernel statistics ────────────────────────────────────────────────
+statistics:
+  num_objects:
+    type: int
+    description: "Number of scene objects (handles)"
+    viz: text
+  num_bvh_nodes:
+    type: int
+    description: "BVH node count"
+    viz: text
+  num_lights:
+    type: int
+    description: "Number of light sources"
+    viz: text

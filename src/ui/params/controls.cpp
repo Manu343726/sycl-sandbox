@@ -77,8 +77,31 @@ bool render_param_controls(const scene_loader::SceneDescriptor &desc,
         }
         case ParamType::ENUM: {
             int v = ref.as_int();
-            if ( ImGui::InputInt(pd.name.c_str(), &v, 1, 10) ) {
-                ref.set(v); changed = true;
+            if ( !pd.enum_options.empty() ) {
+                // Named choices → combo box.  Clamp out-of-range values
+                // (e.g. a YAML default beyond the option list).
+                if ( v < 0 || v >= (int)pd.enum_options.size() ) {
+                    v = 0;
+                    ref.set(v);
+                    changed = true;
+                }
+                const char *label = pd.enum_options[(size_t)v].c_str();
+                if ( ImGui::BeginCombo(pd.name.c_str(), label) ) {
+                    for ( size_t i = 0; i < pd.enum_options.size(); ++i ) {
+                        bool selected = ((size_t)v == i);
+                        if ( ImGui::Selectable(pd.enum_options[i].c_str(),
+                                               selected) ) {
+                            ref.set((int)i);
+                            changed = true;
+                        }
+                        if ( selected ) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            } else {
+                if ( ImGui::InputInt(pd.name.c_str(), &v, 1, 10) ) {
+                    ref.set(v); changed = true;
+                }
             }
             break;
         }

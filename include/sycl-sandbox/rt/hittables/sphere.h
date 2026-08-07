@@ -60,6 +60,31 @@ public:
         if ( !rec.front_face ) {
             rec.normal = scale(rec.normal, -1);
         }
+        // Spherical texture coordinates from the OUTWARD direction (stable
+        // for both faces): u wraps around longitude, v runs pole-to-pole.
+        constexpr float PI = 3.14159265f;
+        float3 out_dir = scale(sub(rec.p, center), 1.f / radius);
+        rec.u = 0.5f + math::atan2(out_dir.z, out_dir.x) / (2.f * PI);
+        rec.v = 0.5f - math::asin(out_dir.y) / PI;
+        return rec;
+    }
+
+    /// Map parametric coordinates back onto the sphere surface (inverse of
+    /// hit()'s spherical mapping): u wraps longitude, v runs pole-to-pole.
+    /// Used by portals to place the exit hit at the entry hit's UVs.
+    HitRecord point_at_uv(float u, float v) const {
+        constexpr float PI = 3.14159265f;
+        float theta = 2.f * PI * (u - 0.5f);    // longitude angle
+        float y = math::sin(PI * (0.5f - v));   // latitude (pole-to-pole)
+        float r_xy = math::sqrt(math::fmax(0.f, 1.f - y * y));
+        float3 dir = {math::cos(theta) * r_xy, y, math::sin(theta) * r_xy};
+        HitRecord rec;
+        rec.p = add(center, scale(dir, radius));
+        rec.normal = dir;
+        rec.t = 0.f;
+        rec.front_face = true;
+        rec.u = u;
+        rec.v = v;
         return rec;
     }
 };

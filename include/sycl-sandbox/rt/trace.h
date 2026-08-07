@@ -103,6 +103,10 @@ void render_main(const Runtime &rt,
     float aperture_size = reader.read<float>(KEY_CAM_APERTURE);
     float aspect_ratio  = (float)width / (float)height;
 
+    // Animation time for the frame; textures/materials use it for
+    // time-varying sampling (e.g. animated procedural textures).
+    float frame_time = reader.read<float>(KEY_TIME);
+
     // Build the camera frustum from the lookAt parameters
     Camera camera = lookat(camera_eye, camera_at, camera_up, field_of_view, aspect_ratio);
 
@@ -136,6 +140,7 @@ void render_main(const Runtime &rt,
             ray.dir = norm(sub(add(add(camera.lower_left, scale(camera.horizontal, u)),
                                    scale(camera.vertical, v)),
                                ray_origin));
+            ray.time = frame_time;
 
             // Trace the ray and accumulate its colour
             float3 colour = trace(ray, scene, max_bounces, rng);

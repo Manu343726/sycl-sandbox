@@ -49,8 +49,9 @@ struct Handle {
 };
 ```
 
-Type IDs: 0 = Sphere, 1 = Triangle, 2 = Quad, 3 = Box (hittable);
-0 = Lambertian, 1 = Metal, 2 = Dielectric, 3 = DiffuseLight (material).
+Type IDs: 0 = Sphere, 1 = Triangle, 2 = Quad, 3 = Box, 4 = Portal (hittable);
+0 = Lambertian, 1 = Metal, 2 = Dielectric, 3 = DiffuseLight,
+4 = TexturedLambertian (material).
 
 ### SceneView (device-side)
 
@@ -68,6 +69,8 @@ struct SceneView {
     Metal *metals; int num_metals;
     Dielectric *dielectrics; int num_dielectrics;
     DiffuseLight *diffuse_lights; int num_diffuse_lights;
+    TexturedLambertian *textured_lambertians; int num_textured_lambertians;
+    Portal *portals; int num_portals;
     Aabb *aabbs;                          // per-handle AABBs
     BvhNode *bvh_nodes; int bvh_root;     // BVH (future)
     LightInfo *lights; int num_lights;    // light list (future)
@@ -180,6 +183,167 @@ importance sampling.
 BVH construction (`SceneBuilder::build_bvh()`) and light list computation
 are stubbed but the data slots are in place in `SceneView`.
 
+## Textures
+
+A texture maps surface parametric coordinates plus time to a colour:
+
+```cpp
+float3 sample(float u, float v, float time, RNG &rng) const;
+```
+
+`u`/`v` come from the hit point's parametric coordinates, filled into
+`HitRecord::u/v` by every hittable:
+
+| primitive | UV meaning |
+|-----------|-----------|
+| Quad      | affine (α, β) coordinates, both in [0,1] |
+| Triangle  | barycentric coordinates of vertices b, c |
+| Sphere    | spherical mapping from the outward direction |
+| Box       | the hit face's quad coordinates |
+| Portal    | the entry hit's UVs, forwarded to the exit shape (see Portals) |
+
+Out-of-range UVs are **not** clamped by the pipeline — every texture
+implements its own clamp / round / wrap behavior.  This is what allows
+both procedural textures (infinite tiling, noise, ...) and file-loaded
+image textures (clamped or wrapped sampling) behind one interface.
+
+The sampler also receives the path's `RNG`, so stochastic textures
+(noise, jittered filtering, ...) can draw from it without owning their
+own state.  Deterministic textures simply ignore it.
+
+### Fully procedural, no base class
+
+Textures are plain procedural structs — no virtual base class (SYCL
+device code cannot dispatch through vtables) and no snapshot machinery.
+Polymorphism comes from the same variant + compile-time `visit()`
+dispatch used by `Hittable`/`Material`:
+
+```cpp
+using Texture = std::variant<SolidColor, ColorChecker>;
+
+// Free function dispatching to the concrete texture's sample():
+float3 sample(const Texture&, float u, float v, float time, RNG &rng);
+```
+
+Each texture struct owns its data and implements `sample()` however it
+likes — the interface is simply the `sample(u, v, time, rng)` convention.
+
+### Built-in textures
+
+| texture | behavior |
+|---------|----------|
+| `SolidColor` | ignores (u, v, time), returns one constant colour |
+| `ColorChecker` | 24-patch ColorChecker chart (reference sRGB from `colorchecker.h`); wraps on UV overflow so the chart tiles infinitely; `scale_u`/`scale_v` repeat it per UV unit |
+
+### TexturedLambertian
+
+Diffuse material whose albedo is sampled from a texture:
+
+```cpp
+class TexturedLambertian {
+    textures::Texture texture;   // variant of procedural textures
+    optional<ScatterRecord>
+    scatter(const Ray&, const HitRecord&, RNG& rng) const {
+        float3 albedo = textures::sample(texture, rec.u, rec.v, incoming_ray.time, rng);
+        // …same diffuse math as Lambertian…
+    }
+};
+```
+
+The ray's `time` field (from the scene's `time` param, read once per frame
+in `render_main`) is passed through to the sampler, enabling time-varying
+procedural textures later.
+
+### YAML usage
+
+```yaml
+objects:
+  - type: quad
+    center: [0, 0, 0]
+    u: [4, 0, 0]
+    v: [0, 0, 4]
+    material:
+      type: textured_lambertian
+      texture: colorchecker   # or "solid"
+      scale_u: 1.0            # chart repetitions per UV unit
+      scale_v: 1.0
+```
+
+See `scenes/colorchecker_floor.yaml` for a complete demo scene.
+
+## Portals
+
+A portal teleports a ray from one hittable's surface to another's.  It is
+implemented as a **pair of hittables** (entry → exit): the parametric
+coordinates (`u`/`v`) of the entry hit are used as input for the second
+hittable, so the ray reappears at the corresponding point on the exit
+surface.  The mapping is exactly inverse to `hit()`: every hittable
+provides `point_at_uv(u, v)` that reconstructs a surface point from the
+same UV convention its `hit()` fills into `HitRecord::u/v`.
+
+```cpp
+class Portal {
+    PortalShape entry;   // std::variant<Sphere, Triangle, Quad>
+    PortalShape exit;
+    ...
+};
+
+scene.add_portal(hittables::quad(/* entry */), hittables::quad(/* exit */));
+// Optional material — e.g. diffuse_light for an emissive portal:
+scene.add_portal(hittables::quad(/* entry */), hittables::quad(/* exit */),
+                 materials::diffuse_light({15, 15, 15}));
+```
+
+Semantics:
+
+- The ray keeps its **direction** (position-only teleport):
+  `portal_origin` = exit point nudged by an epsilon along the exit
+  normal in the travel direction (avoids re-hitting the exit surface),
+  `portal_dir` = incoming ray direction.
+- `HitRecord::t` keeps the **entry distance**, so closest-hit ordering
+  works without special-casing.
+- Portals are instanced as objects with a **dummy material** (a white
+  Lambertian by default).  The teleport lives in the material: every
+  material's `scatter()` checks `HitRecord::is_portal` and returns the
+  continuation ray (`portal_origin`/`portal_dir`) with unit attenuation
+  (see `rt::portal_scatter()`), so the trace loop stays generic.
+- Emission is handled **before** scatter, so a portal instanced with a
+  real material behaves accordingly — e.g. `diffuse_light` makes an
+  **emissive portal** (a glowing surface; the path terminates with its
+  emission instead of teleporting).  Emissive portals are excluded from
+  the light list (their surface area is undefined).
+- Portals are **bidirectional**: the exit shape is a plain hittable too,
+  and the exit side works through the same pair.
+- The portal's AABB is the **entry** shape's AABB, so BVH culling is
+  correct without recursion.
+
+Limitations:
+
+- `Box` is **not** supported as a portal shape: its `hit()` does not
+  record which face was hit, so `point_at_uv` could not reconstruct the
+  entry point (see `hittables/portal.h`).
+- UVs outside [0,1] (hitting the entry's edge is impossible — the
+  intersection is clipped — but mapped points are clamped to the exit
+  shape's surface) project onto the exit surface without wrapping.
+
+### YAML usage
+
+```yaml
+objects:
+  - type: portal
+    entry: {type: quad, center: [-1, 0, -1.99], u: [2, 0, 0], v: [0, 2, 0]}
+    exit:  {type: quad, center: [-1, 0, -2.1],  u: [2, 0, 0], v: [0, 2, 0]}
+    # optional material: omit for a pure window (dummy Lambertian),
+    # or use diffuse_light for an emissive portal:
+    # material: {type: diffuse_light, color: [1, 1, 1], intensity: 5}
+```
+
+Entry/exit shapes support `type: quad` (center/u/v), `type: sphere`
+(center/radius) and `type: triangle` (v0/v1/v2).  See
+`scenes/portal_rooms.yaml` for a complete two-room demo scene and
+`kernels/rt_portal_test/kernel.cpp` for a from-scratch reference
+implementation.
+
 ## optional return values
 
 Instead of output-reference parameters + `bool`:
@@ -197,7 +361,31 @@ All parameters are declared in the YAML scene file.  Camera parameters
 (`cam_eye`, `cam_at`, `cam_up`, `cam_fov`, `cam_aperture` for 3D; 
 `center_x`, `center_y`, `zoom` for 2D) are auto-generated from `scene_type`.
 Standard render params (`spp_frame`, `max_bounces`, `tick`, `time`) are
-also auto-injected.
+also auto-injected, together with the display-pipeline params:
+
+| Param | Type | Default | Purpose |
+|---|---|---|---|
+| `tonemap_enabled` | bool | `false` | Master switch for the tone-mapping stage of the display pipeline. When off, accumulated linear values are normalized and hard-clamped to [0,1] (no operator, no gamma). |
+| `tonemap_operator` | enum | `0` | Tone-map operator: `0` = Reinhard (`x/(1+x)`), `1` = ACES fitted (Narkowicz 2015), `2` = Filmic (Hable / Uncharted 2). Rendered as a combo box. |
+| `tonemap_exposure` | float | `1.0` | Exposure multiplier applied to the linear HDR value before the operator. |
+| `tonemap_gamma` | float | `2.2` | Display gamma for the final correction (`pow(clamp(c), 1/gamma)`). |
+
+Scenes may override the default of any standard param by declaring the
+same name in the YAML `params:` section — the loader merges the YAML
+default/range/description into the auto-generated descriptor instead of
+skipping it (keep the auto-generated type):
+
+```yaml
+params:
+  tonemap_enabled:
+    type: bool
+    description: "Enable the tone-mapping stage"
+    default: true
+  tonemap_operator:
+    type: enum
+    default: 1          # ACES fitted
+    options: ["Reinhard", "ACES (fitted)", "Filmic (Hable)"]
+```
 
 The host builds the buffer layout via `SceneDescriptor::build_layout()` and
 provides a `ParamLookup` for kernel-side name-based reads:
@@ -237,4 +425,9 @@ include/sycl-sandbox/
       metal.h         — Metal + metal()
       dielectric.h    — Dielectric + dielectric()
       diffuse_light.h — DiffuseLight + diffuse_light()
+      textured_lambertian.h — TexturedLambertian + textured_lambertian()
+    textures/
+      texture.h       — Texture variant + sample() dispatch
+      solid_color.h   — SolidColor texture (constant colour)
+      colorchecker.h  — ColorChecker texture (infinite tiling chart)
 ```

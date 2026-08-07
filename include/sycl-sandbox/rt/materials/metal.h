@@ -26,6 +26,9 @@ public:
     /// ray points into the surface (absorption).
     optional<ScatterRecord>
     scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
+        if ( hit.is_portal ) {
+            return portal_scatter(incoming_ray, hit);
+        }
         PROFILER_ZONE("Metal_scatter");
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};

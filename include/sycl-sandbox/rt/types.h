@@ -7,10 +7,12 @@
 #include <sycl-sandbox/rt/hittables/triangle.h>
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/rt/hittables/box.h>
+#include <sycl-sandbox/rt/hittables/portal.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/metal.h>
 #include <sycl-sandbox/rt/materials/dielectric.h>
 #include <sycl-sandbox/rt/materials/diffuse_light.h>
+#include <sycl-sandbox/rt/materials/textured_lambertian.h>
 
 /// Raised to the top-level `rt` namespace for convenience.
 namespace rt {
@@ -21,7 +23,8 @@ using Hittable =
 using Material = std::variant<materials::Lambertian,
                               materials::Metal,
                               materials::Dielectric,
-                              materials::DiffuseLight>;
+                              materials::DiffuseLight,
+                              materials::TexturedLambertian>;
 
 /// A scene Object is a geometry + material pair, stored inline (no pointers).
 /// Used as a convenience type for SceneBuilder::add() — dispatch is now

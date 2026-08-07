@@ -1,6 +1,7 @@
 #pragma once
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/math.h>
+#include <sycl-sandbox/optional.h>
 
 /// Forward declarations used by individual hittable/material headers.
 namespace rt {
@@ -8,6 +9,10 @@ namespace rt {
 /// A ray in 3D space: origin point + direction vector.
 struct Ray {
     float3 orig, dir;
+    /// Animation time of the ray (from the scene's `time` param).  Used
+    /// by time-varying materials/textures (e.g. animated procedural
+    /// textures).  Defaults to 0 for rays built without a time.
+    float time = 0.f;
 };
 
 /// Record filled by Hittable::hit() when a ray-geometry intersection is found.
@@ -16,6 +21,23 @@ struct HitRecord {
     float3 normal;   ///< Surface normal at intersection (pointing outward).
     float t;         ///< Distance along the ray where the hit occurred.
     bool front_face; ///< True if the ray hit from outside the surface.
+    /// Parametric surface coordinates of the hit point, in [0,1] within
+    /// the primitive's own UV space (quad/triangle: affine/barycentric
+    /// coordinates, sphere: spherical mapping, box: the hit face's quad
+    /// coordinates).  Input to texture samplers; textures decide their
+    /// own behavior for out-of-range values.
+    float u = 0.f;
+    float v = 0.f;
+    /// Portal teleport marker.  When true, p/normal are the EXIT surface
+    /// point and normal (the entry hit's parametric coordinates were
+    /// mapped onto the exit hittable).  Materials scatter portal records
+    /// as a pure teleport: the ray continues from `portal_origin` along
+    /// `portal_dir` with unit attenuation (see portal_scatter()).  `t`
+    /// is the ENTRY hit's distance, so closest-hit ordering sees the
+    /// portal at its entry surface.
+    bool is_portal = false;
+    float3 portal_origin = {0, 0, 0}; ///< where the continuation ray starts
+    float3 portal_dir = {0, 0, 0};    ///< direction of the continuation ray
 };
 
 /// Record returned by Material::scatter() when scattering occurs.
@@ -23,6 +45,19 @@ struct ScatterRecord {
     float3 attenuation; ///< Colour attenuation (albedo × path throughput).
     Ray scattered;      ///< New ray direction after scattering.
 };
+
+/// Build the ScatterRecord for a portal hit: the ray continues from the
+/// exit surface (`portal_origin`/`portal_dir`) with unit attenuation —
+/// the path passes through the portal unchanged.  Called by every
+/// material's scatter() on is_portal records, so the trace loop stays
+/// generic.  Emission is handled before scatter, so a portal instanced
+/// with an emissive material (e.g. DiffuseLight) glows instead of
+/// teleporting.
+inline optional<ScatterRecord> portal_scatter(const Ray &incoming_ray,
+                                              const HitRecord &rec) {
+    return ScatterRecord {{1, 1, 1},
+                          Ray {rec.portal_origin, rec.portal_dir, incoming_ray.time}};
+}
 
 /// Axis-aligned bounding box: two extreme corners enclosing a volume.
 struct Aabb {

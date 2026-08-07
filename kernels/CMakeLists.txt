@@ -1,5 +1,5 @@
 # known kernel subdirectories — add new ones here
-set(KERNEL_DIRS minimal raytracer mandelbrot
+set(KERNEL_DIRS minimal raytracer rt_math_test rt_portal_test mandelbrot
     raymarching_primitives seascape creation cyber_fuji lover
     octagrams fractal_pyramid rainforest cinelava basewarp)
 

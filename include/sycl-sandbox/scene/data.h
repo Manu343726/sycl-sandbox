@@ -27,6 +27,7 @@ enum class HittableType : uint32_t {
     Triangle = 1,
     Quad = 2,
     Box = 3,
+    Portal = 4,   ///< Portal: teleports the ray (no material)
 };
 
 /// Identifies a material type packed into the upper bits of Handle::material.
@@ -35,6 +36,7 @@ enum class MaterialType : uint32_t {
     Metal = 1,
     Dielectric = 2,
     DiffuseLight = 3,
+    TexturedLambertian = 4,
 };
 
 // ── Handle ─────────────────────────────────────────────────────────────
@@ -127,6 +129,10 @@ template <>
 struct MaterialTag<materials::DiffuseLight> {
     static constexpr MaterialType value = MaterialType::DiffuseLight;
 };
+template <>
+struct MaterialTag<materials::TexturedLambertian> {
+    static constexpr MaterialType value = MaterialType::TexturedLambertian;
+};
 
 // ── SceneView (device-side) ───────────────────────────────────────────
 
@@ -149,6 +155,8 @@ struct SceneView {
     int num_quads;
     hittables::Box *boxes;
     int num_boxes;
+    hittables::Portal *portals;
+    int num_portals;
 
     // ── Material arrays (per-type) ────────────────────────────────────
     materials::Lambertian *lambertians;
@@ -159,6 +167,8 @@ struct SceneView {
     int num_dielectrics;
     materials::DiffuseLight *diffuse_lights;
     int num_diffuse_lights;
+    materials::TexturedLambertian *textured_lambertians;
+    int num_textured_lambertians;
 
     // ── Optional: per-handle AABBs (computed during build) ────────────
     Aabb *aabbs;
@@ -198,6 +208,8 @@ handle_hit(Handle h, const Ray &ray, float t_min, float t_max, const SceneView &
             return scene.quads[idx].hit(ray, t_min, t_max);
         case HittableType::Box:
             return scene.boxes[idx].hit(ray, t_min, t_max);
+        case HittableType::Portal:
+            return scene.portals[idx].hit(ray, t_min, t_max);
     }
     return nullopt;
 }
@@ -220,6 +232,8 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
             return scene.dielectrics[idx].scatter(incoming_ray, hit, rng);
         case MaterialType::DiffuseLight:
             return scene.diffuse_lights[idx].scatter(incoming_ray, hit, rng);
+        case MaterialType::TexturedLambertian:
+            return scene.textured_lambertians[idx].scatter(incoming_ray, hit, rng);
     }
     return nullopt;
 }
@@ -236,6 +250,8 @@ inline float3 handle_emit(Handle h, const HitRecord &hit, const SceneView &scene
             return scene.metals[idx].emit(hit);
         case MaterialType::Dielectric:
             return scene.dielectrics[idx].emit(hit);
+        case MaterialType::TexturedLambertian:
+            return scene.textured_lambertians[idx].emit(hit);
         case MaterialType::DiffuseLight:
             return scene.diffuse_lights[idx].emit(hit);
     }
@@ -312,6 +328,18 @@ public:
     /// The hittable and material are dispatched to their per-type arrays.
     void add(Hittable h, Material m);
 
+    /// Add a portal (entry -> exit) to the scene.
+    /// Portals are instanced as regular objects with a material.  The
+    /// default is a dummy white Lambertian: every material's scatter()
+    /// teleports portal records (see rt::portal_scatter()), so the ray
+    /// continues from the exit surface.  Pass a material to instance a
+    /// portal with real behavior — e.g. DiffuseLight for an emissive
+    /// portal (glows; the path terminates with its emission).  Emissive
+    /// portals are NOT added to the light list (surface area undefined).
+    void add_portal(hittables::PortalShape entry, hittables::PortalShape exit);
+    void add_portal(hittables::PortalShape entry, hittables::PortalShape exit,
+                    Material material);
+
     /// Add an Object (hittable + material pair) to the scene.
     void add(const Object &obj) {
         add(obj.hittable, obj.material);
@@ -369,12 +397,14 @@ private:
     std::vector<hittables::Triangle> triangles_;
     std::vector<hittables::Quad> quads_;
     std::vector<hittables::Box> boxes_;
+    std::vector<hittables::Portal> portal_pairs_;
 
     /// Material staging vectors (one per type).
     std::vector<materials::Lambertian> lambertians_;
     std::vector<materials::Metal> metals_;
     std::vector<materials::Dielectric> dielectrics_;
     std::vector<materials::DiffuseLight> diffuse_lights_;
+    std::vector<materials::TexturedLambertian> textured_lambertians_;
 
     /// Handle and AABB arrays (parallel, one entry per add() call).
     std::vector<Handle> handles_;
@@ -396,6 +426,13 @@ private:
     /// Compute the surface area of a hittable referenced by a handle.
     float compute_area(Handle h) const;
 
+    /// Push a material into its per-type staging array, returning the
+    /// packed material half of the handle.  DiffuseLight materials are
+    /// registered in the light list only when register_light is true
+    /// (portals are excluded: their surface area is undefined for
+    /// importance sampling).
+    uint32_t push_material(const Material &m, bool register_light);
+
     /// Allocate a device/host array and copy a host vector into it (via Runtime).
     template <typename T>
     static T *upload_array(rt::Runtime *rt, const std::vector<T> &host_vec);
@@ -411,10 +448,12 @@ inline void SceneView::free(sycl::queue &queue) const {
     if ( triangles ) { sycl::free(triangles, queue); }
     if ( quads )    { sycl::free(quads, queue); }
     if ( boxes )    { sycl::free(boxes, queue); }
+    if ( portals )  { sycl::free(portals, queue); }
     if ( lambertians ) { sycl::free(lambertians, queue); }
     if ( metals )   { sycl::free(metals, queue); }
     if ( dielectrics ) { sycl::free(dielectrics, queue); }
     if ( diffuse_lights ) { sycl::free(diffuse_lights, queue); }
+    if ( textured_lambertians ) { sycl::free(textured_lambertians, queue); }
     if ( aabbs )    { sycl::free(aabbs, queue); }
     if ( bvh_nodes ) { sycl::free(bvh_nodes, queue); }
     if ( lights )   { sycl::free(lights, queue); }
@@ -431,10 +470,12 @@ inline void SceneView::free(rt::Runtime *rt) {
     de(triangles);
     de(quads);
     de(boxes);
+    de(portals);
     de(lambertians);
     de(metals);
     de(dielectrics);
     de(diffuse_lights);
+    de(textured_lambertians);
     de(aabbs);
     de(bvh_nodes);
     de(lights);
@@ -467,26 +508,41 @@ inline void SceneBuilder::add(Hittable h, Material m) {
     });
 
     visit(m, [&](const auto &material) {
-        using M = std::decay_t<decltype(material)>;
-        constexpr auto tag = static_cast<uint32_t>(MaterialTag<M>::value);
-        if constexpr ( std::is_same_v<M, materials::Lambertian> ) {
-            handle.material = pack_handle(tag, (uint32_t)lambertians_.size());
-            lambertians_.push_back(material);
-        } else if constexpr ( std::is_same_v<M, materials::Metal> ) {
-            handle.material = pack_handle(tag, (uint32_t)metals_.size());
-            metals_.push_back(material);
-        } else if constexpr ( std::is_same_v<M, materials::Dielectric> ) {
-            handle.material = pack_handle(tag, (uint32_t)dielectrics_.size());
-            dielectrics_.push_back(material);
-        } else if constexpr ( std::is_same_v<M, materials::DiffuseLight> ) {
-            handle.material = pack_handle(tag, (uint32_t)diffuse_lights_.size());
-            light_handle_indices_.push_back((uint32_t)handles_.size());
-            diffuse_lights_.push_back(material);
-        }
+        handle.material = push_material(m, true);
     });
 
     handles_.push_back(handle);
     aabbs_.push_back(box);
+}
+
+// ── SceneBuilder::push_material ────────────────────────────────────────
+
+inline uint32_t SceneBuilder::push_material(const Material &m, bool register_light) {
+    uint32_t mat_handle = 0;
+    visit(m, [&](const auto &material) {
+        using M = std::decay_t<decltype(material)>;
+        constexpr auto tag = static_cast<uint32_t>(MaterialTag<M>::value);
+        if constexpr ( std::is_same_v<M, materials::Lambertian> ) {
+            mat_handle = pack_handle(tag, (uint32_t)lambertians_.size());
+            lambertians_.push_back(material);
+        } else if constexpr ( std::is_same_v<M, materials::Metal> ) {
+            mat_handle = pack_handle(tag, (uint32_t)metals_.size());
+            metals_.push_back(material);
+        } else if constexpr ( std::is_same_v<M, materials::Dielectric> ) {
+            mat_handle = pack_handle(tag, (uint32_t)dielectrics_.size());
+            dielectrics_.push_back(material);
+        } else if constexpr ( std::is_same_v<M, materials::DiffuseLight> ) {
+            mat_handle = pack_handle(tag, (uint32_t)diffuse_lights_.size());
+            if ( register_light ) {
+                light_handle_indices_.push_back((uint32_t)handles_.size());
+            }
+            diffuse_lights_.push_back(material);
+        } else if constexpr ( std::is_same_v<M, materials::TexturedLambertian> ) {
+            mat_handle = pack_handle(tag, (uint32_t)textured_lambertians_.size());
+            textured_lambertians_.push_back(material);
+        }
+    });
+    return mat_handle;
 }
 
 // ── SceneBuilder helper methods ────────────────────────────────────────
@@ -522,6 +578,11 @@ inline float SceneBuilder::compute_area(Handle h) const {
             float3 ext = sub(boxes_[idx].box_max, boxes_[idx].box_min);
             return 2.f * (ext.x * ext.y + ext.y * ext.z + ext.x * ext.z);
         }
+        case HittableType::Portal:
+            // A portal's surface area is undefined (rays teleport);
+            // emissive portals are excluded from the light list for
+            // this reason (see add_portal).
+            return 0.f;
     }
     return 0.f;
 }
@@ -533,7 +594,8 @@ static float3 debug_material_color(const Handle &h,
                                    const std::vector<materials::Lambertian> &lamberts,
                                    const std::vector<materials::Metal> &metals,
                                    const std::vector<materials::Dielectric> &dielectrics,
-                                   const std::vector<materials::DiffuseLight> &lights) {
+                                   const std::vector<materials::DiffuseLight> &lights,
+                                   const std::vector<materials::TexturedLambertian> &textured) {
     auto mtype = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t midx = handle_index(h.material);
     switch ( mtype ) {
@@ -552,8 +614,42 @@ static float3 debug_material_color(const Handle &h,
             }
             return e;
         }
+        case MaterialType::TexturedLambertian:
+            // Sample the texture at the chart centre for a representative
+            // colour (deterministic seed; the sampler gets an RNG anyway).
+            {
+                RNG rng {0xdeadbeefu};
+                return textures::sample(textured[midx].texture, 0.5f, 0.5f, 0.f, rng);
+            }
     }
     return float3{1, 1, 1};
+}
+
+// ── SceneBuilder::add_portal ─────────────────────────────────────────
+
+inline void SceneBuilder::add_portal(hittables::PortalShape entry,
+                                     hittables::PortalShape exit) {
+    // Dummy white Lambertian: its scatter() teleports portal records
+    // (see rt::portal_scatter()), making the portal a pure window.
+    add_portal(std::move(entry), std::move(exit),
+               Material {materials::lambertian({1.f, 1.f, 1.f})});
+}
+
+inline void SceneBuilder::add_portal(hittables::PortalShape entry,
+                                     hittables::PortalShape exit,
+                                     Material material) {
+    PROFILER_ZONE("SceneBuilder_add_portal");
+    Handle handle;
+    handle.hittable = pack_handle((uint32_t)HittableType::Portal,
+                                  (uint32_t)portal_pairs_.size());
+    // Emissive portals are excluded from the light list (their surface
+    // area is undefined for importance sampling) — push_material handles
+    // that with register_light = false.
+    handle.material = push_material(material, /*register_light=*/false);
+    portal_pairs_.push_back(
+        hittables::portal(std::move(entry), std::move(exit)));
+    handles_.push_back(handle);
+    aabbs_.push_back(portal_pairs_.back().aabb());
 }
 
 /// Copy a float3 into a float[3] array.
@@ -577,7 +673,7 @@ inline void SceneBuilder::build_debug_geometry() {
         auto htype = static_cast<HittableType>(handle_tag(h.hittable));
         uint32_t hidx = handle_index(h.hittable);
         float3 color = debug_material_color(
-            h, lambertians_, metals_, dielectrics_, diffuse_lights_);
+            h, lambertians_, metals_, dielectrics_, diffuse_lights_, textured_lambertians_);
 
         switch ( htype ) {
             case HittableType::Sphere: {
@@ -609,6 +705,31 @@ inline void SceneBuilder::build_debug_geometry() {
                 copy_float3(db.box_max, b.box_max);
                 copy_float3(db.color, color);
                 debug_boxes_.push_back(db);
+                break;
+            }
+            case HittableType::Portal: {
+                // Show the portal's ENTRY shape with a fixed "portal"
+                // colour (no material to sample).  Triangle entries are
+                // skipped (no debug buffer for them).
+                const auto &p = portal_pairs_[hidx];
+                float3 portal_color = {0.2f, 0.8f, 0.9f};
+                visit(p.entry, [&](const auto &shape) {
+                    using S = std::decay_t<decltype(shape)>;
+                    if constexpr ( std::is_same_v<S, hittables::Quad> ) {
+                        DebugQuad dq;
+                        copy_float3(dq.base, shape.base);
+                        copy_float3(dq.edge_u, shape.edge_u);
+                        copy_float3(dq.edge_v, shape.edge_v);
+                        copy_float3(dq.color, portal_color);
+                        debug_quads_.push_back(dq);
+                    } else if constexpr ( std::is_same_v<S, hittables::Sphere> ) {
+                        DebugSphere ds;
+                        copy_float3(ds.center, shape.center);
+                        ds.radius = shape.radius;
+                        copy_float3(ds.color, portal_color);
+                        debug_spheres_.push_back(ds);
+                    }
+                });
                 break;
             }
         }
@@ -751,10 +872,13 @@ inline SceneView SceneBuilder::build(rt::Runtime *rt) {
     upload(triangles_,      view.triangles,      view.num_triangles);
     upload(quads_,          view.quads,          view.num_quads);
     upload(boxes_,          view.boxes,          view.num_boxes);
+    upload(portal_pairs_,   view.portals,        view.num_portals);
     upload(lambertians_,    view.lambertians,    view.num_lambertians);
     upload(metals_,         view.metals,         view.num_metals);
     upload(dielectrics_,    view.dielectrics,    view.num_dielectrics);
     upload(diffuse_lights_, view.diffuse_lights, view.num_diffuse_lights);
+    upload(textured_lambertians_, view.textured_lambertians,
+           view.num_textured_lambertians);
     upload(handles_,        view.handles,        view.num_handles);
 
     // AABBs
