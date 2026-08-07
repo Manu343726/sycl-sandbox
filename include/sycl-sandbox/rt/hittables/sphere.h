@@ -25,8 +25,6 @@ public:
 
     /// Ray-sphere intersection using the reduced quadratic formula.
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
-        PROFILER_FUNCTION();
-        PROFILER_ZONE("Sphere_hit");
         // Compute the vector from the sphere centre to the ray origin
         float3 oc = sub(ray.orig, center);
 

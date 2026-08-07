@@ -74,6 +74,22 @@ inline void RegisterControlsTests(ImGuiTestEngine* e, AppState* state) {
         }
     };
 
+    // ── Show System Metrics checkbox toggles ───────────────────────
+    t = IM_REGISTER_TEST(e, "controls", "show_metrics_toggle");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        AppState* s = g_test_state;
+        ctx->SetRef("Controls");
+        bool initial = s->show_metrics;
+        ctx->ItemClick("Show System Metrics");
+        ctx->Yield();
+        IM_CHECK_NE(s->show_metrics, initial);
+        IM_CHECK(s->system_metrics.ram_total_gb() > 0.0f);
+        // Restore
+        if (s->show_metrics != initial) {
+            ctx->ItemClick("Show System Metrics");
+        }
+    };
+
     // ── Backend switcher exists ───────────────────────────────────
     t = IM_REGISTER_TEST(e, "controls", "backend_switcher_exists");
     t->TestFunc = [](ImGuiTestContext* ctx) {

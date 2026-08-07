@@ -26,8 +26,6 @@ struct Camera {
 /// width = aspect × height.  Changing FOV zooms in/out on the scene.
 inline Camera
 lookat(float3 from, float3 at, float3 up, float vfov_deg, float aspect, float focus_dist = 1.f) {
-    PROFILER_FUNCTION();
-    PROFILER_ZONE("lookat");
     // Convert vertical FOV from degrees to radians and compute viewport dimensions
     float theta = vfov_deg * 3.14159265f / 180.f;
     float half_height = math::tan(theta / 2.f);

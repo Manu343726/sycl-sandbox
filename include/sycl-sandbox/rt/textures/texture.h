@@ -28,13 +28,15 @@
 #include <sycl-sandbox/variant.h>
 #include <sycl-sandbox/rt/textures/solid_color.h>
 #include <sycl-sandbox/rt/textures/colorchecker.h>
+#include <sycl-sandbox/rt/textures/text.h>
+#include <sycl-sandbox/rt/textures/blend.h>
 
 namespace rt::textures {
 
 /// Polymorphic texture: variant of all procedural texture types.
 /// Trivially copyable when all alternatives are, so it can be stored
 /// in material arrays and uploaded to device memory by value.
-using Texture = std::variant<SolidColor, ColorChecker>;
+using Texture = std::variant<SolidColor, ColorChecker, Text, Blend>;
 
 /// Sample any texture at surface coordinates (u, v) and time `time`,
 /// passing the path's RNG through to stochastic textures.

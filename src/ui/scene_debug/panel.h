@@ -12,6 +12,10 @@ struct DebugViewFlags {
     bool show_aabbs = false;
     bool show_frustum = true;
     bool show_camera = true;
+    /// Shade scene geometry by what the scene camera can actually see:
+    /// objects (or box faces) visible from the camera eye are drawn in
+    /// their material colour, occluded ones are darkened.
+    bool show_visibility = false;
 };
 
 void init_scene_debug();

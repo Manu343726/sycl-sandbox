@@ -76,6 +76,61 @@ Dynamically generates ImGui controls from `ParamDescriptor[]`.  Supported types:
 bool values are read/written as `float` in the buffer (cast on access) so
 that the kernel's `(int)p[idx]` pattern works correctly.
 
+### System metrics (`src/ui/metrics/`)
+
+"System Metrics" window with rolling graphs of **CPU**, **system RAM**, and
+**GPU** usage (120 samples ≈ 60 s at the internal 2 Hz sample rate; sampling
+is throttled to `SAMPLE_PERIOD = 500 ms` and called every frame from
+`frame_loop.h`).
+
+Platform backends (see `system_metrics.cpp`):
+
+| Metric | Linux | Windows |
+|--------|-------|---------|
+| CPU    | `/proc/stat` deltas | `GetSystemTimes` deltas |
+| RAM    | `/proc/meminfo` (MemTotal / MemAvailable) | `GlobalMemoryStatusEx` |
+| GPU    | NVIDIA NVML (`libnvidia-ml.so.1`, dlopen) or amdgpu sysfs (`gpu_busy_percent`, `mem_info_vram_*`) | NVIDIA NVML (`nvml.dll`, LoadLibrary) |
+
+NVML is resolved at runtime, so the app links nothing GPU-specific and runs
+without an NVIDIA GPU — the GPU section then shows "unavailable" (and falls
+back to amdgpu sysfs on Linux). The panel is toggled from the Controls
+window ("Show System Metrics").
+
+### Statistics
+
+Every scene gets a set of auto-generated "standard" statistics
+(`auto_standard_stats()` in `src/scene/loader.cpp`) plus any scene-specific
+ones declared in YAML under `statistics:`.  Standard stats:
+
+| Stat | Meaning | Written by |
+|------|---------|------------|
+| `fps`, `frame_time_ms`, `spp`, `pixel_count`, `device_memory_mb`, `host_memory_mb` | UI/host metrics | UI thread (`update_standard_stats()`) |
+| `num_objects`, `num_bvh_nodes`, `num_lights` | Scene composition | Kernel `render_kernel()` (host-side, via `StatWriter`) |
+| `num_hits` | Closest hits found this frame (all bounces) | Device-side `TraceCounters`, read back by render thread |
+| `num_bvh_hits` | Of those, found via BVH traversal (0 when the scene has no BVH) | same |
+
+Data flow: the render thread writes the runtime-owned stat block
+(`KernelRuntime::stat_buffer_`), publishes it through the
+`PublishedStats` seqlock after each frame; the UI thread copies it into the
+scene descriptor's buffer for the stats panel.  The scene descriptor's own
+buffer stays UI-thread-private.
+
+`num_hits` / `num_bvh_hits` are per-frame values written BY the kernel —
+statistics are kernel outputs.  The kernel's `render_kernel()` publishes
+scene-composition stats (`num_objects`, ...) host-side, and an optional
+`collect_frame_stats()` export publishes per-frame device-computed stats:
+the host calls it after the frame's device work completed (render kernel +
+tone-map), the kernel reads back the per-frame `rt::TraceCounters` scratch
+buffer (`RenderContext::trace_counters` — zeroed by the host each frame via
+`zero_trace_counters_async()`, like the accum buffer) and writes
+`num_hits`/`num_bvh_hits` into the stat block via `ctx->stats`.  Kernels
+without per-frame stats simply don't export it (dlsym miss = no-op).
+`rt::trace()` increments the counters atomically (`sycl::atomic_ref` on
+device; plain increments in native software mode) once per closest hit —
+including all bounces.  With the BVH active every hit is a BVH hit, so
+`num_hits == num_bvh_hits`; the linear-scan fallback counts
+`num_bvh_hits == 0`.
+
 ## Kernel API
 
 Every kernel is a shared library (`kernels/<name>/kernel.cpp`) that exposes
@@ -112,8 +167,10 @@ memory.  Typical actions:
 2. Build scene geometry using `SceneBuilder` (add hittable-material pairs,
    `add_portal(entry, exit)` for teleporting portals — see
    [docs/raytracing.md](raytracing.md) for the portal semantics).
-3. Call `scene.build(queue)` to upload per-type arrays to device memory.
-4. Store the returned `SceneView` in a static global for `render_kernel()`.
+3. Call `scene.build(queue)` to upload per-type arrays to device memory;
+   it returns an OWNING `SceneData` (never passed to the render function).
+4. Store a non-owning snapshot `scene_data.view()` in a static global
+   `SceneView` for `render_kernel()` — kernels only ever see the view.
 
 The params buffer (`d_params`) is allocated with `sycl::malloc_host` —
 accessible from both host and device — so `init_kernel()` reads params
@@ -138,10 +195,10 @@ extern "C" void render_kernel(sycl::queue* queue, int w, int h,
 }
 ```
 
-The kernel provides its `SceneView` (per-type device arrays + handles)
-and a background function.  The shared library handles camera setup,
-ray generation, path tracing, and accumulation (see
-[docs/raytracing.md](raytracing.md)).
+The kernel provides its `SceneView` (non-owning pointers into the
+host-owned `SceneData` buffers + handles) and a background function.
+The shared library handles camera setup, ray generation, path tracing,
+and accumulation (see [docs/raytracing.md](raytracing.md)).
 
 For non-raytracing kernels (e.g. Mandelbrot), `render_kernel()` implements
 its own computation directly.

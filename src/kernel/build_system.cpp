@@ -176,12 +176,12 @@ static float parse_and_log_build_line(const std::string &kernel_name,
     // Clang/GCC error:   file:line:col: error:   or  file:line: error:
     // ld error:          ld: ... undefined reference ...
     static std::regex re_error(
-        R"(^(?:.*:\d+:\d+:\s*error:|.*:\d+:\s*error:|ld:\s|.*fatal error|.*Error\s)",
+        R"(^(?:.*:\d+:\d+:\s*error:|.*:\d+:\s*error:|ld:\s|.*fatal error|.*Error\s))",
         std::regex::ECMAScript | std::regex::icase);
     // Clang/GCC warning: file:line:col: warning:
     // AdaptiveCpp deprecation: file:line:col: warning:
     static std::regex re_warning(
-        R"(^(?:.*:\d+:\d+:\s*warning:|.*:\d+:\s*warning:|.*warning:)",
+        R"(^(?:.*:\d+:\d+:\s*warning:|.*:\d+:\s*warning:|.*warning:))",
         std::regex::ECMAScript | std::regex::icase);
 
     // Progress patterns: [35%] or [5/42]

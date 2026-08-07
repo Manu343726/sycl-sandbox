@@ -20,12 +20,9 @@ public:
         if ( rec.is_portal ) {
             return portal_scatter(incoming_ray, rec);
         }
-        PROFILER_ZONE("DiffuseLight_scatter");
         return nullopt;
     }
     float3 emit(const HitRecord &) const {
-
-        PROFILER_ZONE("DiffuseLight_emit");
         return emit_color;
     }
 };

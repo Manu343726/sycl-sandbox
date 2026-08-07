@@ -408,6 +408,12 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path);
 /// @return Fully resolved configuration ready for build_scene().
 ResolvedScene load_and_resolve(const std::string &yaml_path);
 
+/// Evaluate the YAML's `data_sources:` / `data:` sections into
+/// `config.data_sources`, using the params currently stored in
+/// `config` (may be live overridden values).  Call after changing
+/// param values to regenerate the arrays (e.g. `num_spheres`).
+void resolve_data_sources(ResolvedScene &config);
+
 /// Build scene geometry from a resolved configuration.
 ///
 /// Iterates the `objects` section of the YAML and populates the

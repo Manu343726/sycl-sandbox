@@ -45,6 +45,22 @@ inline void call_render_kernel(void *handle, sycl::queue *q,
     }
 }
 
+/// Call collect_frame_stats() on a loaded kernel .so (optional, ABI v2).
+/// MUST be called only after the frame's device work completed (the host
+/// waits for the tone-map event first) — the kernel reads back per-frame
+/// device data (e.g. trace counters) and writes it into the stat block.
+/// `q` is null on the software backend (synchronous execution).
+inline void call_collect_frame_stats(void *handle, sycl::queue *q,
+                                     const RenderContext &ctx) {
+    PROFILER_FUNCTION();
+    using fn_t = void (*)(sycl::queue *, const RenderContext *);
+    auto *fn = reinterpret_cast<fn_t>(dlsym(handle, "collect_frame_stats"));
+    if ( fn ) {
+        fn(q, &ctx);
+    }
+    // Not an error — kernels without per-frame stats don't export it.
+}
+
 // ── Optional kernel API resolvers ─────────────────────────────────────
 
 /// Type of the get_scene_debug_info() function from kernel.

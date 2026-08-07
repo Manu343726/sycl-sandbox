@@ -342,6 +342,7 @@ add_executable(sycl-sandbox
     scene/loader.cpp
     ui/params/controls.cpp
     ui/scene_debug/panel.cpp
+    ui/metrics/system_metrics.cpp
     display/factory.cpp
     display/cuda_api.cpp
     display/cuda_gl_target.cpp

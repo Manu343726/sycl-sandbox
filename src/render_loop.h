@@ -249,8 +249,14 @@ inline void render_thread_func(AppState &state) {
             (uint32_t)cur_spp,       // samples accumulated before this call
             new_tick,                // animation frame counter
             ring,
-            state.kr->stat_writer()
+            state.kr->stat_writer(),
+            state.kr->trace_counters()
         };
+
+        // Zero the per-frame trace counters (in-order: sequenced before
+        // the render kernel, so debug overrides see a clean 0).
+        state.kr->zero_trace_counters_async();
+
         if ( !dbg_colorchecker && !dbg_colorchecker_raw )
             call_render_kernel(state.kr->kernel()->handle, q, ctx);
 
@@ -305,6 +311,15 @@ inline void render_thread_func(AppState &state) {
             }
         }
         uint64_t host_t1 = profiler::DeviceRing::timestamp();
+
+        // ── Per-frame stats from the kernel ──────────────────────
+        // Statistics are kernel outputs: collect_frame_stats() lets the
+        // kernel read back its per-frame device data (e.g. the trace
+        // counters) and write them into the stat block via ctx->stats.
+        // Called only when the render kernel actually ran — the debug
+        // colorchecker overrides bypass it, so their counters stay 0.
+        if ( !dbg_colorchecker && !dbg_colorchecker_raw )
+            call_collect_frame_stats(state.kr->kernel()->handle, q, ctx);
 
         // ── Publish frame ────────────────────────────────────────
         if ( slot >= 0 && staging ) {

@@ -22,7 +22,6 @@ public:
         if ( hit.is_portal ) {
             return portal_scatter(incoming_ray, hit);
         }
-        PROFILER_ZONE("Dielectric_scatter");
         // Determine whether the ray is entering the dielectric or exiting it
         float3 outward_normal;
         float eta_ratio;
@@ -53,8 +52,6 @@ public:
     }
 
     float3 emit(const HitRecord &) const {
-
-        PROFILER_ZONE("Dielectric_emit");
         return {0, 0, 0};
     }
 };

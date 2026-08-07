@@ -129,8 +129,9 @@ struct Runtime {
         device_memory_used += bytes;
         if (device_memory_used > peak_device_memory)
             peak_device_memory = device_memory_used;
-        PROFILER_ALLOC(ptr, bytes);
-        PROFILER_PLOT("Device memory", (float)device_memory_used.load());
+        // TODO: uncomment when profiler works
+        // PROFILER_ALLOC(ptr, bytes);
+        // PROFILER_PLOT("Device memory", (float)device_memory_used.load());
         return ptr;
     }
 
@@ -146,15 +147,17 @@ struct Runtime {
         host_memory_used += bytes;
         if (host_memory_used > peak_host_memory)
             peak_host_memory = host_memory_used;
-        PROFILER_ALLOC(ptr, bytes);
-        PROFILER_PLOT("Host memory", (float)host_memory_used.load());
+        // TODO: uncomment when profiler works
+        // PROFILER_ALLOC(ptr, bytes);
+        // PROFILER_PLOT("Host memory", (float)host_memory_used.load());
         return ptr;
     }
 
     template <typename T>
     void dealloc(T *ptr) {
         if (!ptr) return;
-        PROFILER_FREE(ptr);
+        // TODO: uncomment when profiler works
+        // PROFILER_FREE(ptr);
 #ifndef KERNEL_NATIVE
         if (queue) { sycl::free(ptr, *queue); return; }
 #endif
@@ -167,12 +170,15 @@ struct Runtime {
         size_t bytes = count * sizeof(T);
         if (is_device) {
             device_memory_used -= bytes;
-            PROFILER_PLOT("Device memory", (float)device_memory_used.load());
+            // TODO: uncomment when profiler works
+            // PROFILER_PLOT("Device memory", (float)device_memory_used.load());
         } else {
             host_memory_used -= bytes;
-            PROFILER_PLOT("Host memory", (float)host_memory_used.load());
+            // TODO: uncomment when profiler works
+            // PROFILER_PLOT("Host memory", (float)host_memory_used.load());
         }
-        PROFILER_FREE(ptr);
+        // TODO: uncomment when profiler works
+        // PROFILER_FREE(ptr);
 #ifndef KERNEL_NATIVE
         if (queue) { sycl::free(ptr, *queue); return; }
 #endif

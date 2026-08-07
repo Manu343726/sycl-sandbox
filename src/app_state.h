@@ -14,6 +14,7 @@
 #include "io/log_sink.h"
 #include "ui/stat/panel.h"
 #include "ui/build_monitor/panel.h"
+#include "ui/metrics/system_metrics.h"
 
 #include <sycl/sycl.hpp>
 #include <GLFW/glfw3.h>
@@ -113,6 +114,9 @@ struct AppState {
     StatStore stat_store;
     BuildMonitor build_monitor;
 
+    // ── System resource metrics (CPU / RAM / GPU) ────────────────
+    SystemMetrics system_metrics;
+
     // ── Render thread ──────────────────────────────────────────
     std::atomic<bool> render_paused{false};
     std::atomic<bool> render_running{true};
@@ -140,6 +144,7 @@ struct AppState {
     bool show_builds = false;
     bool show_logs = false;
     bool show_profiler = false;
+    bool show_metrics = false;
     bool show_test_engine = false;
 
     // ── Convenience helpers ────────────────────────────────────

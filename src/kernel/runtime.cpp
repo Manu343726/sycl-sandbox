@@ -52,6 +52,10 @@ KernelRuntime::KernelRuntime(const std::string &build_dir,
     }
     krt_.queue = q_;
 
+    // Per-frame trace counters (num_hits / num_bvh_hits)
+    d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
+    krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+
     spdlog::info("[startup] {}", device_name());
 }
 
@@ -59,10 +63,14 @@ KernelRuntime::~KernelRuntime() {
     // Free accum and params before the queue is destroyed
     if (d_params_) { krt_.dealloc(d_params_); d_params_ = nullptr; }
     if (d_accum_) { krt_.dealloc(d_accum_); d_accum_ = nullptr; }
+    if (d_trace_counters_) {
+        krt_.dealloc(d_trace_counters_);
+        d_trace_counters_ = nullptr;
+    }
 
     // Free host scene
-    if (host_scene_.view.handles) {
-        host_scene_.view.free(&krt_);
+    if (!host_scene_.data.empty()) {
+        host_scene_.data.free(&krt_);
     }
 }
 
@@ -278,6 +286,12 @@ void KernelRuntime::fill_zero(float *buf) {
     krt_.fill(buf, 0, accum_bytes_);
 }
 
+void KernelRuntime::zero_trace_counters_async() {
+    if (!d_trace_counters_) return;
+    if (q_) q_->memset(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+    else std::memset(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+}
+
 void KernelRuntime::drain() {
     if (!q_) return;
     try {
@@ -412,10 +426,14 @@ void KernelRuntime::free_device_resources() {
         krt_.dealloc(d_accum_);
         d_accum_ = nullptr;
     }
+    if (d_trace_counters_) {
+        krt_.dealloc(d_trace_counters_);
+        d_trace_counters_ = nullptr;
+    }
 
     // Free host scene
-    if (host_scene_.view.handles) {
-        host_scene_.view.free(&krt_);
+    if (!host_scene_.data.empty()) {
+        host_scene_.data.free(&krt_);
         host_scene_ = HostScene{};
     }
 }
@@ -426,6 +444,10 @@ void KernelRuntime::alloc_device_resources() {
 
     d_accum_ = krt_.alloc_device<float>(pixel_count * 4);
     krt_.fill(d_accum_, 0, accum_bytes_);
+
+    // Trace counters — persistent across scenes, re-created per backend
+    d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
+    krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
 }
 
 sycl::queue KernelRuntime::make_queue(int backend_idx) {

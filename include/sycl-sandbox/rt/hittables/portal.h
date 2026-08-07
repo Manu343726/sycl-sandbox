@@ -78,8 +78,6 @@ public:
     /// record carries the hit shape's distance (closest-hit ordering)
     /// and the OTHER shape's surface point, UV-mapped via point_at_uv().
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
-        PROFILER_FUNCTION();
-        PROFILER_ZONE("Portal_hit");
         optional<HitRecord> entry_hit;
         visit(entry, [&](const auto &shape) {
             entry_hit = shape.hit(ray, t_min, t_max);

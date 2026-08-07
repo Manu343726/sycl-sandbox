@@ -53,10 +53,14 @@ Type IDs: 0 = Sphere, 1 = Triangle, 2 = Quad, 3 = Box, 4 = Portal (hittable);
 0 = Lambertian, 1 = Metal, 2 = Dielectric, 3 = DiffuseLight,
 4 = TexturedLambertian (material).
 
-### SceneView (device-side)
+### SceneView (device-side, non-owning)
 
-Trivially-copyable struct of device pointers, captured by value in SYCL
-lambdas.  All pointers are `sycl::malloc_device` allocations.
+Read-only, NON-OWNING scene data passed to device kernels by value.
+Never allocates or frees — the buffers it points at are owned by the
+host-side `SceneData` (the upper layer), which is NEVER passed to the
+render function.  Because it is just pointers + counts, a `SceneView`
+can also point at stack arrays or device memory (`sycl::malloc_device`
+allocations from `SceneBuilder::build()`).
 
 ```cpp
 struct SceneView {
@@ -75,27 +79,43 @@ struct SceneView {
     BvhNode *bvh_nodes; int bvh_root;     // BVH (future)
     LightInfo *lights; int num_lights;    // light list (future)
 };
+
+// Owning layer (host-side only, never passed to the render function)
+struct SceneData : SceneView {
+    bool empty() const;            // handles == nullptr
+    SceneView view() const;        // non-owning snapshot for kernels
+    void free(rt::Runtime *rt);    // deallocates every buffer
+};
 ```
 
 ### SceneBuilder (host-side)
 
 Accumulates hittable-material pairs via `add()`, then uploads per-type
-arrays to device memory via `build()`:
+arrays via `build()` — which returns an OWNING `SceneData`:
 
 ```cpp
 SceneBuilder scene;
 scene.add({hittables::sphere({0, 0, 0}, 1), materials::lambertian({1, 1, 1})});
 scene.add({hittables::box(-1, -1, -1, 2, 2, 2), materials::metal({0.8f, 0.8f, 0.8f}, 0)});
-scene_view = scene.build(*queue);  // upload to device
+SceneData scene_data = scene.build(queue);   // upload to device, owns buffers
+// Kernels render through the non-owning view:
+render_main(..., scene_data.view(), ...);
+// Host frees when done:
+scene_data.free(queue);
 ```
 
 ### Dispatch
 
-The `trace()` function iterates handles and calls `handle_hit()`,
-`handle_scatter()`, `handle_emit()` — inline functions that switch on
-the packed type tag and index into the correct per-type array.
+The `trace()` function finds the closest hit via the flat BVH
+(`bvh_hit()`, a stack-based traversal over the contiguous `BvhNode[]`
+array with AABB culling) and then calls `handle_hit()`, `handle_scatter()`,
+`handle_emit()` — inline functions that switch on the packed type tag
+and index into the correct per-type array.  If no BVH was built
+(`bvh_nodes == null`), it falls back to the linear per-handle scan:
 
 ```cpp
+optional<BvhHitResult> bvh = bvh_hit(ray, t_min, t_max, scene);
+// Fallback (no BVH):
 for (int i = 0; i < scene.num_handles; i++) {
     auto hit = handle_hit(scene.handles[i], ray, t_min, t_max, scene);
     if (hit) { closest_hit = hit; hit_index = i; }
@@ -104,6 +124,28 @@ for (int i = 0; i < scene.num_handles; i++) {
 float3 emitted = handle_emit(winning_handle, *closest_hit, scene);
 auto scattered = handle_scatter(winning_handle, ray, *closest_hit, rng, scene);
 ```
+
+X-ray mode (`transparent_backfaces`) is handled inside `bvh_hit()` via the
+`skip_backfaces` flag: back-face hits are ignored **without** tightening
+`t_max`, so the ray continues past them to objects behind the surface.
+
+### Sky lighting
+
+`trace()` takes the renderer's background function (`BgFn`) as its last
+argument.  When a ray escapes the scene (no handle hit) — or reaches the
+bounce limit — the background function is evaluated at the *current* ray
+and folded into the path, attenuated by the throughput so far:
+
+```cpp
+if (!closest_hit) {
+    return mul(attenuation, background_fn(ray_in_out));  // sky colour
+}
+```
+
+This is what makes sky-lit scenes (no emissive lights, e.g. the "one
+weekend" style) render at all: without it every path ends black and the
+whole image collapses to a flat background gradient (the `render_main`
+black-substitution hack that previously masked this was removed).
 
 ## Anatomy of a minimal raytracer kernel
 
@@ -114,7 +156,7 @@ read parameters by name via `ParamLookup::read<T>("name")`.
 ```cpp
 #include <sycl-sandbox/rt/types.h>      // Object, Hittable, Material
 #include <sycl-sandbox/rt/trace.h>      // rt::render_main()
-#include <sycl-sandbox/rt/scene_data.h> // SceneBuilder, SceneView
+#include <sycl-sandbox/rt/scene_data.h> // SceneBuilder, SceneData, SceneView
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/diffuse_light.h>
@@ -127,7 +169,8 @@ using rt::materials::diffuse_light;
 
 // ── Scene state ───────────────────────────────────────────────────────
 static SceneBuilder scene;
-static SceneView scene_view = {};
+static SceneData scene_data = {};   // owning; kernel never sees this
+static SceneView scene_view = {};   // non-owning snapshot for render_kernel
 
 // ── Scene builder (host, called by init_kernel) ────────────────────────
 extern "C" void init_kernel(sycl::queue* queue, int, int,
@@ -139,7 +182,8 @@ extern "C" void init_kernel(sycl::queue* queue, int, int,
     scene = SceneBuilder();
     scene.add({hittables::quad(axis, value, …), lambertian(color)});
     scene.add({hittables::box(cx, cy, cz, sx, sy, sz), lambertian(color)});
-    scene_view = scene.build(*queue);   // upload per-type arrays to device
+    scene_data = scene.build(queue);   // upload per-type arrays to device
+    scene_view = scene_data.view();    // kernel renders through this
 }
 
 // ── Render (called every frame) ───────────────────────────────────────
@@ -151,7 +195,7 @@ extern "C" void render_kernel(sycl::queue* queue, int w, int h,
 }
 
 extern "C" void shutdown_kernel(sycl::queue* queue) {
-    scene_view.free(*queue);
+    scene_data.free(queue);
 }
 ```
 
@@ -180,8 +224,16 @@ The `aabb_hit()` utility performs a fast slab-method ray-AABB test, used
 for broad-phase rejection in BVH traversal and available for future
 importance sampling.
 
-BVH construction (`SceneBuilder::build_bvh()`) and light list computation
-are stubbed but the data slots are in place in `SceneView`.
+BVH construction (`SceneBuilder::build_bvh()`) builds a binary BVH over
+the scene's per-handle AABBs (median split along the longest axis) and
+flattens it to a contiguous pre-order array of `BvhNode`
+(`{Aabb bounds, uint32 left, uint32 right}`, `left == BVH_LEAF` marks a
+leaf whose `right` is the handle index).  The array is uploaded to
+device memory as a single buffer (`SceneView::bvh_nodes`) — no pointers,
+all navigation by index, in the same spirit as a `boost::flat_map`.  The
+renderer's closest-hit query is `bvh_hit()`, an iterative stack-based
+traversal over that flat array.  Light list computation is stubbed but
+the data slot is in place in `SceneView`.
 
 ## Textures
 
@@ -219,7 +271,7 @@ Polymorphism comes from the same variant + compile-time `visit()`
 dispatch used by `Hittable`/`Material`:
 
 ```cpp
-using Texture = std::variant<SolidColor, ColorChecker>;
+using Texture = std::variant<SolidColor, ColorChecker, Text, Blend>;
 
 // Free function dispatching to the concrete texture's sample():
 float3 sample(const Texture&, float u, float v, float time, RNG &rng);
@@ -234,6 +286,8 @@ likes — the interface is simply the `sample(u, v, time, rng)` convention.
 |---------|----------|
 | `SolidColor` | ignores (u, v, time), returns one constant colour |
 | `ColorChecker` | 24-patch ColorChecker chart (reference sRGB from `colorchecker.h`); wraps on UV overflow so the chart tiles infinitely; `scale_u`/`scale_v` repeat it per UV unit |
+| `Text` | renders a fixed string in an embedded 8×8 monospace bitmap font (public-domain `font8x8`, ASCII 32–126); initialized with the string, configurable glyph/background colour, cell size and origin in UV space; UVs outside the text return the background |
+| `Blend` | alpha-blends up to 4 textures in order (source-over: `result = lerp(result, layer, alpha)`); layers are the *leaf* texture types (no recursion into the `Texture` variant) |
 
 ### TexturedLambertian
 
@@ -343,10 +397,72 @@ objects:
 
 Entry/exit shapes support `type: quad` (center/u/v), `type: sphere`
 (center/radius) and `type: triangle` (v0/v1/v2).  See
-`scenes/portal_rooms.yaml` for a two-room demo and
-`kernels/rt_portal_test/kernel.cpp` for a from-scratch single-room test
-scene (Cornell box + one bidirectional sphere-sphere portal) that
-exercises both directions.
+`scenes/portal_rooms.yaml` for the two-room demo.
+
+## Data sources & procedural objects
+
+Scene geometry can be generated procedurally from **data sources** —
+array-valued generators whose values can be referenced per-instance by
+objects.  Data sources may reference scene params (`$name`) and
+previously generated sources.
+
+```yaml
+data_sources:
+  - id: positions          # generator outputs an array of values
+    type: vec3[]
+    generator: random_range
+    inputs:
+      count: $num_spheres  # references a param
+      min: [-10, 0.2, -10]
+      max: [10, 0.2, 10]
+
+  - id: material_choice
+    type: string[]
+    generator: weighted_choice
+    inputs:
+      count: $num_spheres
+      choices:
+        - value: lambertian   # 60% of instances
+          weight: 0.6
+        - value: metal
+          weight: 0.25
+        - value: dielectric
+          weight: 0.15
+```
+
+Generators: `random_range` (uniform between `min`/`max`, scalar or
+vec3) and `weighted_choice` (string or int choices with weights).  The
+legacy map form (`data: {name: {random_range: {...}}}`) is also
+accepted.  A `data_sources` value is referenced like a param: `$id`.
+
+Objects can then be **expanded** into `count` instances, with array
+references yielding one value per instance:
+
+```yaml
+objects:
+  - count: $num_spheres
+    hittable:
+      type: sphere
+      radius: 0.2
+      center: $positions       # positions[i] for instance i
+    material:
+      source: $material_choice # string per instance
+      mapping:                 # per-choice material template
+        lambertian:
+          type: lambertian
+          albedo: $colors      # colors[i]
+        metal:
+          type: metal
+          albedo: $colors
+          fuzz: $fuzz          # fuzz[i]
+        dielectric:
+          type: dielectric
+          ir: 1.5
+```
+
+Data sources are re-evaluated after param changes, so live UI edits
+(e.g. `num_spheres`) regenerate the arrays.  See
+`scenes/one_weekend_final.yaml` for a complete example.
 
 ## optional return values
 

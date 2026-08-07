@@ -88,17 +88,30 @@ inline bool aabb_hit(Aabb box, const Ray &ray, float t_min, float t_max) {
         float bmin = (axis == 0) ? box.min.x : (axis == 1) ? box.min.y : box.min.z;
         float bmax = (axis == 0) ? box.max.x : (axis == 1) ? box.max.y : box.max.z;
 
+        // Ray parallel to this slab: it can only intersect if the origin
+        // already lies inside the slab (also avoids 0/0 NaN on degenerate
+        // boxes where bmin == bmax).
+        if ( dir == 0.f ) {
+            if ( orig < bmin || orig > bmax ) {
+                return false;
+            }
+            continue;
+        }
+
         float inv_dir = 1.f / dir;
         float t0 = (bmin - orig) * inv_dir;
         float t1 = (bmax - orig) * inv_dir;
-        if ( inv_dir < 0.f ) {
+        if ( t0 > t1 ) {
             float tmp = t0;
             t0 = t1;
             t1 = tmp;
         }
         t_min = (t0 > t_min) ? t0 : t_min;
         t_max = (t1 < t_max) ? t1 : t_max;
-        if ( t_max <= t_min ) {
+        // Strict comparison: degenerate boxes (bmin == bmax, e.g. quads,
+        // zero thickness) give t0 == t1 == the plane hit — an exact
+        // intersection must NOT be rejected.
+        if ( t_max < t_min ) {
             return false;
         }
     }

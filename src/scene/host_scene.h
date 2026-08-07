@@ -12,9 +12,16 @@
 
 // ── HostScene ────────────────────────────────────────────────────────
 /// Persistent host-side scene state for YAML-defined scenes.
-/// The SceneBuilder and SceneView live here so that SceneDebugInfo
+/// The SceneBuilder and SceneData live here so that SceneDebugInfo
 /// pointers into the builder's buffers remain valid across frames.
+///
+/// Ownership split:
+///   - data  — OWNING buffers (device/heap), allocated via SceneBuilder.
+///             Never passed to the render function.
+///   - view  — NON-OWNING snapshot of data, handed to the kernel via
+///             set_scene_view(); the render path only ever sees this.
 struct HostScene {
+    rt::SceneData data = {};
     rt::SceneView view = {};
     rt::SceneBuilder builder;
     SceneDebugInfo debug_info = {};
@@ -36,8 +43,8 @@ inline void rebuild_yaml_scene(rt::Runtime *rt,
     }
 
     // Free old scene via Runtime (handles SYCL or software dealloc)
-    if ( host_scene.view.handles ) {
-        host_scene.view.free(rt);
+    if ( !host_scene.data.empty() ) {
+        host_scene.data.free(rt);
         host_scene = HostScene{};
     }
 
@@ -73,12 +80,18 @@ inline void rebuild_yaml_scene(rt::Runtime *rt,
         }
     }
 
+    // Data sources may reference params ($name) — regenerate the
+    // arrays with the live param values (e.g. num_spheres).
+    scene_loader::resolve_data_sources(config);
+
     // Build geometry
     scene_loader::build_scene(host_scene.builder, config);
     host_scene.builder.build_bvh();
 
-    // Build the SceneView through the Runtime abstraction
-    host_scene.view = host_scene.builder.build(rt);
+    // Build the SceneData through the Runtime abstraction (owns the
+    // buffers); the kernel renders with the non-owning view snapshot.
+    host_scene.data = host_scene.builder.build(rt);
+    host_scene.view = host_scene.data.view();
 
     host_scene.builder.build_debug_geometry();
 

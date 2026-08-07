@@ -6,6 +6,7 @@
 #include "scene/registry.h"
 #include "scene/host_scene.h"
 #include "io/watcher.h"
+#include <sycl-sandbox/sandbox_api.h>
 
 #ifndef KERNEL_NATIVE
 #include <sycl/sycl.hpp>
@@ -122,6 +123,18 @@ public:
     }
     const std::vector<float> &stat_buffer() const { return stat_buffer_; }
 
+    // ── Per-frame trace counters (device side) ─────────────────────
+    /// Device buffer holding num_hits / num_bvh_hits for the current
+    /// frame.  Zeroed before each render enqueue (in-order: sequenced
+    /// before the render kernel), read back after frame completion and
+    /// folded into the per-frame stat block.  May be null in degenerate
+    /// states.
+    rt::TraceCounters *trace_counters() { return d_trace_counters_; }
+
+    /// Zero the trace counters before enqueuing the render kernel
+    /// (in-order queue sequences the memset ahead of the kernel).
+    void zero_trace_counters_async();
+
     KernelHandle *kernel() const { return active_kernel_; }
     const SceneDef *scene() const { return active_scene_; }
     scene_loader::SceneDescriptor *scene_desc() const {
@@ -187,6 +200,9 @@ private:
     // ── Per-frame stats (render-thread private, seqlock-published) ─
     std::vector<float> stat_buffer_;
     rt::StatWriter stat_writer_;
+
+    // ── Trace counters (device buffer, zeroed per frame) ─────────
+    rt::TraceCounters *d_trace_counters_ = nullptr;
 
     // ── Accumulation buffer (single, persistent) ─────────────────
     float *d_accum_ = nullptr;

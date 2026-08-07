@@ -29,7 +29,6 @@ public:
         if ( hit.is_portal ) {
             return portal_scatter(incoming_ray, hit);
         }
-        PROFILER_ZONE("Metal_scatter");
         float3 reflected = reflect(norm(incoming_ray.dir), hit.normal);
         Ray scattered {hit.p, add(reflected, scale(random_in_unit_sphere(rng), fuzz))};
         if ( dot(scattered.dir, hit.normal) <= 0 ) {
@@ -39,8 +38,6 @@ public:
     }
 
     float3 emit(const HitRecord &) const {
-
-        PROFILER_ZONE("Metal_emit");
         return {0, 0, 0};
     }
 };

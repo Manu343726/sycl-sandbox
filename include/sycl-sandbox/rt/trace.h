@@ -1,4 +1,5 @@
 #pragma once
+#include <sycl-sandbox/sandbox_api.h>
 #include <sycl-sandbox/profiler.h>
 #include <sycl-sandbox/profiler_device.h>
 #include <sycl-sandbox/rt/types.h>
@@ -26,40 +27,69 @@ constexpr const char *KEY_TIME         = "time";
 /// Uses per-handle dispatch to hit, scatter, and emit on the correct
 /// per-type arrays.
 ///
+/// When a ray escapes the scene (or hits the bounce limit), the
+/// background function is evaluated at the current ray and folded into
+/// the path, attenuated by the throughput so far — standard sky
+/// lighting.  This is what makes sky-lit scenes (no emissive lights,
+/// e.g. "one weekend" style) render at all: without it every path
+/// ends black and the whole image collapses to the flat background.
+///
 /// \param transparent_backfaces X-ray mode: when true, rays pass through
 ///        surfaces hit from behind (front_face == false), so a camera
 ///        outside an enclosed scene can see inside through the walls.
+/// \param counters optional per-frame trace counters: when non-null,
+///        each closest hit found is atomically counted (num_hits, and
+///        num_bvh_hits when the hit came from BVH traversal).
+template <typename BgFn>
 inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces,
-                    bool transparent_backfaces, RNG &rng) {
-    PROFILER_ZONE("trace_path");
+                    bool transparent_backfaces, RNG &rng,
+                    TraceCounters *counters, BgFn &&background_fn) {
     // Initialise the path throughput (attenuation) and the working ray
     float3 attenuation = {1, 1, 1};
     Ray ray_in_out = ray;
 
     // Trace the ray through successive bounces
     for ( int bounce = 0; bounce < max_bounces; bounce++ ) {
-        // Find the closest object hit by the ray within [0.001, ∞)
+        // Find the closest object hit by the ray within [0.001, ∞).
+        // Preferred path: closest-hit query over the flat BVH array
+        // (skips whole subtrees via AABB culling).  Falls back to a
+        // linear scan when no BVH was built for the scene.
+        bool used_bvh = scene.bvh_nodes && scene.bvh_root >= 0;
         optional<HitRecord> closest_hit;
         Handle hit_handle = {};
 
-        for ( int i = 0; i < scene.num_handles; i++ ) {
-            auto hit = handle_hit(scene.handles[i],
-                                  ray_in_out,
-                                  0.001f,
-                                  closest_hit ? closest_hit->t : 1e30f,
-                                  scene);
-            if ( !hit ) continue;
-            // X-ray mode: back faces are transparent — skip hits from
-            // behind so the ray passes through the surface.
-            if ( transparent_backfaces && !hit->front_face ) continue;
-            closest_hit = hit;
-            hit_handle = scene.handles[i];
+        if ( used_bvh ) {
+            auto bvh_result = bvh_hit(ray_in_out, 0.001f, 1e30f, scene,
+                                      transparent_backfaces);
+            if ( bvh_result ) {
+                closest_hit = bvh_result->record;
+                hit_handle = bvh_result->handle;
+            }
+        } else {
+            for ( int i = 0; i < scene.num_handles; i++ ) {
+                auto hit = handle_hit(scene.handles[i],
+                                      ray_in_out,
+                                      0.001f,
+                                      closest_hit ? closest_hit->t : 1e30f,
+                                      scene);
+                if ( !hit ) continue;
+                // X-ray mode: back faces are transparent — skip hits from
+                // behind so the ray passes through the surface.
+                if ( transparent_backfaces && !hit->front_face ) continue;
+                closest_hit = hit;
+                hit_handle = scene.handles[i];
+            }
         }
 
-        // If no object was hit the ray escapes to the void
+        // If no object was hit the ray escapes to the void: fold the
+        // sky colour into the path, attenuated by the throughput.
         if ( !closest_hit ) {
-            return {0, 0, 0};
+            return mul(attenuation, background_fn(ray_in_out));
         }
+
+        // Count the closest hit (BVH provenance distinguishes the two
+        // query paths — with the BVH active, every hit is a BVH hit).
+        if ( counters ) counters->add_hit(used_bvh);
 
         // If the hit object emits light, return the attenuated emission
         float3 emitted = handle_emit(hit_handle, *closest_hit, scene);
@@ -77,7 +107,10 @@ inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces,
         attenuation = mul(attenuation, scattered->attenuation);
         ray_in_out = scattered->scattered;
     }
-    return {0, 0, 0};
+
+    // Bounce limit reached — approximate the remaining path with the
+    // sky, attenuated by the throughput so far.
+    return mul(attenuation, background_fn(ray_in_out));
 }
 
 // ── Render entry point ─────────────────────────────────────────────────
@@ -96,8 +129,8 @@ void render_main(const Runtime &rt,
                  uint32_t spp_total,
                  const SceneView &scene,
                  BgFn &&background_fn,
-                 profiler::DeviceRing prof = {}) {
-    PROFILER_FUNCTION();
+                 profiler::DeviceRing prof = {},
+                 TraceCounters *counters = nullptr) {
     // Read all parameters by name using the type-safe ParamLookup API.
     // These reads happen on the host (before the pixel loop), so there
     // is zero per-pixel lookup overhead.
@@ -127,7 +160,6 @@ void render_main(const Runtime &rt,
     // In SYCL mode this uses queue->parallel_for; in software mode it
     // uses plain nested for-loops — no OpenMP, no SYCL in the kernel.
     rt.foreach_pixel<KernelName>(width, height, [=](int x, int y, int flat_index) {
-        PROFILER_DEVICE_ZONE(prof, "trace_px", flat_index);
         for ( int sample = 0; sample < samples_per_frame; sample++ ) {
             // Initialise the per-pixel, per-sample RNG from the pixel index and
             // total accumulated samples for stream decorrelation.
@@ -155,13 +187,11 @@ void render_main(const Runtime &rt,
                                ray_origin));
             ray.time = frame_time;
 
-            // Trace the ray and accumulate its colour
-            float3 colour = trace(ray, scene, max_bounces, transparent_backfaces, rng);
-
-            // If the ray hit nothing (colour is black), use the background colour
-            if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
-                colour = background_fn(ray);
-            }
+            // Trace the ray through the scene; trace() folds the sky
+            // colour into the path when the ray escapes, attenuated by
+            // the throughput (see rt::trace()).
+            float3 colour = trace(ray, scene, max_bounces, transparent_backfaces,
+                                  rng, counters, background_fn);
 
             // Accumulate the sample into the RGBA output buffer
             int base = flat_index * 4;

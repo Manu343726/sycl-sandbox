@@ -99,7 +99,8 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
                     float t = 0.5f * (ray.dir.y + 1.0f);
                     return lerp({1, 1, 1}, bg, t);
                 },
-                ctx->prof);
+                ctx->prof,
+                ctx->trace_counters);
 
     // Write statistics to the per-frame block
     if (external_scene && ctx->stats) {
@@ -107,6 +108,26 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
         ctx->stats->write<int>("num_bvh_nodes", external_scene->num_bvh_nodes);
         ctx->stats->write<int>("num_lights", external_scene->num_lights);
     }
+}
+
+// ── Per-frame statistics (optional export, ABI v2) ───────────────────
+// Statistics are kernel outputs, written by the kernel.  The host calls
+// this AFTER the frame's device work completed (render kernel + tone-map),
+// so the device-side trace counters are final; we read them back and
+// publish num_hits / num_bvh_hits into the stat block via ctx->stats.
+// (The copy is blocking, but the queue is idle here — the host waited
+// for the frame before calling us, so it returns immediately.)
+
+extern "C" void collect_frame_stats(KERNEL_QUEUE_PARAM,
+                                     const RenderContext *ctx) {
+    PROFILER_ZONE("collect_frame_stats");
+    if ( !ctx || !g_rt ) return;
+    if ( !ctx->stats || !ctx->trace_counters ) return;
+
+    rt::TraceCounters local;
+    g_rt->copy_to_host(&local, ctx->trace_counters, sizeof(rt::TraceCounters));
+    ctx->stats->write<int>("num_hits", (int)local.num_hits);
+    ctx->stats->write<int>("num_bvh_hits", (int)local.num_bvh_hits);
 }
 
 // ── shutdown_kernel ─────────────────────────────────────────────────

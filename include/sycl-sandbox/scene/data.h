@@ -134,13 +134,15 @@ struct MaterialTag<materials::TexturedLambertian> {
     static constexpr MaterialType value = MaterialType::TexturedLambertian;
 };
 
-// ── SceneView (device-side) ───────────────────────────────────────────
+// ── SceneView (device-side, non-owning) ───────────────────────────────
 
-/// Read-only scene data passed to device kernels by value (captured in
-/// SYCL lambdas).  All pointers are sycl::malloc_device allocations.
+/// Read-only, NON-OWNING scene data passed to device kernels by value
+/// (captured in SYCL lambdas).  Never allocates or frees — the buffers
+/// it points at are owned by the host-side SceneData (the upper layer),
+/// which is NOT passed to the render function.
+///
 /// Nullable arrays with counts — unset features have null + zero.
-/// For the software (non-SYCL) path, use build(Runtime*) and free(Runtime*)
-/// instead, which treat pointers as regular heap allocations.
+/// Because it is a pure view it can also point at stack arrays.
 struct SceneView {
     // ── Handles (always present) ──────────────────────────────────────
     Handle *handles;
@@ -181,14 +183,33 @@ struct SceneView {
     // ── Optional: light list (built during build if lights exist) ─────
     LightInfo *lights;
     int num_lights;
+};
 
-    /// Free all device memory held by this view (SYCL path).
-#ifndef KERNEL_NATIVE
-    void free(sycl::queue &queue) const;
-#endif
+// ── SceneData (host-side owner) ───────────────────────────────────────
 
-    /// Free all memory using the Runtime abstraction (SYCL or software).
-    void free(Runtime *rt);
+/// Owning scene buffers — the upper layer that manages the memory a
+/// SceneView points at.  Allocated through the Runtime abstraction
+/// (SYCL device memory, or plain heap in software mode).
+///
+/// Lives on the host (e.g. inside HostScene) and is NEVER passed to the
+/// raytracing render function — kernels only ever receive the non-owning
+/// SceneView (via set_scene_view), so the render path cannot free or
+/// mutate the buffers.
+struct SceneData : SceneView {
+    /// True while no buffers have been built (or after free()).
+    bool empty() const {
+        return handles == nullptr;
+    }
+
+    /// Non-owning snapshot of the buffers, safe to pass to the render
+    /// function or capture by value into kernel lambdas.
+    SceneView view() const {
+        return *this;
+    }
+
+    /// Free all buffers through the Runtime abstraction (SYCL device
+    /// or plain delete[]), resetting the scene to empty.
+    void free(rt::Runtime *rt);
 };
 
 // ── Dispatch functions (device-capable) ────────────────────────────────
@@ -196,7 +217,6 @@ struct SceneView {
 /// Test a handle's hittable against a ray.
 inline optional<HitRecord>
 handle_hit(Handle h, const Ray &ray, float t_min, float t_max, const SceneView &scene) {
-    PROFILER_FUNCTION();
     auto type = static_cast<HittableType>(handle_tag(h.hittable));
     uint32_t idx = handle_index(h.hittable);
     switch ( type ) {
@@ -220,7 +240,6 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
                                               const HitRecord &hit,
                                               RNG &rng,
                                               const SceneView &scene) {
-    PROFILER_FUNCTION();
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
@@ -240,7 +259,6 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
 
 /// Emit light from a handle's material.
 inline float3 handle_emit(Handle h, const HitRecord &hit, const SceneView &scene) {
-    PROFILER_FUNCTION();
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
@@ -269,9 +287,14 @@ struct BvhHitResult {
 
 /// Iterative stack-based BVH traversal.  Returns the closest hit within
 /// [t_min, t_max], or nullopt if the ray misses the entire BVH.
+///
+/// \param skip_backfaces X-ray mode: when true, hits from behind
+///        (front_face == false) are ignored WITHOUT tightening t_max,
+///        so the ray continues past them and can hit objects behind
+///        the surface (e.g. seeing inside an enclosed scene).
 inline optional<BvhHitResult>
-bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene) {
-    PROFILER_FUNCTION();
+bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene,
+        bool skip_backfaces = false) {
     if ( !scene.bvh_nodes || scene.bvh_root < 0 ) {
         return nullopt;
     }
@@ -294,6 +317,11 @@ bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene) {
         if ( node.left == BVH_LEAF ) {
             auto hit = handle_hit(scene.handles[node.right], ray, t_min, t_max, scene);
             if ( hit ) {
+                // X-ray mode: pass through hits from behind — do not
+                // tighten t_max, the ray must continue past them.
+                if ( skip_backfaces && !hit->front_face ) {
+                    continue;
+                }
                 closest_hit = BvhHitResult {*hit, scene.handles[node.right]};
                 t_max = hit->t;
             }
@@ -318,7 +346,8 @@ bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene) {
 ///   SceneBuilder scene;
 ///   scene.add(hittables::sphere({0, 0, 0}, 1), materials::lambertian({1, 1, 1}));
 ///   scene.add(hittables::box(-1, -1, -1, 2, 2, 2), materials::metal({0.8f, 0.8f, 0.8f}, 0));
-///   scene_view = scene.build(*queue);
+///   scene_data = scene.build(queue);      // owns the buffers
+///   render_main(..., scene_data.view());  // kernels see the non-owning view
 /// @endcode
 class SceneBuilder {
 public:
@@ -352,11 +381,12 @@ public:
     void build_bvh();
 
     /// Upload all accumulated data to device/host memory using the Runtime
-    /// abstraction and return a SceneView.  When rt->queue is non-null the
-    /// arrays are allocated via SYCL device memory; when null they are plain
-    /// heap allocations (software mode).
+    /// abstraction and return an owning SceneData.  When rt->queue is
+    /// non-null the arrays are allocated via SYCL device memory; when null
+    /// they are plain heap allocations (software mode).
     /// Computes per-handle AABBs and builds a light list if lights exist.
-    SceneView build(rt::Runtime *rt);
+    /// The render function receives the non-owning data.view().
+    SceneData build(rt::Runtime *rt);
 
     /// Return a pointer to the host-side AABB array (for debug visualization).
     const float *debug_aabbs() const {
@@ -440,53 +470,31 @@ private:
     static T *upload_array(rt::Runtime *rt, const std::vector<T> &host_vec);
 };
 
-// ── SceneView::free implementation ─────────────────────────────────────
+// ── SceneData::free implementation ─────────────────────────────────────
 
-#ifndef KERNEL_NATIVE
-inline void SceneView::free(sycl::queue &queue) const {
-    PROFILER_FUNCTION();
-    if ( handles )  { sycl::free(handles, queue); }
-    if ( spheres )  { sycl::free(spheres, queue); }
-    if ( triangles ) { sycl::free(triangles, queue); }
-    if ( quads )    { sycl::free(quads, queue); }
-    if ( boxes )    { sycl::free(boxes, queue); }
-    if ( portals )  { sycl::free(portals, queue); }
-    if ( lambertians ) { sycl::free(lambertians, queue); }
-    if ( metals )   { sycl::free(metals, queue); }
-    if ( dielectrics ) { sycl::free(dielectrics, queue); }
-    if ( diffuse_lights ) { sycl::free(diffuse_lights, queue); }
-    if ( textured_lambertians ) { sycl::free(textured_lambertians, queue); }
-    if ( aabbs )    { sycl::free(aabbs, queue); }
-    if ( bvh_nodes ) { sycl::free(bvh_nodes, queue); }
-    if ( lights )   { sycl::free(lights, queue); }
-}
-#endif
-
-/// Free all scene memory using the Runtime abstraction.
+/// Free all scene buffers using the Runtime abstraction.
 /// Uses rt->dealloc (which handles SYCL device or plain delete[]).
-inline void SceneView::free(rt::Runtime *rt) {
-    PROFILER_ZONE("SceneView_free");
+inline void SceneData::free(rt::Runtime *rt) {
     auto de = [&](auto *&ptr) { if (ptr) { rt->dealloc(ptr); ptr = nullptr; } };
-    de(handles);
-    de(spheres);
-    de(triangles);
-    de(quads);
-    de(boxes);
-    de(portals);
-    de(lambertians);
-    de(metals);
-    de(dielectrics);
-    de(diffuse_lights);
-    de(textured_lambertians);
+    de(handles);             num_handles = 0;
+    de(spheres);             num_spheres = 0;
+    de(triangles);           num_triangles = 0;
+    de(quads);               num_quads = 0;
+    de(boxes);               num_boxes = 0;
+    de(portals);             num_portals = 0;
+    de(lambertians);         num_lambertians = 0;
+    de(metals);              num_metals = 0;
+    de(dielectrics);         num_dielectrics = 0;
+    de(diffuse_lights);      num_diffuse_lights = 0;
+    de(textured_lambertians); num_textured_lambertians = 0;
     de(aabbs);
-    de(bvh_nodes);
-    de(lights);
+    de(bvh_nodes);           num_bvh_nodes = 0; bvh_root = -1;
+    de(lights);              num_lights = 0;
 }
 
 // ── SceneBuilder::add implementation ───────────────────────────────────
 
 inline void SceneBuilder::add(Hittable h, Material m) {
-    PROFILER_ZONE("SceneBuilder_add");
     Handle handle;
     Aabb box;
 
@@ -640,7 +648,6 @@ inline void SceneBuilder::add_portal(hittables::PortalShape entry,
 inline void SceneBuilder::add_portal(hittables::PortalShape entry,
                                      hittables::PortalShape exit,
                                      Material material) {
-    PROFILER_ZONE("SceneBuilder_add_portal");
     Handle handle;
     handle.hittable = pack_handle((uint32_t)HittableType::Portal,
                                   (uint32_t)portal_pairs_.size());
@@ -664,7 +671,6 @@ static void copy_float3(float dst[3], float3 src) {
 // ── SceneBuilder::build_debug_geometry ─────────────────────────────────
 
 inline void SceneBuilder::build_debug_geometry() {
-    PROFILER_ZONE("SceneBuilder_debug_geom");
     debug_spheres_.clear();
     debug_quads_.clear();
     debug_boxes_.clear();
@@ -744,7 +750,6 @@ inline void SceneBuilder::build_debug_geometry() {
 // ── SceneBuilder::build_bvh ────────────────────────────────────────────
 
 inline void SceneBuilder::build_bvh() {
-    PROFILER_ZONE("SceneBuilder_build_bvh");
     if ( handles_.empty() ) {
         return;
     }
@@ -776,20 +781,17 @@ inline void SceneBuilder::build_bvh() {
         uint32_t parent_index;
         bool is_right;
     };
+    // Sentinel: the frame covering the whole scene reuses the pre-pushed
+    // node 0 as its node (it has no parent to link into).
+    constexpr uint32_t NO_PARENT = 0xFFFFFFFFu;
 
-    // Compute the overall scene bounds for the root node
-    Aabb root_bounds = aabbs_[0];
-    for ( int i = 1; i < num_objects; i++ ) {
-        root_bounds = aabb_merge(root_bounds, aabbs_[i]);
-    }
-
-    // Build the root node first
-    nodes.push_back({root_bounds, BVH_LEAF, BVH_LEAF});
+    // Root placeholder — node 0 is filled in by the first frame below.
+    nodes.push_back({Aabb {{0, 0, 0}, {0, 0, 0}}, BVH_LEAF, BVH_LEAF});
     uint32_t root_index = 0;
 
     std::vector<StackFrame> stack;
     stack.reserve(64);
-    stack.push_back({0, num_objects, root_index, false});
+    stack.push_back({0, num_objects, NO_PARENT, false});
 
     while ( !stack.empty() ) {
         StackFrame frame = stack.back();
@@ -798,13 +800,18 @@ inline void SceneBuilder::build_bvh() {
         int start = frame.start;
         int end = frame.end;
         int count = end - start;
-        uint32_t node_index = (uint32_t)nodes.size();
 
-        // Link to parent
-        if ( frame.is_right ) {
-            nodes[frame.parent_index].right = node_index;
-        } else {
-            nodes[frame.parent_index].left = node_index;
+        // The root frame reuses node 0; every other frame allocates a
+        // fresh node and links it into its parent's left/right slot.
+        bool is_root = frame.parent_index == NO_PARENT;
+        uint32_t node_index = is_root ? root_index : (uint32_t)nodes.size();
+
+        if ( !is_root ) {
+            if ( frame.is_right ) {
+                nodes[frame.parent_index].right = node_index;
+            } else {
+                nodes[frame.parent_index].left = node_index;
+            }
         }
 
         // ── Compute bounding box for this range ────────────────────────
@@ -815,7 +822,11 @@ inline void SceneBuilder::build_bvh() {
 
         // ── Leaf node: single object ───────────────────────────────────
         if ( count == 1 ) {
-            nodes.push_back({bounds, BVH_LEAF, indices[start]});
+            if ( is_root ) {
+                nodes[root_index] = {bounds, BVH_LEAF, indices[start]};
+            } else {
+                nodes.push_back({bounds, BVH_LEAF, indices[start]});
+            }
             continue;
         }
 
@@ -846,8 +857,12 @@ inline void SceneBuilder::build_bvh() {
                              return ca < cb;
                          });
 
-        // ── Internal node: push placeholder, schedule children ──────────
-        nodes.push_back({bounds, BVH_LEAF, BVH_LEAF}); // placeholder
+        // ── Internal node: fill the placeholder, schedule children ──────
+        if ( is_root ) {
+            nodes[root_index] = {bounds, BVH_LEAF, BVH_LEAF};
+        } else {
+            nodes.push_back({bounds, BVH_LEAF, BVH_LEAF}); // placeholder
+        }
 
         // Process left child first (pushed second so it's popped first)
         stack.push_back({start, mid, node_index, false});
@@ -863,9 +878,8 @@ inline void SceneBuilder::build_bvh() {
 
 // ── SceneBuilder::build ────────────────────────────────────────────────
 
-inline SceneView SceneBuilder::build(rt::Runtime *rt) {
-    PROFILER_ZONE("SceneBuilder_build");
-    SceneView view = {};
+inline SceneData SceneBuilder::build(rt::Runtime *rt) {
+    SceneData data = {};
 
     // Upload per-type hittable arrays
     auto upload = [&](const auto &vec, auto *&ptr, int &count) {
@@ -873,35 +887,35 @@ inline SceneView SceneBuilder::build(rt::Runtime *rt) {
         count = (int)vec.size();
     };
 
-    upload(spheres_,        view.spheres,        view.num_spheres);
-    upload(triangles_,      view.triangles,      view.num_triangles);
-    upload(quads_,          view.quads,          view.num_quads);
-    upload(boxes_,          view.boxes,          view.num_boxes);
-    upload(portal_pairs_,   view.portals,        view.num_portals);
-    upload(lambertians_,    view.lambertians,    view.num_lambertians);
-    upload(metals_,         view.metals,         view.num_metals);
-    upload(dielectrics_,    view.dielectrics,    view.num_dielectrics);
-    upload(diffuse_lights_, view.diffuse_lights, view.num_diffuse_lights);
-    upload(textured_lambertians_, view.textured_lambertians,
-           view.num_textured_lambertians);
-    upload(handles_,        view.handles,        view.num_handles);
+    upload(spheres_,        data.spheres,        data.num_spheres);
+    upload(triangles_,      data.triangles,      data.num_triangles);
+    upload(quads_,          data.quads,          data.num_quads);
+    upload(boxes_,          data.boxes,          data.num_boxes);
+    upload(portal_pairs_,   data.portals,        data.num_portals);
+    upload(lambertians_,    data.lambertians,    data.num_lambertians);
+    upload(metals_,         data.metals,         data.num_metals);
+    upload(dielectrics_,    data.dielectrics,    data.num_dielectrics);
+    upload(diffuse_lights_, data.diffuse_lights, data.num_diffuse_lights);
+    upload(textured_lambertians_, data.textured_lambertians,
+           data.num_textured_lambertians);
+    upload(handles_,        data.handles,        data.num_handles);
 
     // AABBs
     if ( !aabbs_.empty() ) {
-        view.aabbs = upload_array(rt, aabbs_);
+        data.aabbs = upload_array(rt, aabbs_);
     } else {
-        view.aabbs = nullptr;
+        data.aabbs = nullptr;
     }
 
     // BVH (upload if built via build_bvh())
     if ( !bvh_nodes_.empty() ) {
-        view.bvh_nodes = upload_array(rt, bvh_nodes_);
-        view.num_bvh_nodes = num_bvh_nodes_;
-        view.bvh_root = bvh_root_;
+        data.bvh_nodes = upload_array(rt, bvh_nodes_);
+        data.num_bvh_nodes = num_bvh_nodes_;
+        data.bvh_root = bvh_root_;
     } else {
-        view.bvh_nodes = nullptr;
-        view.num_bvh_nodes = 0;
-        view.bvh_root = -1;
+        data.bvh_nodes = nullptr;
+        data.num_bvh_nodes = 0;
+        data.bvh_root = -1;
     }
 
     // Build light list from DiffuseLight materials
@@ -916,14 +930,14 @@ inline SceneView SceneBuilder::build(rt::Runtime *rt) {
             info.emission = diffuse_lights_[material_idx].emit_color;
             light_infos.push_back(info);
         }
-        view.lights = upload_array(rt, light_infos);
-        view.num_lights = (int)light_infos.size();
+        data.lights = upload_array(rt, light_infos);
+        data.num_lights = (int)light_infos.size();
     } else {
-        view.lights = nullptr;
-        view.num_lights = 0;
+        data.lights = nullptr;
+        data.num_lights = 0;
     }
 
-    return view;
+    return data;
 }
 
 } // namespace rt

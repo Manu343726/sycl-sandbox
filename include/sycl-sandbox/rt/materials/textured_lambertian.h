@@ -36,7 +36,6 @@ public:
         if ( rec.is_portal ) {
             return portal_scatter(incoming_ray, rec);
         }
-        PROFILER_ZONE("TexturedLambertian_scatter");
         // Sample the texture at the hit's parametric coordinates and the
         // ray's time, passing the path RNG through (stochastic textures
         // may use it); UV out-of-range behavior is defined by the texture.
@@ -46,7 +45,6 @@ public:
     }
 
     float3 emit(const HitRecord &) const {
-        PROFILER_ZONE("TexturedLambertian_emit");
         return {0, 0, 0};
     }
 };

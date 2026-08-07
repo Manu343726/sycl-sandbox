@@ -143,6 +143,16 @@ void render_ui(AppState &state) {
         ImGui::End();
     }
 
+    // System metrics (CPU / RAM / GPU usage graphs)
+    if (state.show_metrics) {
+        ImGui::SetNextWindowSize(ImVec2(420, 300), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("System Metrics", &state.show_metrics)) {
+            state.system_metrics.sample();
+            state.system_metrics.draw();
+        }
+        ImGui::End();
+    }
+
     // Test Engine UI (Dear ImGui automation/testing panel)
     if (state.show_test_engine && g_test_engine) {
         ImGuiTestEngine_ShowTestEngineWindows(g_test_engine, &state.show_test_engine);

@@ -232,5 +232,14 @@ inline void render_controls_panel(AppState &state) {
         }
     }
 
+    // ---- Window toggles ----
+    {
+        ImGui::SeparatorText("Windows");
+        ImGui::Checkbox("Show Build Monitor", &state.show_builds);
+        ImGui::Checkbox("Show Logs", &state.show_logs);
+        ImGui::Checkbox("Show Profiler", &state.show_profiler);
+        ImGui::Checkbox("Show System Metrics", &state.show_metrics);
+    }
+
     ImGui::End();
 }

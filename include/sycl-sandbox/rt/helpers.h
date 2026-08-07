@@ -9,8 +9,6 @@ namespace rt {
 /// Returns a random point uniformly distributed inside the unit sphere
 /// using rejection sampling (expected ~52% acceptance rate).
 inline float3 random_in_unit_sphere(RNG &rng) {
-    PROFILER_FUNCTION();
-    PROFILER_ZONE("random_in_unit_sphere");
     for ( int i = 0; i < 100; i++ ) {
         float3 candidate = {2 * rng.next() - 1, 2 * rng.next() - 1, 2 * rng.next() - 1};
         if ( len2(candidate) < 1 ) {

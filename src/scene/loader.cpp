@@ -6,6 +6,7 @@
 #include <random>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 using namespace rt;
 using rt::hittables::Sphere;
@@ -217,6 +218,21 @@ std::vector<StatDescriptor> auto_standard_stats() {
         .has_range = true,
         .range_min_f = 0.0f,
         .range_max_f = 512.0f,
+    });
+    out.push_back({
+        .name = "num_hits",
+        .description = "Ray-scene closest hits found this frame (all bounces)",
+        .type = ParamType::INT,
+        .viz = VisualizationHint::Counter,
+        .category = ParamCategory::Render,
+    });
+    out.push_back({
+        .name = "num_bvh_hits",
+        .description = "Closest hits found through BVH traversal this frame "
+                       "(0 when the scene has no BVH / linear fallback)",
+        .type = ParamType::INT,
+        .viz = VisualizationHint::Counter,
+        .category = ParamCategory::Render,
     });
     return out;
 }
@@ -777,12 +793,14 @@ Value parse_scalar(const YAML::Node& node) {
                 int int_val = node.as<int>();
                 v.type = ValueType::Int;
                 v.int_val = int_val;
-                return v;
+                v.float_val = (float)int_val;   // keep both views in sync: vec3
+                return v;                       // construction reads float_val
             } catch (...) {}
             try {
                 float float_val = node.as<float>();
                 v.type = ValueType::Float;
                 v.float_val = float_val;
+                v.int_val = (int)float_val;     // keep both views in sync
                 return v;
             } catch (...) {}
             v.type = ValueType::String;
@@ -861,6 +879,63 @@ int resolve_int(const YAML::Node& node, const ResolvedScene& config) {
 
 float3 resolve_vec3(const YAML::Node& node, const ResolvedScene& config) {
     return resolve_value(node, config).vec3_val;
+}
+
+// ── Per-instance value resolution ─────────────────────────────────────
+
+/// Resolve a value and pick the `index`-th element when the result is an
+/// array (per-instance values from data sources).  Scalar results are
+/// returned unchanged, so the same helpers serve both single objects and
+/// count-expanded ones.
+Value resolve_value_instance(const YAML::Node& node,
+                             const ResolvedScene& config,
+                             int index) {
+    Value v = resolve_value(node, config);
+    switch (v.type) {
+        case ValueType::IntArray:
+            if (!v.int_arr.empty()) {
+                int idx = index < (int)v.int_arr.size() ? index : (int)v.int_arr.size() - 1;
+                v.type = ValueType::Int;
+                v.int_val = v.int_arr[idx];
+            }
+            break;
+        case ValueType::FloatArray:
+            if (!v.float_arr.empty()) {
+                int idx = index < (int)v.float_arr.size() ? index : (int)v.float_arr.size() - 1;
+                v.type = ValueType::Float;
+                v.float_val = v.float_arr[idx];
+            }
+            break;
+        case ValueType::Vec3Array:
+            if (!v.vec3_arr.empty()) {
+                int idx = index < (int)v.vec3_arr.size() ? index : (int)v.vec3_arr.size() - 1;
+                v.type = ValueType::Vec3;
+                v.vec3_val = v.vec3_arr[idx];
+            }
+            break;
+        case ValueType::StringArray:
+            if (!v.string_arr.empty()) {
+                int idx = index < (int)v.string_arr.size() ? index : (int)v.string_arr.size() - 1;
+                v.type = ValueType::String;
+                v.string_val = v.string_arr[idx];
+            }
+            break;
+        default:
+            break;
+    }
+    return v;
+}
+
+float resolve_float_instance(const YAML::Node& node, const ResolvedScene& config, int index) {
+    return resolve_value_instance(node, config, index).float_val;
+}
+
+float3 resolve_vec3_instance(const YAML::Node& node, const ResolvedScene& config, int index) {
+    return resolve_value_instance(node, config, index).vec3_val;
+}
+
+std::string resolve_string_instance(const YAML::Node& node, const ResolvedScene& config, int index) {
+    return resolve_value_instance(node, config, index).string_val;
 }
 
 // ── Data source generators ──────────────────────────────────────────
@@ -962,6 +1037,71 @@ Value generate_weighted_choice(const YAML::Node& inputs, const ResolvedScene& co
 
 } // anonymous namespace
 
+// ── resolve_data_sources ────────────────────────────────────────────
+
+/// Evaluate the YAML's `data_sources:` (sequence form) and `data:`
+/// (legacy map form) sections into `config.data_sources`.  Sources may
+/// reference params ($name) and previously generated sources, enabling
+/// recursive value generation.  Call again after param values change to
+/// regenerate the arrays with the new values.
+void resolve_data_sources(ResolvedScene &config) {
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(config.yaml_path);
+    } catch (const std::exception &e) {
+        spdlog::error("[scene] failed to load '{}': {}", config.yaml_path, e.what());
+        return;
+    }
+
+    config.data_sources.clear();
+
+    // Sequence form (current scenes):
+    //   data_sources:
+    //     - id: positions
+    //       type: vec3[]
+    //       generator: random_range
+    //       inputs: { count: $num_spheres, min: [...], max: [...] }
+    auto ds_seq = root["data_sources"];
+    if (ds_seq && ds_seq.IsSequence()) {
+        for (auto ds_node : ds_seq) {
+            std::string id = ds_node["id"].as<std::string>("");
+            if (id.empty()) {
+                spdlog::warn("[scene] data_sources entry without id, skipping");
+                continue;
+            }
+            std::string generator = ds_node["generator"].as<std::string>("");
+            YAML::Node inputs = ds_node["inputs"];
+            if (generator == "random_range") {
+                config.data_sources[id] = generate_random_range(inputs, config);
+            } else if (generator == "weighted_choice") {
+                config.data_sources[id] = generate_weighted_choice(inputs, config);
+            } else {
+                config.data_sources[id] = parse_scalar(ds_node);
+                spdlog::warn("[scene] data source '{}': unknown generator '{}'", id, generator);
+            }
+        }
+    }
+
+    // Legacy map form:
+    //   data:
+    //     name: { random_range: {...} }
+    auto ds_map = root["data"];
+    if (ds_map && ds_map.IsMap()) {
+        for (auto it = ds_map.begin(); it != ds_map.end(); ++it) {
+            std::string ds_name = it->first.as<std::string>();
+            YAML::Node ds = it->second;
+
+            if (ds["random_range"]) {
+                config.data_sources[ds_name] = generate_random_range(ds["random_range"], config);
+            } else if (ds["weighted_choice"]) {
+                config.data_sources[ds_name] = generate_weighted_choice(ds["weighted_choice"], config);
+            } else {
+                config.data_sources[ds_name] = parse_scalar(ds);
+            }
+        }
+    }
+}
+
 // ── load_and_resolve ────────────────────────────────────────────────
 
 ResolvedScene load_and_resolve(const std::string &yaml_path) {
@@ -979,31 +1119,19 @@ ResolvedScene load_and_resolve(const std::string &yaml_path) {
 
     config.name = root["name"].as<std::string>("Unnamed");
 
-    // 1. Load data sources (generators)
-    auto datasources = root["data"];
-    if (datasources && datasources.IsMap()) {
-        for (auto it = datasources.begin(); it != datasources.end(); ++it) {
-            std::string ds_name = it->first.as<std::string>();
-            YAML::Node ds = it->second;
-
-            if (ds["random_range"]) {
-                config.data_sources[ds_name] = generate_random_range(ds["random_range"], config);
-            } else if (ds["weighted_choice"]) {
-                config.data_sources[ds_name] = generate_weighted_choice(ds["weighted_choice"], config);
-            } else {
-                config.data_sources[ds_name] = parse_scalar(ds);
-            }
-        }
-    }
-
-    // 2. Load params (may reference data sources)
+    // 1. Load params FIRST — data sources may reference them ($name).
     auto params = root["params"];
     if (params && params.IsMap()) {
         for (auto it = params.begin(); it != params.end(); ++it) {
             YAML::Node pval = it->second;
-            config.params[it->first.as<std::string>()] = parse_scalar(pval);
+            // Param nodes are maps with a `default:` key.
+            config.params[it->first.as<std::string>()] =
+                parse_scalar(pval["default"] ? pval["default"] : pval);
         }
     }
+
+    // 2. Evaluate data sources (may reference params + other sources).
+    resolve_data_sources(config);
 
     return config;
 }
@@ -1047,15 +1175,40 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
         scene_material_type = mat_type_node.as<std::string>();
     }
 
-    // Helper to build material from a material node
-    auto build_material = [&](const YAML::Node& node) -> rt::Material {
+    // Helper to build material from a material node.  `index` selects
+    // the per-instance element when a referenced value is an array
+    // (data-source-driven objects); scalar values are index-independent.
+    std::function<rt::Material(const YAML::Node&, int)> build_material;
+    build_material = [&](const YAML::Node& node, int index) -> rt::Material {
         if (!node || !node.IsMap()) return lambertian(float3{1,1,1});
+
+        // Per-instance material dispatch: `source` names a data source
+        // of material-type strings; `mapping` maps each choice to a
+        // material node (built with the same per-instance index).
+        if (node["source"]) {
+            std::string choice = resolve_string_instance(node["source"], config, index);
+            auto mapping = node["mapping"];
+            if (mapping && mapping[choice]) {
+                return build_material(mapping[choice], index);
+            }
+            spdlog::warn("[scene] material source '{}': no mapping for '{}'",
+                         node["source"].as<std::string>(), choice);
+            return lambertian(float3{1,1,1});
+        }
+
         std::string type = node["type"].as<std::string>("lambertian");
 
-        // Resolve color (may be a reference)
+        // Resolve the base colour.  `color` is the canonical key; the
+        // `albedo` (lambertian/metal) and `emit` (diffuse_light)
+        // spellings used by the raytracing scenes are accepted too.
+        // Values may be references ($param / $data_source).
+        YAML::Node color_node = node["color"] ? node["color"]
+                                : node["albedo"] ? node["albedo"]
+                                : node["emit"] ? node["emit"]
+                                : YAML::Node();
         float3 col{0.8f, 0.8f, 0.8f};
-        if (node["color"]) {
-            auto col_val = resolve_value(node["color"], config);
+        if (color_node) {
+            auto col_val = resolve_value_instance(color_node, config, index);
             if (col_val.type == ValueType::Vec3)
                 col = col_val.vec3_val;
         }
@@ -1063,13 +1216,17 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
         if (type == "lambertian") {
             return lambertian(float3(col.x, col.y, col.z));
         } else if (type == "metal") {
-            float roughness = node["roughness"] ? resolve_float(node["roughness"], config) : 0.0f;
+            // `roughness` and `fuzz` are accepted (same meaning).
+            float roughness = node["roughness"] ? resolve_float_instance(node["roughness"], config, index)
+                              : node["fuzz"] ? resolve_float_instance(node["fuzz"], config, index) : 0.0f;
             return metal(float3(col.x, col.y, col.z), roughness);
         } else if (type == "dielectric") {
-            float index = node["index"] ? resolve_float(node["index"], config) : 1.5f;
-            return dielectric(index);
+            // `index` and `ir` are accepted (same meaning).
+            float index_f = node["index"] ? resolve_float_instance(node["index"], config, index)
+                            : node["ir"] ? resolve_float_instance(node["ir"], config, index) : 1.5f;
+            return dielectric(index_f);
         } else if (type == "diffuse_light") {
-            float intensity = node["intensity"] ? resolve_float(node["intensity"], config) : 1.0f;
+            float intensity = node["intensity"] ? resolve_float_instance(node["intensity"], config, index) : 1.0f;
             return diffuse_light(scale(float3(col.x, col.y, col.z), intensity));
         } else if (type == "textured_lambertian") {
             // Texture-driven diffuse material.  The texture is named in
@@ -1078,8 +1235,8 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
             // behavior is defined by the texture itself (the colorchecker
             // wraps and tiles infinitely).
             std::string texture = node["texture"].as<std::string>("colorchecker");
-            float scale_u = node["scale_u"] ? resolve_float(node["scale_u"], config) : 1.0f;
-            float scale_v = node["scale_v"] ? resolve_float(node["scale_v"], config) : 1.0f;
+            float scale_u = node["scale_u"] ? resolve_float_instance(node["scale_u"], config, index) : 1.0f;
+            float scale_v = node["scale_v"] ? resolve_float_instance(node["scale_v"], config, index) : 1.0f;
             if (texture == "colorchecker") {
                 return textured_lambertian(rt::textures::ColorChecker(scale_u, scale_v));
             } else if (texture == "solid") {
@@ -1135,7 +1292,7 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
                         // Real material, e.g. diffuse_light for an
                         // emissive portal (glowing surface).
                         builder.add_portal(std::move(entry), std::move(exit),
-                                           build_material(obj["material"]));
+                                           build_material(obj["material"], 0));
                     } else {
                         // Default: dummy white Lambertian, whose scatter()
                         // teleports the ray (pure window).
@@ -1147,49 +1304,88 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
                 continue;
             }
 
-            // Resolve transform
-            float3 center{0, 0, 0};
-            if (obj["center"])
-                center = resolve_vec3(obj["center"], config);
-
             // Build per-object material or use scene material
             rt::Material mat;
             if (obj["material"]) {
-                mat = build_material(obj["material"]);
+                mat = build_material(obj["material"], 0);
             } else if (!scene_material.empty()) {
                 // Named material system - look up in materials section
                 auto mats_node = root["materials"];
                 if (mats_node && mats_node.IsMap() && mats_node[scene_material]) {
-                    mat = build_material(mats_node[scene_material]);
+                    mat = build_material(mats_node[scene_material], 0);
                 }
             } else if (!scene_material_type.empty()) {
                 YAML::Node mat_node;
                 mat_node["type"] = YAML::Node(scene_material_type);
                 if (obj["color"]) mat_node["color"] = obj["color"];
-                mat = build_material(mat_node);
+                mat = build_material(mat_node, 0);
             } else {
                 mat = lambertian(float3(0.8f, 0.8f, 0.8f));
             }
 
-            if (type == "sphere") {
-                float radius = obj["radius"] ? resolve_float(obj["radius"], config) : 0.5f;
-                builder.add(Sphere(center, radius), mat);
-            } else if (type == "quad") {
-                float3 u{1,0,0}, v{0,1,0};
-                if (obj["u"]) u = resolve_vec3(obj["u"], config);
-                if (obj["v"]) v = resolve_vec3(obj["v"], config);
-                builder.add(Quad(center, u, v), mat);
-            } else if (type == "box") {
-                float3 size{1,1,1};
-                if (obj["size"]) size = resolve_vec3(obj["size"], config);
-                builder.add(Box(center.x, center.y, center.z, size.x, size.y, size.z), mat);
-            } else if (type == "triangle") {
-                float3 v0{0,0,0}, v1{1,0,0}, v2{0,1,0};
-                if (obj["v0"]) v0 = resolve_vec3(obj["v0"], config);
-                if (obj["v1"]) v1 = resolve_vec3(obj["v1"], config);
-                if (obj["v2"]) v2 = resolve_vec3(obj["v2"], config);
-                builder.add(Triangle(v0, v1, v2), mat);
+            // ── Add a hittable from a node ────────────────────────────
+            // Handles the top-level object node and the `hittable:`
+            // sub-node of a count-expanded object.  `index` selects the
+            // per-instance element of array-valued references.
+            auto add_hittable = [&](const YAML::Node &hnode, int index, const rt::Material &hmaterial) {
+                std::string htype = hnode["type"].as<std::string>("sphere");
+                float3 center{0, 0, 0};
+                if (hnode["center"])
+                    center = resolve_vec3_instance(hnode["center"], config, index);
+
+                if (htype == "sphere") {
+                    float radius = hnode["radius"] ? resolve_float_instance(hnode["radius"], config, index) : 0.5f;
+                    builder.add(Sphere(center, radius), hmaterial);
+                } else if (htype == "quad") {
+                    // `base` (base corner) is the raytracing scene spelling;
+                    // `center` is accepted as an alias.
+                    float3 base = center;
+                    if (hnode["base"]) base = resolve_vec3_instance(hnode["base"], config, index);
+                    float3 u{1,0,0}, v{0,1,0};
+                    if (hnode["u"]) u = resolve_vec3_instance(hnode["u"], config, index);
+                    if (hnode["v"]) v = resolve_vec3_instance(hnode["v"], config, index);
+                    builder.add(Quad(base, u, v), hmaterial);
+                } else if (htype == "box") {
+                    // `box_min` + `box_max` (two opposite corners) is the
+                    // raytracing scene spelling; `center` + `size` is
+                    // accepted as an alias.
+                    if (hnode["box_min"] && hnode["box_max"]) {
+                        float3 mn = resolve_vec3_instance(hnode["box_min"], config, index);
+                        float3 mx = resolve_vec3_instance(hnode["box_max"], config, index);
+                        builder.add(Box(mn.x, mn.y, mn.z,
+                                        mx.x - mn.x, mx.y - mn.y, mx.z - mn.z), hmaterial);
+                    } else {
+                        float3 size{1,1,1};
+                        if (hnode["size"]) size = resolve_vec3_instance(hnode["size"], config, index);
+                        builder.add(Box(center.x, center.y, center.z,
+                                        size.x, size.y, size.z), hmaterial);
+                    }
+                } else if (htype == "triangle") {
+                    float3 v0{0,0,0}, v1{1,0,0}, v2{0,1,0};
+                    if (hnode["v0"]) v0 = resolve_vec3_instance(hnode["v0"], config, index);
+                    if (hnode["v1"]) v1 = resolve_vec3_instance(hnode["v1"], config, index);
+                    if (hnode["v2"]) v2 = resolve_vec3_instance(hnode["v2"], config, index);
+                    builder.add(Triangle(v0, v1, v2), hmaterial);
+                }
+            };
+
+            // Count-expanded objects: `count:` instances generated from
+            // data sources, with per-instance material dispatch
+            // (`material.source` + `material.mapping`).
+            if (obj["count"]) {
+                int count = resolve_int(obj["count"], config);
+                YAML::Node hnode = obj["hittable"] ? obj["hittable"] : obj;
+                for (int inst = 0; inst < count; inst++) {
+                    rt::Material inst_mat = mat;
+                    if (obj["material"]) {
+                        inst_mat = build_material(obj["material"], inst);
+                    }
+                    add_hittable(hnode, inst, inst_mat);
+                }
+                continue;
             }
+
+            add_hittable(obj, 0, mat);
         }
     }
 

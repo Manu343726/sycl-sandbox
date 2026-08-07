@@ -27,8 +27,6 @@ public:
 
     /// Ray-triangle intersection using barycentric coordinates (Cramer's rule).
     optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
-        PROFILER_FUNCTION();
-        PROFILER_ZONE("Triangle_hit");
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
         if ( math::fabs(denom) < 1e-8f ) {
