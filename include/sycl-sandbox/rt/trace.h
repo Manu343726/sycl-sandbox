@@ -11,6 +11,7 @@ namespace rt {
 
 constexpr const char *KEY_SPP_FRAME    = "spp_frame";
 constexpr const char *KEY_MAX_BOUNCES  = "max_bounces";
+constexpr const char *KEY_TRANSPARENT_BACKFACES = "transparent_backfaces";
 constexpr const char *KEY_CAM_EYE      = "cam_eye";
 constexpr const char *KEY_CAM_AT       = "cam_at";
 constexpr const char *KEY_CAM_UP       = "cam_up";
@@ -24,7 +25,12 @@ constexpr const char *KEY_TIME         = "time";
 /// Trace a ray through the scene and return the accumulated colour.
 /// Uses per-handle dispatch to hit, scatter, and emit on the correct
 /// per-type arrays.
-inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces, RNG &rng) {
+///
+/// \param transparent_backfaces X-ray mode: when true, rays pass through
+///        surfaces hit from behind (front_face == false), so a camera
+///        outside an enclosed scene can see inside through the walls.
+inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces,
+                    bool transparent_backfaces, RNG &rng) {
     PROFILER_ZONE("trace_path");
     // Initialise the path throughput (attenuation) and the working ray
     float3 attenuation = {1, 1, 1};
@@ -42,10 +48,12 @@ inline float3 trace(const Ray &ray, const SceneView &scene, int max_bounces, RNG
                                   0.001f,
                                   closest_hit ? closest_hit->t : 1e30f,
                                   scene);
-            if ( hit ) {
-                closest_hit = hit;
-                hit_handle = scene.handles[i];
-            }
+            if ( !hit ) continue;
+            // X-ray mode: back faces are transparent — skip hits from
+            // behind so the ray passes through the surface.
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest_hit = hit;
+            hit_handle = scene.handles[i];
         }
 
         // If no object was hit the ray escapes to the void
@@ -96,6 +104,11 @@ void render_main(const Runtime &rt,
     int samples_per_frame = reader.read<int>(KEY_SPP_FRAME);
     int max_bounces = reader.read<int>(KEY_MAX_BOUNCES);
 
+    // X-ray mode (standard `transparent_backfaces` param): back faces
+    // become transparent, so rays pass through surfaces hit from behind
+    // — lets a camera outside an enclosed scene see inside.
+    bool transparent_backfaces = reader.read<bool>(KEY_TRANSPARENT_BACKFACES);
+
     float3 camera_eye   = reader.read_vec3<float3>(KEY_CAM_EYE);
     float3 camera_at    = reader.read_vec3<float3>(KEY_CAM_AT);
     float3 camera_up    = reader.read_vec3<float3>(KEY_CAM_UP);
@@ -143,7 +156,7 @@ void render_main(const Runtime &rt,
             ray.time = frame_time;
 
             // Trace the ray and accumulate its colour
-            float3 colour = trace(ray, scene, max_bounces, rng);
+            float3 colour = trace(ray, scene, max_bounces, transparent_backfaces, rng);
 
             // If the ray hit nothing (colour is black), use the background colour
             if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {

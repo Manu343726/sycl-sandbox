@@ -60,9 +60,11 @@ and are NOT declared in YAML.  Values are always stored as `float` (ints and
 bools are cast to `float` when writing) so the kernel reads them uniformly.
 
 Standard params auto-injected into every scene: render (`spp_frame`,
-`max_bounces`, `tick`, `time`), display pipeline (`tonemap_enabled` [default
-off], `tonemap_operator`, `tonemap_exposure`, `tonemap_gamma`), and debug
-switches (`debug_colorchecker`, `debug_colorchecker_raw`).  Scenes can set a
+`max_bounces`, `tick`, `time`, `transparent_backfaces` [X-ray mode: rays
+pass through back faces, off by default]), display pipeline
+(`tonemap_enabled` [default off], `tonemap_operator`, `tonemap_exposure`,
+`tonemap_gamma`), and debug switches (`debug_colorchecker`,
+`debug_colorchecker_raw`).  Scenes can set a
 default for any standard param by declaring the same name in YAML — the
 loader merges the override into the auto-generated descriptor instead of
 duplicating or skipping it (see `src/scene/loader.cpp`).

@@ -328,14 +328,16 @@ public:
     /// The hittable and material are dispatched to their per-type arrays.
     void add(Hittable h, Material m);
 
-    /// Add a portal (entry -> exit) to the scene.
-    /// Portals are instanced as regular objects with a material.  The
-    /// default is a dummy white Lambertian: every material's scatter()
-    /// teleports portal records (see rt::portal_scatter()), so the ray
-    /// continues from the exit surface.  Pass a material to instance a
-    /// portal with real behavior — e.g. DiffuseLight for an emissive
-    /// portal (glows; the path terminates with its emission).  Emissive
-    /// portals are NOT added to the light list (surface area undefined).
+    /// Add a portal (entry <-> exit) to the scene.
+    /// Portals are BIDIRECTIONAL: a ray hitting either shape teleports
+    /// to the other.  They are instanced as regular objects with a
+    /// material.  The default is a dummy white Lambertian: every
+    /// material's scatter() teleports portal records (see
+    /// rt::portal_scatter()), so the ray continues from the other
+    /// surface.  Pass a material to instance a portal with real
+    /// behavior — e.g. DiffuseLight for an emissive portal (glows; the
+    /// path terminates with its emission).  Emissive portals are NOT
+    /// added to the light list (surface area undefined).
     void add_portal(hittables::PortalShape entry, hittables::PortalShape exit);
     void add_portal(hittables::PortalShape entry, hittables::PortalShape exit,
                     Material material);
@@ -708,12 +710,13 @@ inline void SceneBuilder::build_debug_geometry() {
                 break;
             }
             case HittableType::Portal: {
-                // Show the portal's ENTRY shape with a fixed "portal"
-                // colour (no material to sample).  Triangle entries are
-                // skipped (no debug buffer for them).
+                // Show BOTH portal shapes with a fixed "portal" colour
+                // (no material to sample; portals are bidirectional, so
+                // both surfaces matter).  Triangle shapes are skipped
+                // (no debug buffer for them).
                 const auto &p = portal_pairs_[hidx];
                 float3 portal_color = {0.2f, 0.8f, 0.9f};
-                visit(p.entry, [&](const auto &shape) {
+                auto push_shape = [&](const auto &shape) {
                     using S = std::decay_t<decltype(shape)>;
                     if constexpr ( std::is_same_v<S, hittables::Quad> ) {
                         DebugQuad dq;
@@ -729,7 +732,9 @@ inline void SceneBuilder::build_debug_geometry() {
                         copy_float3(ds.color, portal_color);
                         debug_spheres_.push_back(ds);
                     }
-                });
+                };
+                visit(p.entry, push_shape);
+                visit(p.exit, push_shape);
                 break;
             }
         }

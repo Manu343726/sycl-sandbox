@@ -28,13 +28,14 @@ struct HitRecord {
     /// own behavior for out-of-range values.
     float u = 0.f;
     float v = 0.f;
-    /// Portal teleport marker.  When true, p/normal are the EXIT surface
-    /// point and normal (the entry hit's parametric coordinates were
-    /// mapped onto the exit hittable).  Materials scatter portal records
-    /// as a pure teleport: the ray continues from `portal_origin` along
-    /// `portal_dir` with unit attenuation (see portal_scatter()).  `t`
-    /// is the ENTRY hit's distance, so closest-hit ordering sees the
-    /// portal at its entry surface.
+    /// Portal teleport marker.  When true, p/normal are the OTHER surface
+    /// point and normal: whichever portal shape the ray hit (entry or
+    /// exit — portals are bidirectional), its parametric coordinates were
+    /// mapped onto the counterpart hittable.  Materials scatter portal
+    /// records as a pure teleport: the ray continues from `portal_origin`
+    /// along `portal_dir` with unit attenuation (see portal_scatter()).
+    /// `t` is the HIT shape's distance (entry or exit), so closest-hit
+    /// ordering sees the portal at the surface the ray actually crossed.
     bool is_portal = false;
     float3 portal_origin = {0, 0, 0}; ///< where the continuation ray starts
     float3 portal_dir = {0, 0, 0};    ///< direction of the continuation ray

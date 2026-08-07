@@ -6,18 +6,19 @@
 // accumulation).  NO SceneBuilder, NO SceneView, NO render_main — the
 // scene is a plain POD snapshot on the host stack, captured by value.
 //
-// Scene: the Cornell box (room 1, the rt_math_test reference scene) plus
-// a second gray room behind it (z ∈ [-6, -2.1]) with a red sphere.  Two
-// portals link them:
-//   - quad window: entry 0.01 in front of room 1's back wall, exit on
-//     room 2's front wall — rays passing through keep travelling -z and
-//     emerge inside room 2;
-//   - sphere portal: entry sphere floating in room 1, exit sphere inside
-//     room 2 — a ray hitting the entry reappears on the exit sphere's
-//     surface, keeping its direction.
+// Scene: the Cornell box (the rt_math_test reference scene) with a single
+// bidirectional sphere-quad portal floating inside it — a sphere and a
+// flat quad that teleport to each other.  A ray hitting EITHER shape
+// reappears on the other shape's surface (same UVs, direction kept): hit
+// the sphere and you come out of the quad window, hit the quad and you
+// come out of the sphere.  No second room: the whole scene stays inside
+// the box.  The floor quad is textured with a ColorChecker chart
+// (procedural 24-patch texture), so the portal shows off UV-mapped
+// textures on the teleported rays.
 //
-// Same geometry/materials as scenes/portal_rooms.yaml (which runs the
-// framework kernel); comparing the two isolates the framework path.
+// Same room as scenes/cornell_box.yaml (which runs the framework
+// kernel); the portal is the only addition.  The framework path also
+// supports portals (see scenes/portal_rooms.yaml).
 
 #include <sycl-sandbox/sandbox_api.h>
 #include <sycl-sandbox/profiler.h>
@@ -29,6 +30,7 @@
 #include <sycl-sandbox/rt/hittables/portal.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/diffuse_light.h>
+#include <sycl-sandbox/rt/materials/textured_lambertian.h>
 #include <sycl-sandbox/kernel/params.h>
 #include <sycl-sandbox/kernel/stats.h>
 #include <sycl-sandbox/kernel/execution_context.h>
@@ -66,7 +68,7 @@ extern "C" void set_stat_lookup(const StatWriter *writer) {
 
 static KernelDesc desc = {
     "rt_portal_test",
-    "Diagnostic: hardcoded Cornell box + portal to a second room, renderer written from scratch (no scene framework)",
+    "Diagnostic: hardcoded Cornell box with a bidirectional sphere-sphere portal, renderer written from scratch (no scene framework)",
     4096,
     2,
     (const char *[]) {"kernel.cpp", nullptr}};
@@ -84,38 +86,35 @@ extern "C" KernelDesc *get_kernel_desc() {
 enum MatKind : int {
     MAT_LAMBERTIAN = 0,
     MAT_LIGHT = 1,
+    MAT_TEXTURED_LAMBERTIAN = 2,
 };
 
 struct TestScene {
-    // ── Quads: room 1 (6) + room 2 (6) ──────────────────────────
-    int num_quads = 12;
-    hittables::Quad quads[12];
-    int quad_kinds[12];                      // MatKind tag
-    materials::Lambertian quad_lams[12];
-    materials::DiffuseLight quad_lights[12];
+    // ── Quads: the Cornell box (5 walls + ceiling light) ─────────
+    int num_quads = 6;
+    hittables::Quad quads[6];
+    int quad_kinds[6];                      // MatKind tag
+    materials::Lambertian quad_lams[6];
+    materials::TexturedLambertian quad_tex_lams[6];
+    materials::DiffuseLight quad_lights[6];
 
     // ── Boxes: the two Cornell-box boxes ────────────────────────
     int num_boxes = 2;
     hittables::Box boxes[2];
     materials::Lambertian box_lams[2];
 
-    // ── Spheres: room 2's red sphere ─────────────────────────────
-    int num_spheres = 1;
-    hittables::Sphere spheres[1];
-    materials::Lambertian sphere_lams[1];
-
-    // ── Portals: quad window + sphere portal (room 1 → room 2) ──
-    int num_portals = 2;
-    hittables::Portal portals[2];
+    // ── Portals: single bidirectional sphere-sphere portal ──────
+    int num_portals = 1;
+    hittables::Portal portals[1];
     // Dummy material: white Lambertian.  Its scatter() teleports portal
     // records (is_portal -> portal_scatter), so the trace loop stays
     // generic — the portal is just an object with a material.
-    materials::Lambertian portal_lams[2];
+    materials::Lambertian portal_lams[1];
 };
 
 /// Build the hardcoded scene on the HOST stack (cheap, a few PODs).
-/// Room 1 mirrors scenes/cornell_box.yaml; the portal and room 2 mirror
-/// scenes/portal_rooms.yaml exactly.
+/// The room mirrors scenes/cornell_box.yaml exactly; the portal is the
+/// only addition — a bidirectional sphere-sphere pair inside the box.
 static TestScene make_test_scene() {
     TestScene s;
 
@@ -130,9 +129,13 @@ static TestScene make_test_scene() {
         s.quad_lights[i] = materials::diffuse_light({15.f, 15.f, 15.f});
     };
 
-    // ── Room 1 — Cornell box ────────────────────────────────────
-    // Floor    (Y=0)
-    wall(0, {-2.f, 0.f, -2.f}, {4.f, 0.f, 0.f}, {0.f, 0.f, 4.f}, {0.73f, 0.73f, 0.73f});
+    // ── Cornell box ─────────────────────────────────────────────
+    // Floor (Y=0): textured with the ColorChecker chart (2×2 charts
+    // across the 4×4 floor — one chart per 2×2 units).
+    s.quads[0] = hittables::quad({-2.f, 0.f, -2.f}, {4.f, 0.f, 0.f}, {0.f, 0.f, 4.f});
+    s.quad_kinds[0] = MAT_TEXTURED_LAMBERTIAN;
+    s.quad_tex_lams[0] =
+        materials::textured_lambertian(textures::ColorChecker(2.f, 2.f));
     // Ceiling  (Y=3)
     wall(1, {-2.f, 3.f, -2.f}, {4.f, 0.f, 0.f}, {0.f, 0.f, 4.f}, {0.73f, 0.73f, 0.73f});
     // Back wall (Z=-2)
@@ -151,34 +154,17 @@ static TestScene make_test_scene() {
     s.boxes[1] = hittables::box(0.8f, 0.f, -0.3f, 0.6f, 0.6f, 1.2f);
     s.box_lams[1] = materials::lambertian({0.55f, 0.55f, 0.55f});
 
-    // ── Portal: room 1 back wall → room 2 front wall ────────────
-    // Entry 0.01 in front of room 1's back wall (z=-2), exit on room
-    // 2's front wall (z=-2.1).  Same (u,v) frame, so the quad UVs map
-    // 1:1 and the ray keeps its direction (-z) into room 2.
+    // ── Portal: single sphere-quad pair inside the box ──────────
+    // Bidirectional: a ray hitting EITHER shape teleports to the other
+    // (same UVs, direction kept).  The sphere floats in front of the
+    // short box; the quad is a flat "window" in front of the back wall,
+    // facing the camera (+Z).  Looking at the sphere you see the room
+    // through the window, and vice versa.  No second room: everything
+    // stays inside the box.
     s.portals[0] = hittables::portal(
-        hittables::quad({-1.f, 0.f, -1.99f}, {2.f, 0.f, 0.f}, {0.f, 2.f, 0.f}),
-        hittables::quad({-1.f, 0.f, -2.1f}, {2.f, 0.f, 0.f}, {0.f, 2.f, 0.f}));
+        hittables::sphere({-0.55f, 1.f, -1.3f}, 0.4f),
+        hittables::quad({-0.25f, 0.4f, -1.3f}, {1.6f, 0.f, 0.f}, {0.f, 1.2f, 0.f}));
     s.portal_lams[0] = materials::lambertian({1.f, 1.f, 1.f});
-
-    // Sphere portal: the entry floats in room 1 (left of centre, above
-    // the short box); the exit sits inside room 2 (right of the red
-    // sphere, clear of the walls).  Spherical UVs map the entry surface
-    // onto the exit sphere 1:1; the ray keeps its direction.
-    s.portals[1] = hittables::portal(
-        hittables::sphere({-0.8f, 1.5f, -1.5f}, 0.5f),
-        hittables::sphere({1.3f, 1.f, -5.2f}, 0.5f));
-    s.portal_lams[1] = materials::lambertian({1.f, 1.f, 1.f});
-
-    // ── Room 2 — gray room behind room 1 (z ∈ [-6, -2.1]) ───────
-    wall(6,  {-2.f, 0.f, -6.f}, {4.f, 0.f, 0.f}, {0.f, 0.f, 4.f}, {0.6f, 0.6f, 0.6f});
-    wall(7,  {-2.f, 3.f, -6.f}, {4.f, 0.f, 0.f}, {0.f, 0.f, 4.f}, {0.6f, 0.6f, 0.6f});
-    wall(8,  {-2.f, 0.f, -6.f}, {4.f, 0.f, 0.f}, {0.f, 3.f, 0.f}, {0.6f, 0.6f, 0.6f});
-    wall(9,  {-2.f, 0.f, -6.f}, {0.f, 3.f, 0.f}, {0.f, 0.f, 4.f}, {0.6f, 0.6f, 0.6f});
-    wall(10, {2.f, 0.f, -6.f}, {0.f, 3.f, 0.f}, {0.f, 0.f, 4.f}, {0.6f, 0.6f, 0.6f});
-    light(11, {-1.f, 2.99f, -5.5f}, {2.f, 0.f, 0.f}, {0.f, 0.f, 2.f});
-
-    s.spheres[0] = hittables::sphere({0.f, 1.f, -4.f}, 1.f);
-    s.sphere_lams[0] = materials::lambertian({0.8f, 0.1f, 0.1f});
 
     return s;
 }
@@ -188,58 +174,55 @@ static TestScene make_test_scene() {
 //  but with raw parallel arrays + a manual switch, no Handle/SceneView).
 // ═════════════════════════════════════════════════════════════════════
 
-/// Trace a ray: loop bounces, intersect the walls/boxes/spheres/portal
+/// Trace a ray: loop bounces, intersect the walls/boxes/portal
 /// manually, dispatch materials via the kinds[] tag.  Portal records
 /// teleport inside the material scatter (is_portal -> portal_scatter),
 /// so the loop stays generic.  Returns black on miss (caller substitutes
 /// the background).
+///
+/// \param transparent_backfaces X-ray mode: when true, rays pass through
+///        surfaces hit from behind (front_face == false), so a camera
+///        outside the box can see inside through the walls.
 inline float3 test_trace(const Ray &ray, const TestScene &scene,
-                         int max_bounces, RNG &rng) {
+                         int max_bounces, bool transparent_backfaces, RNG &rng) {
     float3 attenuation = {1, 1, 1};
     Ray current = ray;
 
     for ( int bounce = 0; bounce < max_bounces; bounce++ ) {
-        // ── Find closest hit among quads, boxes, spheres, portal ──
+        // ── Find closest hit among quads, boxes, portal ──────────
         optional<HitRecord> closest;
-        int hit_obj = 0;   // 0 = none, 1 = quad, 2 = box, 3 = sphere
+        int hit_obj = 0;   // 0 = none, 1 = quad, 2 = box, 3 = portal
         int hit_idx = -1;
         float t_max = 1e30f;
 
         for ( int i = 0; i < scene.num_quads; i++ ) {
             auto hit = scene.quads[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 1;
-                hit_idx = i;
-                t_max = hit->t;
-            }
+            if ( !hit ) continue;
+            // X-ray mode: back faces are transparent — skip hits from
+            // behind so the ray passes through the surface.
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest = hit;
+            hit_obj = 1;
+            hit_idx = i;
+            t_max = hit->t;
         }
         for ( int i = 0; i < scene.num_boxes; i++ ) {
             auto hit = scene.boxes[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 2;
-                hit_idx = i;
-                t_max = hit->t;
-            }
-        }
-        for ( int i = 0; i < scene.num_spheres; i++ ) {
-            auto hit = scene.spheres[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 3;
-                hit_idx = i;
-                t_max = hit->t;
-            }
+            if ( !hit ) continue;
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest = hit;
+            hit_obj = 2;
+            hit_idx = i;
+            t_max = hit->t;
         }
         for ( int i = 0; i < scene.num_portals; i++ ) {
             auto hit = scene.portals[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 4;
-                hit_idx = i;
-                t_max = hit->t;
-            }
+            if ( !hit ) continue;
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest = hit;
+            hit_obj = 3;
+            hit_idx = i;
+            t_max = hit->t;
         }
 
         if ( !closest ) {
@@ -260,13 +243,13 @@ inline float3 test_trace(const Ray &ray, const TestScene &scene,
         if ( hit_obj == 1 ) {
             if ( scene.quad_kinds[hit_idx] == MAT_LAMBERTIAN ) {
                 scattered = scene.quad_lams[hit_idx].scatter(current, *closest, rng);
+            } else if ( scene.quad_kinds[hit_idx] == MAT_TEXTURED_LAMBERTIAN ) {
+                scattered = scene.quad_tex_lams[hit_idx].scatter(current, *closest, rng);
             }
             // MAT_LIGHT never reaches here (emitted above)
         } else if ( hit_obj == 2 ) {
             scattered = scene.box_lams[hit_idx].scatter(current, *closest, rng);
         } else if ( hit_obj == 3 ) {
-            scattered = scene.sphere_lams[hit_idx].scatter(current, *closest, rng);
-        } else if ( hit_obj == 4 ) {
             // Portal: the dummy Lambertian's scatter() teleports the ray
             // (is_portal record -> portal_scatter continuation ray).
             scattered = scene.portal_lams[hit_idx].scatter(current, *closest, rng);
@@ -304,6 +287,7 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
     // ── Read params (host side, zero per-pixel overhead) ─────────
     int samples_per_frame = s_lookup.read<int>("spp_frame");
     int max_bounces = s_lookup.read<int>("max_bounces");
+    bool transparent_backfaces = s_lookup.read<bool>("transparent_backfaces");
     float3 cam_eye = s_lookup.read_vec3<float3>("cam_eye");
     float3 cam_at = s_lookup.read_vec3<float3>("cam_at");
     float3 cam_up = s_lookup.read_vec3<float3>("cam_up");
@@ -365,7 +349,8 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
                 ray.time = frame_time;
 
                 // Trace + background gradient (white → background colour).
-                float3 colour = test_trace(ray, scene, max_bounces, rng);
+                float3 colour = test_trace(ray, scene, max_bounces,
+                                           transparent_backfaces, rng);
                 if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
                     float t = 0.5f * (ray.dir.y + 1.0f);
                     colour = lerp({1, 1, 1}, bg, t);
@@ -384,9 +369,9 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
     if ( ctx->stats ) {
         ctx->stats->write<int>("num_objects",
                                scene.num_quads + scene.num_boxes +
-                               scene.num_spheres + scene.num_portals);
+                               scene.num_portals);
         ctx->stats->write<int>("num_bvh_nodes", 0);
-        ctx->stats->write<int>("num_lights", 2);
+        ctx->stats->write<int>("num_lights", 1);
     }
 }
 

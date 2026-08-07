@@ -266,6 +266,22 @@ SceneDescriptor load_scene_descriptor(const std::string &yaml_path) {
         mb.range_max_i = 50;
         desc.params.push_back(std::move(mb));
     }
+    {
+        // X-ray mode for raytracer kernels: when enabled, rays pass
+        // through surfaces hit from behind (front_face == false), so a
+        // camera outside an enclosed scene (e.g. the Cornell box) can
+        // see inside through the walls.  Consumed by rt::render_main().
+        ParamDescriptor bf;
+        bf.name = "transparent_backfaces";
+        bf.description =
+            "X-ray mode: make back faces transparent — rays pass "
+            "through surfaces hit from behind, so a camera outside an "
+            "enclosed scene can see inside.  Off by default.";
+        bf.type = ParamType::BOOL;
+        bf.category = ParamCategory::Render;
+        bf.default_b = false;
+        desc.params.push_back(std::move(bf));
+    }
 
     // ── 1b. Auto-generated animation params (tick / time) ──────────
     {

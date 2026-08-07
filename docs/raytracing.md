@@ -200,7 +200,7 @@ float3 sample(float u, float v, float time, RNG &rng) const;
 | Triangle  | barycentric coordinates of vertices b, c |
 | Sphere    | spherical mapping from the outward direction |
 | Box       | the hit face's quad coordinates |
-| Portal    | the entry hit's UVs, forwarded to the exit shape (see Portals) |
+| Portal    | the HIT shape's UVs, forwarded to the other shape (see Portals) |
 
 Out-of-range UVs are **not** clamped by the pipeline — every texture
 implements its own clamp / round / wrap behavior.  This is what allows
@@ -274,12 +274,14 @@ See `scenes/colorchecker_floor.yaml` for a complete demo scene.
 ## Portals
 
 A portal teleports a ray from one hittable's surface to another's.  It is
-implemented as a **pair of hittables** (entry → exit): the parametric
-coordinates (`u`/`v`) of the entry hit are used as input for the second
-hittable, so the ray reappears at the corresponding point on the exit
-surface.  The mapping is exactly inverse to `hit()`: every hittable
-provides `point_at_uv(u, v)` that reconstructs a surface point from the
-same UV convention its `hit()` fills into `HitRecord::u/v`.
+implemented as a **pair of hittables** (entry ↔ exit) and is
+**bidirectional**: a ray hitting *either* shape reappears at the
+corresponding point on the other one.  The parametric coordinates
+(`u`/`v`) of the hit are used as input for the other hittable, so the
+ray reappears at the matching point on the counterpart surface.  The
+mapping is exactly inverse to `hit()`: every hittable provides
+`point_at_uv(u, v)` that reconstructs a surface point from the same UV
+convention its `hit()` fills into `HitRecord::u/v`.
 
 ```cpp
 class Portal {
@@ -297,11 +299,11 @@ scene.add_portal(hittables::quad(/* entry */), hittables::quad(/* exit */),
 Semantics:
 
 - The ray keeps its **direction** (position-only teleport):
-  `portal_origin` = exit point nudged by an epsilon along the exit
-  normal in the travel direction (avoids re-hitting the exit surface),
+  `portal_origin` = other-surface point nudged by an epsilon along that
+  surface's normal in the travel direction (avoids re-hitting it),
   `portal_dir` = incoming ray direction.
-- `HitRecord::t` keeps the **entry distance**, so closest-hit ordering
-  works without special-casing.
+- `HitRecord::t` keeps the **hit shape's distance** (entry *or* exit),
+  so closest-hit ordering works without special-casing.
 - Portals are instanced as objects with a **dummy material** (a white
   Lambertian by default).  The teleport lives in the material: every
   material's `scatter()` checks `HitRecord::is_portal` and returns the
@@ -312,10 +314,11 @@ Semantics:
   **emissive portal** (a glowing surface; the path terminates with its
   emission instead of teleporting).  Emissive portals are excluded from
   the light list (their surface area is undefined).
-- Portals are **bidirectional**: the exit shape is a plain hittable too,
-  and the exit side works through the same pair.
-- The portal's AABB is the **entry** shape's AABB, so BVH culling is
-  correct without recursion.
+- Portals are **bidirectional**: `hit()` tests both shapes with the same
+  t-range and the closest hit wins; hitting the exit teleports back to
+  the entry.  Both surfaces work through the same pair.
+- The portal's AABB merges **both** shapes, so BVH culling never skips
+  an exit-side hit.
 
 Limitations:
 
@@ -340,9 +343,10 @@ objects:
 
 Entry/exit shapes support `type: quad` (center/u/v), `type: sphere`
 (center/radius) and `type: triangle` (v0/v1/v2).  See
-`scenes/portal_rooms.yaml` for a complete two-room demo scene and
-`kernels/rt_portal_test/kernel.cpp` for a from-scratch reference
-implementation.
+`scenes/portal_rooms.yaml` for a two-room demo and
+`kernels/rt_portal_test/kernel.cpp` for a from-scratch single-room test
+scene (Cornell box + one bidirectional sphere-sphere portal) that
+exercises both directions.
 
 ## optional return values
 
@@ -365,6 +369,7 @@ also auto-injected, together with the display-pipeline params:
 
 | Param | Type | Default | Purpose |
 |---|---|---|---|
+| `transparent_backfaces` | bool | `false` | X-ray mode: make back faces transparent — rays pass through surfaces hit from behind (`front_face == false`), so a camera outside an enclosed scene (e.g. the Cornell box) can see inside through the walls. |
 | `tonemap_enabled` | bool | `false` | Master switch for the tone-mapping stage of the display pipeline. When off, accumulated linear values are normalized and hard-clamped to [0,1] (no operator, no gamma). |
 | `tonemap_operator` | enum | `0` | Tone-map operator: `0` = Reinhard (`x/(1+x)`), `1` = ACES fitted (Narkowicz 2015), `2` = Filmic (Hable / Uncharted 2). Rendered as a combo box. |
 | `tonemap_exposure` | float | `1.0` | Exposure multiplier applied to the linear HDR value before the operator. |

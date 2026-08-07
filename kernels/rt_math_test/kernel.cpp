@@ -146,8 +146,12 @@ static TestScene make_test_scene() {
 /// Trace a ray: loop bounces, intersect the walls/boxes manually,
 /// dispatch materials via the kinds[] tag, accumulate attenuation.
 /// Returns black on miss (caller substitutes the background).
+///
+/// \param transparent_backfaces X-ray mode: when true, rays pass through
+///        surfaces hit from behind (front_face == false), so a camera
+///        outside the box can see inside through the walls.
 inline float3 test_trace(const Ray &ray, const TestScene &scene,
-                         int max_bounces, RNG &rng) {
+                         int max_bounces, bool transparent_backfaces, RNG &rng) {
     float3 attenuation = {1, 1, 1};
     Ray current = ray;
 
@@ -160,21 +164,23 @@ inline float3 test_trace(const Ray &ray, const TestScene &scene,
 
         for ( int i = 0; i < scene.num_quads; i++ ) {
             auto hit = scene.quads[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 1;
-                hit_idx = i;
-                t_max = hit->t;
-            }
+            if ( !hit ) continue;
+            // X-ray mode: back faces are transparent — skip hits from
+            // behind so the ray passes through the surface.
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest = hit;
+            hit_obj = 1;
+            hit_idx = i;
+            t_max = hit->t;
         }
         for ( int i = 0; i < scene.num_boxes; i++ ) {
             auto hit = scene.boxes[i].hit(current, 0.001f, t_max);
-            if ( hit ) {
-                closest = hit;
-                hit_obj = 2;
-                hit_idx = i;
-                t_max = hit->t;
-            }
+            if ( !hit ) continue;
+            if ( transparent_backfaces && !hit->front_face ) continue;
+            closest = hit;
+            hit_obj = 2;
+            hit_idx = i;
+            t_max = hit->t;
         }
 
         if ( !closest ) {
@@ -233,6 +239,7 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
     // ── Read params (host side, zero per-pixel overhead) ─────────
     int samples_per_frame = s_lookup.read<int>("spp_frame");
     int max_bounces = s_lookup.read<int>("max_bounces");
+    bool transparent_backfaces = s_lookup.read<bool>("transparent_backfaces");
     float3 cam_eye = s_lookup.read_vec3<float3>("cam_eye");
     float3 cam_at = s_lookup.read_vec3<float3>("cam_at");
     float3 cam_up = s_lookup.read_vec3<float3>("cam_up");
@@ -294,7 +301,8 @@ extern "C" void render_kernel(KERNEL_QUEUE_PARAM, const RenderContext *ctx) {
                 ray.time = frame_time;
 
                 // Trace + background gradient (white → background colour).
-                float3 colour = test_trace(ray, scene, max_bounces, rng);
+                float3 colour = test_trace(ray, scene, max_bounces,
+                                           transparent_backfaces, rng);
                 if ( colour.x == 0.f && colour.y == 0.f && colour.z == 0.f ) {
                     float t = 0.5f * (ray.dir.y + 1.0f);
                     colour = lerp({1, 1, 1}, bg, t);
