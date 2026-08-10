@@ -14,6 +14,7 @@
 /// no dynamic allocation), so the texture stays a trivially copyable
 /// POD that can be uploaded into device material arrays by value.
 
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 
 namespace rt::textures {
@@ -257,9 +258,12 @@ struct Text {
 
     /// Sample the text at (u, v); out-of-text UVs return the background.
     /// `time` and `rng` are ignored (deterministic texture).
-    float3 sample(float u, float v, float time, RNG &rng) const {
+    float3 sample(float u, float v, float time, RNG &rng,
+                  const Context &ctx = Context{}) const {
         (void)time;
         (void)rng;
+        PROFILER_ZONE("sample_text");
+        ctx.collector.on_texture_sample(2);
 
         // Glyph grid coordinates: which glyph column, which pixel row
         float gx = (u - origin_x) / cell_w;

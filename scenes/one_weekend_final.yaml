@@ -1,5 +1,6 @@
 name: "One Weekend — Random Spheres"
 kernel: raytracer
+max_spp: 1024
 scene_type: 3d
 
 # ── Scene parameters ──────────────────────────────────────────────────
@@ -17,10 +18,11 @@ params:
     description: "Number of random small spheres scattered on the ground"
     default: 22
     range: [0, 500]
-  ground_color:
-    type: color
-    description: "Albedo colour of the large ground sphere"
-    default: [0.5, 0.5, 0.5]
+  chart_scale:
+    type: float
+    description: "ColorChecker chart repetitions per UV unit on the ground sphere (1 = one chart over the whole sphere)"
+    default: 400.0
+    range: [1, 2000]
   background:
     type: color
     description: "Sky colour (used in gradient background)"
@@ -111,13 +113,17 @@ data_sources:
 # Declarative scene geometry.  Object properties can reference scene
 # params ($name) or data sources ($data_source) for per-instance values.
 objects:
-  # Ground sphere: large lambertian sphere
+  # Ground sphere: large sphere textured with the ColorChecker colour-
+  # grading chart (infinite tiling — UV overflow continues with another
+  # chart).  The chart scale is tunable via the chart_scale param.
   - type: sphere
     center: [0, -1000, 0]
     radius: 1000
     material:
-      type: lambertian
-      albedo: $ground_color
+      type: textured_lambertian
+      texture: colorchecker
+      scale_u: $chart_scale
+      scale_v: $chart_scale
 
   # Three large decorative spheres at fixed positions
   - type: sphere

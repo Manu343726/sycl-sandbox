@@ -16,5 +16,10 @@
         "--limit-results=100",
         // Reduce max number of references returned
         "--limit-references=200"
+    ],
+    // Build the sandbox with the embedded Tracy profiler (client + profiler
+    // UI).  Disable by removing this entry and re-configuring.
+    "cmake.configureArgs": [
+        "-DSANDBOX_ENABLE_TRACY=ON"
     ]
 }

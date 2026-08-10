@@ -27,14 +27,14 @@
         {
             "label": "build tracy-server",
             "type": "shell",
-            "command": "cmake --build build --target tracy-server",
+            "command": "cmake --build build --target tracy-profiler",
             "group": "build",
             "problemMatcher": ["$gcc"]
         },
         {
             "label": "launch tracy-server",
             "type": "shell",
-            "command": "cmake --build build --target tracy-server && ${workspaceFolder}/build/profiler/bin/bin/tracy-profiler",
+            "command": "cmake --build build --target tracy-profiler && ${workspaceFolder}/build/profiler/bin/tracy-profiler",
             "group": "none",
             "problemMatcher": ["$gcc"]
         }

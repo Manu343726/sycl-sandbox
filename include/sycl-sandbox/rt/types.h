@@ -7,6 +7,7 @@
 #include <sycl-sandbox/rt/hittables/triangle.h>
 #include <sycl-sandbox/rt/hittables/quad.h>
 #include <sycl-sandbox/rt/hittables/box.h>
+#include <sycl-sandbox/rt/hittables/mesh.h>
 #include <sycl-sandbox/rt/hittables/portal.h>
 #include <sycl-sandbox/rt/materials/lambertian.h>
 #include <sycl-sandbox/rt/materials/metal.h>
@@ -18,7 +19,8 @@
 namespace rt {
 
 using Hittable =
-    std::variant<hittables::Sphere, hittables::Triangle, hittables::Quad, hittables::Box>;
+    std::variant<hittables::Sphere, hittables::Triangle, hittables::Quad, hittables::Box,
+                 hittables::Mesh>;
 
 using Material = std::variant<materials::Lambertian,
                               materials::Metal,

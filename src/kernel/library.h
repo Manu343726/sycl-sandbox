@@ -8,7 +8,6 @@
 
 struct KernelHandle {
     void*       handle     = nullptr;
-    KernelDesc  desc       = {};
     int         generation = 0;
     std::string name;
     std::string path;
@@ -69,6 +68,15 @@ public:
     /// is scanned for .cpp/.h files to compare timestamps against.
     void add_kernel_source_dir(const std::string &kernel_name,
                                const std::string &source_dir);
+
+    /// Source directory registered for a kernel (see
+    /// add_kernel_source_dir), or "" if unknown.  Used by the profiler
+    /// zone-name registry to scan a kernel's own sources for
+    /// PROFILER_ZONE literals.
+    std::string kernel_source_dir(const std::string &kernel_name) const {
+        auto it = kernel_source_dirs_.find(kernel_name);
+        return it != kernel_source_dirs_.end() ? it->second : "";
+    }
 
 private:
     std::string build_dir_;

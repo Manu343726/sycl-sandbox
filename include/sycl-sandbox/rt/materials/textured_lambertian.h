@@ -13,7 +13,7 @@
 /// rt/textures/texture.h), so the material stays a plain POD that can
 /// be uploaded into device material arrays.
 
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
@@ -32,19 +32,23 @@ public:
     }
 
     optional<ScatterRecord>
-    scatter(const Ray &incoming_ray, const HitRecord &rec, RNG &rng) const {
+    scatter(const Ray &incoming_ray, const HitRecord &rec, RNG &rng,
+            const Context &ctx = Context{}) const {
+        PROFILER_FUNCTION();
+        ctx.collector.on_scatter(MaterialType::TexturedLambertian, incoming_ray, rec);
         if ( rec.is_portal ) {
             return portal_scatter(incoming_ray, rec);
         }
         // Sample the texture at the hit's parametric coordinates and the
         // ray's time, passing the path RNG through (stochastic textures
         // may use it); UV out-of-range behavior is defined by the texture.
-        float3 albedo = textures::sample(texture, rec.u, rec.v, incoming_ray.time, rng);
+        float3 albedo = textures::sample(texture, rec.u, rec.v, incoming_ray.time, rng,
+                                         ctx);
         float3 target = add(rec.p, add(rec.normal, random_in_unit_sphere(rng)));
         return ScatterRecord {albedo, Ray {rec.p, sub(target, rec.p)}};
     }
 
-    float3 emit(const HitRecord &) const {
+    float3 emit(const HitRecord &, const Context & = Context{}) const {
         return {0, 0, 0};
     }
 };

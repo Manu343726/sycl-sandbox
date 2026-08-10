@@ -1,5 +1,6 @@
 name: "Portal Rooms"
 kernel: raytracer
+max_spp: 1024
 scene_type: 3d
 
 # ── Scene parameters ──────────────────────────────────────────────────

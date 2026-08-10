@@ -4,29 +4,28 @@
 
 The shared `include/sycl-sandbox/rt/` library provides a complete raytracing pipeline that
 any kernel can use.  A raytracer kernel is just a normal kernel that happens
-to include `rt/` headers and call `rt::render_main()` from its
-`render_kernel()`.  The kernel owns only its scene geometry and material
-parameters; everything else (camera, path tracing, accumulation) is handled
-by the library.
+to include `rt/` headers and call `rt::render()` from its single
+`kernel_entry(const rt::Context*)`.  The kernel owns only its scene geometry
+(built host-side and handed in via `ctx.scene`) and material parameters;
+everything else (camera, path tracing, accumulation) is handled by the
+library.
 
 ```
 ┌──────────────────────────────────────────────────────┐
 │  kernel.cpp (your code)                              │
 │                                                      │
-│  init_kernel() → build scene via SceneBuilder,       │
-│                  upload per-type arrays to device     │
-│  render_kernel() → rt::render_main(queue, …,         │
-│                      scene_view, background_fn)      │
-│  shutdown_kernel() → free device memory              │
+│  kernel_entry(ctx) → read params from ctx,          │
+│                      build background_fn             │
+│  rt::render<KernelName>(ctx, background_fn)    │
 │                                                      │
 │  ┌──────────────────────────────────────────────────┐│
 │  │  include/sycl-sandbox/rt/ (shared library)       ││
 │  │                                                  ││
-│  │  render_main() → reads standard params,          ││
-│  │                   sets up camera, launches       ││
-│  │                   parallel_for → trace()         ││
-│  │                    → handle_hit/scatter/emit     ││
-│  │                     → switch dispatch per-type   ││
+│  │  render() → reads standard params,               ││
+│  │              sets up camera, launches            ││
+│  │              foreach_pixel → trace()             ││
+│  │                → handle_hit/scatter/emit         ││
+│  │                 → switch dispatch per-type       ││
 │  └──────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────┘
 ```
@@ -49,7 +48,8 @@ struct Handle {
 };
 ```
 
-Type IDs: 0 = Sphere, 1 = Triangle, 2 = Quad, 3 = Box, 4 = Portal (hittable);
+Type IDs: 0 = Sphere, 1 = Triangle, 2 = Quad, 3 = Box, 4 = Portal,
+5 = Mesh (hittable);
 0 = Lambertian, 1 = Metal, 2 = Dielectric, 3 = DiffuseLight,
 4 = TexturedLambertian (material).
 
@@ -98,10 +98,8 @@ SceneBuilder scene;
 scene.add({hittables::sphere({0, 0, 0}, 1), materials::lambertian({1, 1, 1})});
 scene.add({hittables::box(-1, -1, -1, 2, 2, 2), materials::metal({0.8f, 0.8f, 0.8f}, 0)});
 SceneData scene_data = scene.build(queue);   // upload to device, owns buffers
-// Kernels render through the non-owning view:
-render_main(..., scene_data.view(), ...);
-// Host frees when done:
-scene_data.free(queue);
+// The host hands the non-owning view to the kernel each frame via ctx.scene:
+ctx.scene = &scene_data.view();
 ```
 
 ### Dispatch
@@ -131,10 +129,12 @@ X-ray mode (`transparent_backfaces`) is handled inside `bvh_hit()` via the
 
 ### Sky lighting
 
-`trace()` takes the renderer's background function (`BgFn`) as its last
-argument.  When a ray escapes the scene (no handle hit) — or reaches the
-bounce limit — the background function is evaluated at the *current* ray
-and folded into the path, attenuated by the throughput so far:
+`trace()` takes the renderer's background function (`BgFn`) and an
+optional `rt::Context` (default empty — see "Tracing and the debug
+collector" below).  When a ray escapes the scene (no handle hit) — or
+reaches the bounce limit — the background function is evaluated at the
+*current* ray and folded into the path, attenuated by the throughput so
+far:
 
 ```cpp
 if (!closest_hit) {
@@ -147,57 +147,85 @@ weekend" style) render at all: without it every path ends black and the
 whole image collapses to a flat background gradient (the `render_main`
 black-substitution hack that previously masked this was removed).
 
-## Anatomy of a minimal raytracer kernel
+### Tracing and the debug collector
 
-All parameters (including standard ones like SPP, bounces, camera) are
-declared in the YAML scene file and managed by `SceneDescriptor`.  Kernels
-read parameters by name via `ParamLookup::read<T>("name")`.
+The whole pipeline — `trace()`, `bvh_hit()`, every primitive's `hit()`,
+every material's `scatter()`/`emit()` and every texture `sample()` —
+takes a `const rt::Context &ctx` (include/sycl-sandbox/context.h) that
+rides the *device profiler ring* (`ctx.prof`), the per-work-item
+`linear_id`, the per-frame `TraceCounters` and the *debug collector*
+(`ctx.collector`).  The collector is an optional step/event ring
+(`rt::TraceCollector`, rt/collector.h): when the context carries an
+active collector, every pipeline stage appends deep metadata to it — BVH
+nodes entered, hit tests performed, scatter/emit evaluations, texture
+samples — plus one `TraceStepRecord` per bounce.  An inactive collector
+(the default `rt::Context{}`) makes every hook a no-op the compiler
+eliminates, so the render path pays zero cost.  Both BVH traversals
+report: the scene BVH (`bvh_hit()`) and each mesh's per-mesh BVH
+(`Mesh::bvh_hit()`) emit a `HittableBvhNode` event per node entered,
+which the debug view reconstructs into `visited_bvh_nodes()` /
+`visited_hittable_nodes()`.
+
+The scene-debug view (`trace_ray_debug()`, src/ui/scene_debug/ray_trace.h)
+arms a `TraceCollector` over host stack rings, runs the *real* `trace()`,
+and reconstructs the per-bounce steps (with their events) from the rings
+afterwards.  Per-hit colours are recovered by back-propagation (emit +
+attenuation × continuation, with the kernel's exact sky fold on
+escape/bounce-limit), so `steps[0].color` is bit-identical to
+`rt::trace()`'s return value — see docs/architecture.md → "Scene debug
+window".
+
+## Anatomy of a raytracer kernel
+
+The kernel is a single `extern "C"` entry point, called once per frame.
+The host builds the scene (`SceneBuilder`/`SceneData`, see above) and hands
+it in `ctx.scene`; the kernel reads the standard params (camera, SPP,
+bounces) through `ctx.params` and renders every pixel via the shared
+`rt::render()` path.  Kernels keep NO state — no globals, no
+init/shutdown (kernels/raytracer/kernel.cpp):
 
 ```cpp
-#include <sycl-sandbox/rt/types.h>      // Object, Hittable, Material
-#include <sycl-sandbox/rt/trace.h>      // rt::render_main()
-#include <sycl-sandbox/rt/scene_data.h> // SceneBuilder, SceneData, SceneView
-#include <sycl-sandbox/rt/hittables/quad.h>
-#include <sycl-sandbox/rt/materials/lambertian.h>
-#include <sycl-sandbox/rt/materials/diffuse_light.h>
+#include <sycl-sandbox/sandbox_api.h>
+#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/rt/trace.h>      // rt::trace(), rt::render()
 
 using namespace rt;
-using rt::materials::lambertian;
-using rt::materials::diffuse_light;
 
-// ── Kernel-specific params are read by name from the buffer ───────────
+// ── Single entry point — one function, no ops, no globals ─────────────
+extern "C" void kernel_entry(const rt::Context *ctxp) {
+    const rt::Context &ctx = *ctxp;
+    PROFILER_ZONE("render");
 
-// ── Scene state ───────────────────────────────────────────────────────
-static SceneBuilder scene;
-static SceneData scene_data = {};   // owning; kernel never sees this
-static SceneView scene_view = {};   // non-owning snapshot for render_kernel
+    // Background colour from the scene params — sky gradient from white
+    // at the horizon to the configured background colour.
+    const auto bg = ctx.params->read<float3>("background");
+    const auto &scene = *ctx.scene;
+    const auto background_fn = [bg](const Ray &ray) -> float3 {
+        const float t = 0.5f * (ray.dir.y + 1.0f);
+        return lerp({1.f, 1.f, 1.f}, bg, t);
+    };
 
-// ── Scene builder (host, called by init_kernel) ────────────────────────
-extern "C" void init_kernel(sycl::queue* queue, int, int,
-                            const void* params, size_t) {
-    rt::ParamLookup lookup(/* ... */);
-    // Read kernel-specific params by name — type-safe
-    // float3 light_color = lookup.read<float3>("light_color");
-    // Build geometry with scene.add(…)
-    scene = SceneBuilder();
-    scene.add({hittables::quad(axis, value, …), lambertian(color)});
-    scene.add({hittables::box(cx, cy, cz, sx, sy, sz), lambertian(color)});
-    scene_data = scene.build(queue);   // upload per-type arrays to device
-    scene_view = scene_data.view();    // kernel renders through this
-}
+    // Enqueue one frame of samples for every pixel (enqueue-only
+    // contract — the host chains tone-map + display on the in-order
+    // queue after this returns).  KernelName is an explicit SYCL kernel
+    // name tag, unique per kernel .so.
+    rt::render<class RaytracerPixelKernel>(ctx, background_fn);
 
-// ── Render (called every frame) ───────────────────────────────────────
-extern "C" void render_kernel(sycl::queue* queue, int w, int h,
-                               const void* params, void* accum, int si) {
-    rt::render_main(queue, w, h, (const float*)params, (float*)accum, si,
-                    scene_view,
-                    [](const Ray&) -> float3 { return {0,0,0}; });
-}
-
-extern "C" void shutdown_kernel(sycl::queue* queue) {
-    scene_data.free(queue);
+    // Scene-derived stats are host-side — publish right after enqueueing.
+    if (ctx.stats) {
+        ctx.stats->write<int>("num_objects", scene.num_handles);
+        ctx.stats->write<int>("num_bvh_nodes", scene.num_bvh_nodes);
+        ctx.stats->write<int>("num_lights", scene.num_lights);
+    }
 }
 ```
+
+`rt::render<KernelName>()` reads the standard params from `ctx.params`
+(`spp_frame`, `max_bounces`, `transparent_backfaces`, camera — see
+"Standard parameter layout" below), walks every pixel through
+`rt::Runtime::foreach_pixel<KernelName>()` (a SYCL `parallel_for` on the
+GPU/CPU backends, plain loops in native mode), and accumulates samples
+into `ctx.accum`.
 
 ## Primitive composition
 
@@ -214,6 +242,127 @@ scene.add({hittables::box(cx, cy, cz, sx, sy, sz), material});
 The same composition principle can be extended to other compound primitives
 in the future.
 
+## Triangle meshes
+
+A `Mesh` hittable is a window into the scene's global triangle array
+(`hittables::Mesh {first_triangle, num_triangles}` — indices into
+`SceneView::triangles`).  No per-mesh device allocations: the mesh's
+triangles are pushed into the same per-type triangle array as standalone
+`Triangle` hittables and uploaded as one buffer.  Texture UVs come from
+the winning triangle's barycentric coordinates (u weights vertex b, v
+weights vertex c), like a standalone `Triangle`.
+
+```cpp
+// Host side (SceneBuilder):
+scene.add_mesh(triangles, materials::metal({0.9f, 0.85f, 0.7f}, 0.15f));
+```
+
+Meshes are dispatched by `HittableType::Mesh` in `handle_hit()`; their
+surface area (sum of triangle areas) feeds the light list for emissive
+mesh materials.
+
+### Per-mesh BVH
+
+The scene BVH culls a mesh as a single box (the union of its triangle
+AABBs), which is wasted work for a large mesh: a ray enters the box and
+then linearly scans every triangle.  To fix that, `SceneBuilder::build_mesh_bvhs()`
+builds a **second BVH per mesh** during scene loading, replacing the
+linear scan with a proper acceleration structure.
+
+Construction reuses the same pre-order flat builder as the scene BVH:
+`build_flat_bvh()` splits on the longest AABB axis at the median
+(over the triangles' centroids) and emits a compact `BvhNode` array with
+`left == BVH_LEAF` marking leaves.  The two BVHs live in the same
+`BvhNode` struct but mean different things in the leaf:
+
+- **Scene BVH** leaves: `right` = **handle index** (which hittable).
+- **Mesh BVH** leaves: `right` = **absolute triangle index** into
+  `SceneView::triangles` (direct, no per-mesh offset math at traversal
+  time).
+
+Per-mesh trees are appended into one `SceneView::mesh_bvh_nodes` buffer
+(one device upload), and each `Mesh` stores `bvh_root` — the index of
+its tree's root node in that buffer.  Meshes with fewer than two
+triangles get `bvh_root = -1` and keep the linear scan.
+
+Because every tree shares one flat array, `build_mesh_bvhs()` rewrites
+the builder's *local* child links (0-based within a tree) into
+*absolute* indices by adding the tree's start offset before appending —
+leaf nodes are untouched (`right` already holds an absolute triangle
+index).  Without that offset, only the first mesh (tree at offset 0)
+traverses correctly and every other mesh silently misses, which the
+`diag mesh` structural validation guards against (`node < bvh_root` is
+an out-of-tree child link).
+
+`Mesh::hit()` traverses the mesh BVH when `mesh_bvh_nodes` is present
+and `bvh_root >= 0`: an iterative 64-entry stack with AABB pruning and
+a `t_max` that tightens after each triangle hit.  The same traversal
+emits a `TraceEventKind::HittableBvhNode` per node entered when a trace
+collector is armed, so the scene debugger can highlight the visited
+mesh-BVH boxes and count `mesh bvh nodes` per bounce (see
+"Scene debugger" below).  Mesh-BVH node events are only emitted when the
+kernels' trace collection is enabled, keeping the default render path
+free of the per-node overhead.
+
+Zero-area (degenerate) triangles are dropped by `SceneBuilder::add_mesh()`
+before upload, and the `Triangle` constructor normalizes safely (a
+degenerate triangle gets a clean zero normal instead of `NaN`).  This
+matters on GPU fast-math builds: a degenerate triangle's `norm(0) = NaN`
+normal was observed to leak through `Triangle::hit()`'s denominator check
+and poison the pixel accumulation buffer — the whole image progressively
+blackened as samples accumulated.  Degenerate triangles can never be hit,
+so dropping them is free.
+
+Zero-area (degenerate) triangles are dropped by `SceneBuilder::add_mesh()`
+before upload, and the `Triangle` constructor normalizes safely (a
+degenerate triangle gets a clean zero normal instead of `NaN`).  This
+matters on GPU fast-math builds: a degenerate triangle's `norm(0) = NaN`
+normal was observed to leak through `Triangle::hit()`'s denominator check
+and poison the pixel accumulation buffer — the whole image progressively
+blackened as samples accumulated.  Degenerate triangles can never be hit,
+so dropping them is free.
+
+### Loading meshes from STL files
+
+`include/sycl-sandbox/stl_loader.h` (HOST-ONLY — never included by
+kernels/device code) loads ASCII and binary STL files (auto-detected via
+the binary size invariant `84 + 50·count == file size`, falling back to
+token-based ASCII parsing for `solid`-prefixed files).  STL normals are
+discarded and recomputed from the vertices.  `apply_transform()` places
+the model: scale → rotate (Euler degrees, applied Z → Y → X) → translate.
+
+YAML scenes load meshes with a `type: mesh` object:
+
+```yaml
+- type: mesh
+  file: models/uv_sphere.stl     # relative to the scene YAML's directory
+  position: [-0.9, 1.0, 0.4]     # optional translation
+  rotation: [0, 45, 0]           # optional Euler degrees (Z → Y → X)
+  scale: 1.4                     # optional float or vec3
+  material:
+    type: metal
+    albedo: [0.9, 0.85, 0.7]
+    roughness: 0.15
+```
+
+`file` may be a `$param` / `$data_source` reference.  See
+`scenes/mesh_demo.yaml` for a full example.
+
+> **STL coordinate convention.**  STL files carry no up-axis metadata —
+> many tools export Z-up (e.g. `scenes/models/duck.stl`, whose +Z is the
+> vertical).  A Z-up model loaded unrotated lies flat in this Y-up scene.
+> Verify any model's orientation headlessly before committing a rotation:
+>
+> ```
+> sycl-sandbox diag stl-viz <file.stl> <outprefix> [--rx --ry --rz]
+> ```
+>
+> This renders shaded front/side/top/three-quarter PNGs through the
+> project's own loader and `apply_transform`, so a candidate Euler fix can
+> be confirmed end-to-end.  Prefer a single-axis rotation: the fixed-axis
+> Z → Y → X order makes combined rotations non-intuitive (applying `ry`
+> after `rx` tumbles rather than yawing).
+
 ## AABB and acceleration structures
 
 Every hittable type provides an `aabb()` method returning the enclosing
@@ -225,15 +374,19 @@ for broad-phase rejection in BVH traversal and available for future
 importance sampling.
 
 BVH construction (`SceneBuilder::build_bvh()`) builds a binary BVH over
-the scene's per-handle AABBs (median split along the longest axis) and
-flattens it to a contiguous pre-order array of `BvhNode`
-(`{Aabb bounds, uint32 left, uint32 right}`, `left == BVH_LEAF` marks a
-leaf whose `right` is the handle index).  The array is uploaded to
-device memory as a single buffer (`SceneView::bvh_nodes`) — no pointers,
-all navigation by index, in the same spirit as a `boost::flat_map`.  The
-renderer's closest-hit query is `bvh_hit()`, an iterative stack-based
-traversal over that flat array.  Light list computation is stubbed but
-the data slot is in place in `SceneView`.
+the scene's per-handle AABBs and flattens it to a contiguous pre-order
+array of `BvhNode` (`{Aabb bounds, uint32 left, uint32 right}`,
+`left == BVH_LEAF` marks a leaf whose `right` is the handle index).
+Both the scene BVH and every per-mesh BVH come from the same
+`build_flat_bvh()` helper (median split along the longest axis over
+centroids; root = node 0; pre-order layout).  Each array is uploaded to
+device memory as a single buffer (`SceneView::bvh_nodes` and
+`SceneView::mesh_bvh_nodes`) — no pointers, all navigation by index, in
+the same spirit as a `boost::flat_map`.  The renderer's closest-hit
+query is `bvh_hit()`, an iterative stack-based traversal over that flat
+array; `Mesh::bvh_hit()` is the analogous per-mesh traversal (see
+"Per-mesh BVH" above).  Light list computation is stubbed but the data
+slot is in place in `SceneView`.
 
 ## Textures
 
@@ -305,8 +458,8 @@ class TexturedLambertian {
 ```
 
 The ray's `time` field (from the scene's `time` param, read once per frame
-in `render_main`) is passed through to the sampler, enabling time-varying
-procedural textures later.
+in `rt::render()`/`Params::from_lookup`) is passed through to the sampler,
+enabling time-varying procedural textures later.
 
 ### YAML usage
 
@@ -526,21 +679,26 @@ by name — no enum indexing needed.
 ```
 include/sycl-sandbox/
   variant.h           — visit<>() — generic compile-time variant dispatch
+  context.h           — rt::Context — the single kernel ABI (prof ring,
+                        counters, collector, params, scene, framebuffer)
   rt/
     math.h            — float3, operators, RNG
-    types_fwd.h       — Ray, HitRecord, ScatterRecord, Aabb
+    types_fwd.h       — Ray, HitRecord, ScatterRecord, HittableType,
+                        MaterialType
+    aabb.h            — Aabb, aabb_from_points/merge/hit, BvhNode, BVH_LEAF
     types.h           — Hittable variant, Material variant, Object class
     helpers.h         — random_in_unit_sphere, reflect, refract, schlick
     variant.h         — forward to sycl-sandbox/variant.h
-    camera.h          — Camera struct, lookat()
-    scene_data.h      — Handle, SceneView, SceneBuilder, handle dispatch
-    trace.h           — trace(), render_main<>()
-    scene.h           — Axis enum, quad_corner
+    collector.h       — TraceCollector ring + TraceCounters (no-ops when
+                        inactive)
+    trace.h           — trace(), render<>()
     hittables/
       sphere.h        — Sphere class + sphere() factory + aabb()
       triangle.h      — Triangle class + triangle() factory + aabb()
       quad.h          — Quad class + quad() factory + aabb()
       box.h           — Box class + box() factory + aabb()
+      portal.h        — Portal class + portal() factory (bidirectional)
+      mesh.h          — Mesh window into the scene triangle array
     materials/
       lambertian.h    — Lambertian + lambertian()
       metal.h         — Metal + metal()
@@ -551,4 +709,9 @@ include/sycl-sandbox/
       texture.h       — Texture variant + sample() dispatch
       solid_color.h   — SolidColor texture (constant colour)
       colorchecker.h  — ColorChecker texture (infinite tiling chart)
+      text.h          — Text texture (debug)
+      blend.h         — Blend texture (mix of two textures)
+  scene/
+    data.h            — Handle, SceneView, SceneBuilder, handle dispatch
+    camera.h          — Camera struct, lookat()
 ```

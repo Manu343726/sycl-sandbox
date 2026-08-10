@@ -24,6 +24,7 @@
 /// `Texture` variant dispatches to the concrete texture via compile-time
 /// `visit()`, exactly like `Hittable`/`Material` do.
 
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/variant.h>
 #include <sycl-sandbox/rt/textures/solid_color.h>
@@ -42,9 +43,16 @@ using Texture = std::variant<SolidColor, ColorChecker, Text, Blend>;
 /// passing the path's RNG through to stochastic textures.
 /// Dispatches to the concrete texture's `sample()` via visit().
 /// UV out-of-range behavior is defined by each texture kind.
-inline float3 sample(const Texture &t, float u, float v, float time, RNG &rng) {
+///
+/// \param ctx per-call kernel context: forwarded to the concrete sampler
+///        (it records a "sample_*" profiler zone and reports the sample
+///        through the trace collector).
+inline float3 sample(const Texture &t, float u, float v, float time, RNG &rng,
+                     const Context &ctx = Context{}) {
     float3 result = {0, 0, 0};
-    visit(t, [&](const auto &tex) { result = tex.sample(u, v, time, rng); });
+    visit(t, [&](const auto &tex) {
+        result = tex.sample(u, v, time, rng, ctx);
+    });
     return result;
 }
 

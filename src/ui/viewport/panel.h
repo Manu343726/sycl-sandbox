@@ -89,112 +89,82 @@ inline void render_viewport_panel(AppState &state) {
                 if ( !state.orbit_init ) {
                     const float *eye = state.camera_eye.ptr();
                     const float *at = state.camera_at.ptr();
-                    float dx = eye[0] - at[0],
-                          dy = eye[1] - at[1],
-                          dz = eye[2] - at[2];
-                    state.orbit.dist   = sqrtf(dx * dx + dy * dy + dz * dz);
-                    state.orbit.theta  = atan2f(dx, dz);
-                    state.orbit.phi    = asinf(dy / state.orbit.dist);
-                    state.orbit.target[0] = at[0];
-                    state.orbit.target[1] = at[1];
-                    state.orbit.target[2] = at[2];
-                    state.orbit.theta = std::fmod(state.orbit.theta, 2.f * 3.14159265f);
-                    state.orbit.phi   = std::max(-1.5f, std::min(1.5f, state.orbit.phi));
+                    orbit_from_eye(state.orbit, eye, at);
                     state.orbit_init = true;
                 }
 
                 // Mouse controls (only when viewport hovered)
                 if ( vp_hovered ) {
-                    // LMB = pan target
-                    if ( ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
-                        auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                        float ct = cosf(state.orbit.theta), st = sinf(state.orbit.theta);
-                        float cp = cosf(state.orbit.phi),  sp = sinf(state.orbit.phi);
-                        float right[3] = {ct, 0.f, -st};
-                        float up[3]    = {-sp * st, cp, -sp * ct};
-                        float speed = state.orbit.dist * 0.002f;
-                        state.orbit.target[0] += (-d.x * right[0] + d.y * up[0]) * speed;
-                        state.orbit.target[1] += (-d.x * right[1] + d.y * up[1]) * speed;
-                        state.orbit.target[2] += (-d.x * right[2] + d.y * up[2]) * speed;
-                        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-                        changed = true;
-                    }
-                    // MMB = orbit
-                    if ( ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ) {
-                        auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
-                        state.orbit.theta -= d.x * 0.005f;
-                        state.orbit.phi   += d.y * 0.005f;
-                        state.orbit.phi = std::max(-1.5f, std::min(1.5f, state.orbit.phi));
-                        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
-                        changed = true;
-                    }
-                    // Scroll: zoom / aperture / FOV / roll
-                    float mw = io.MouseWheel;
-                    if ( mw != 0.f ) {
-                        bool ctrl  = io.KeyCtrl;
-                        bool shift = io.KeyShift;
-                        bool alt   = io.KeyAlt;
-                        if ( ctrl && alt ) {
-                            state.orbit.roll += mw * 0.05f;
-                            changed = true;
-                        } else if ( ctrl && shift && state.fov.valid() ) {
-                            state.fov.set(std::max(1.f, std::min(120.f, state.fov.as_float() + mw * 2.f)));
-                            changed = true;
-                        } else if ( ctrl && state.aperture.valid() ) {
-                            state.aperture.set(std::max(0.f, std::min(1.f, state.aperture.as_float() + mw * 0.02f)));
-                            changed = true;
-                        } else {
-                            state.orbit.dist *= (mw > 0.f) ? 0.9f : 1.1f;
-                            state.orbit.dist = std::max(1.f, std::min(100.f, state.orbit.dist));
-                            changed = true;
-                        }
-                    }
-                }
-
-                // Keyboard controls (when viewport is hovered)
-                if ( vp_hovered && !io.WantCaptureKeyboard ) {
-                    float kspeed = 0.04f;
-                    bool shift = io.KeyShift;
-
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) )  { state.orbit.theta -= kspeed; changed = true; }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) { state.orbit.theta += kspeed; changed = true; }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) )    { state.orbit.phi += kspeed; state.orbit.phi = std::min(1.5f, state.orbit.phi); changed = true; }
-                    if ( !shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) )  { state.orbit.phi -= kspeed; state.orbit.phi = std::max(-1.5f, state.orbit.phi); changed = true; }
-
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_LeftArrow) ) {
-                        state.orbit.target[0] -= 0.2f * cosf(state.orbit.theta);
-                        state.orbit.target[2] -= 0.2f * sinf(state.orbit.theta);
-                        changed = true;
-                    }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_RightArrow) ) {
-                        state.orbit.target[0] += 0.2f * cosf(state.orbit.theta);
-                        state.orbit.target[2] += 0.2f * sinf(state.orbit.theta);
-                        changed = true;
-                    }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_UpArrow) )    { state.orbit.target[1] += 0.2f; changed = true; }
-                    if ( shift && ImGui::IsKeyDown(ImGuiKey_DownArrow) )  { state.orbit.target[1] -= 0.2f; changed = true; }
-
-                    // WASD
                     float ct = cosf(state.orbit.theta), st = sinf(state.orbit.theta);
                     float cp = cosf(state.orbit.phi),  sp = sinf(state.orbit.phi);
                     float forward[3] = {cp * st, sp, cp * ct};
                     float right[3]   = {ct, 0.f, -st};
+                    float up[3]       = {-sp * st, cp, -sp * ct};
+
+                    // MMB drag = rotate camera (yaw/pitch)
+                    if ( ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ) {
+                        auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+                        state.orbit.theta -= d.x * 0.005f;
+                        state.orbit.phi   -= d.y * 0.005f;
+                        state.orbit.phi = std::max(-1.5f, std::min(1.5f, state.orbit.phi));
+                        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+                        changed = true;
+                    }
+                    // LMB drag = pan camera in camera-local space
+                    if ( ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
+                        auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                        float speed = state.orbit.dist * 0.002f;
+                        if (io.KeyCtrl) {
+                            state.orbit.eye[0] += d.y * forward[0] * speed;
+                            state.orbit.eye[1] += d.y * forward[1] * speed;
+                            state.orbit.eye[2] += d.y * forward[2] * speed;
+                        } else {
+                            state.orbit.eye[0] -= d.x * right[0] * speed + d.y * up[0] * speed;
+                            state.orbit.eye[1] -= d.x * right[1] * speed + d.y * up[1] * speed;
+                            state.orbit.eye[2] -= d.x * right[2] * speed + d.y * up[2] * speed;
+                        }
+                        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                        changed = true;
+                    }
+
+                    // Scroll = move along look axis, Ctrl+scroll = roll
+                    float mw = io.MouseWheel;
+                    if ( mw != 0.f ) {
+                        if (io.KeyCtrl) {
+                            state.orbit.roll += mw * 0.05f;
+                        } else {
+                            float speed = state.orbit.dist * 0.2f;
+                            state.orbit.eye[0] -= mw * forward[0] * speed;
+                            state.orbit.eye[1] -= mw * forward[1] * speed;
+                            state.orbit.eye[2] -= mw * forward[2] * speed;
+                        }
+                        changed = true;
+                    }
+                }
+
+                // Keyboard controls (when viewport is hovered and focused)
+                if ( vp_hovered && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) ) {
+                    float ct = cosf(state.orbit.theta), st = sinf(state.orbit.theta);
+                    float cp = cosf(state.orbit.phi),  sp = sinf(state.orbit.phi);
+                    float forward[3] = {cp * st, sp, cp * ct};
+                    float right[3]   = {ct, 0.f, -st};
+                    float up[3]       = {-sp * st, cp, -sp * ct};
                     float tspeed = 0.3f;
 
-                    if ( ImGui::IsKeyDown(ImGuiKey_W) ) { state.orbit.target[0] += forward[0] * tspeed; state.orbit.target[1] += forward[1] * tspeed; state.orbit.target[2] += forward[2] * tspeed; changed = true; }
-                    if ( ImGui::IsKeyDown(ImGuiKey_S) ) { state.orbit.target[0] -= forward[0] * tspeed; state.orbit.target[1] -= forward[1] * tspeed; state.orbit.target[2] -= forward[2] * tspeed; changed = true; }
-                    if ( ImGui::IsKeyDown(ImGuiKey_A) ) { state.orbit.target[0] -= right[0] * tspeed;  state.orbit.target[1] -= right[1] * tspeed;  state.orbit.target[2] -= right[2] * tspeed; changed = true; }
-                    if ( ImGui::IsKeyDown(ImGuiKey_D) ) { state.orbit.target[0] += right[0] * tspeed;  state.orbit.target[1] += right[1] * tspeed;  state.orbit.target[2] += right[2] * tspeed; changed = true; }
-                    if ( ImGui::IsKeyDown(ImGuiKey_Q) ) { state.orbit.target[1] -= 0.3f; changed = true; }
-                    if ( ImGui::IsKeyDown(ImGuiKey_E) ) { state.orbit.target[1] += 0.3f; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_W) ) { state.orbit.eye[0] += forward[0] * tspeed; state.orbit.eye[1] += forward[1] * tspeed; state.orbit.eye[2] += forward[2] * tspeed; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_S) ) { state.orbit.eye[0] -= forward[0] * tspeed; state.orbit.eye[1] -= forward[1] * tspeed; state.orbit.eye[2] -= forward[2] * tspeed; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_A) ) { state.orbit.eye[0] += right[0] * tspeed;  state.orbit.eye[1] += right[1] * tspeed;  state.orbit.eye[2] += right[2] * tspeed; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_D) ) { state.orbit.eye[0] -= right[0] * tspeed;  state.orbit.eye[1] -= right[1] * tspeed;  state.orbit.eye[2] -= right[2] * tspeed; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_Q) ) { state.orbit.eye[0] -= up[0] * 0.3f; state.orbit.eye[1] -= up[1] * 0.3f; state.orbit.eye[2] -= up[2] * 0.3f; changed = true; }
+                    if ( ImGui::IsKeyDown(ImGuiKey_E) ) { state.orbit.eye[0] += up[0] * 0.3f; state.orbit.eye[1] += up[1] * 0.3f; state.orbit.eye[2] += up[2] * 0.3f; changed = true; }
                 }
 
                 if ( changed ) {
-                    float eye[3], up[3];
-                    orbit_to_eye(state.orbit, eye);
+                    float lookat[3], up[3];
+                    orbit_to_lookat(state.orbit, lookat);
                     orbit_up(state.orbit, up);
-                    state.camera_eye.set(eye[0], eye[1], eye[2]);
-                    state.camera_at.set(state.orbit.target[0], state.orbit.target[1], state.orbit.target[2]);
+                    state.camera_eye.set(state.orbit.eye[0], state.orbit.eye[1], state.orbit.eye[2]);
+                    state.camera_at.set(lookat[0], lookat[1], lookat[2]);
                     if ( state.camera_up.valid() ) {
                         state.camera_up.set(up[0], up[1], up[2]);
                     }

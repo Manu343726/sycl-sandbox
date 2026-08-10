@@ -1,5 +1,7 @@
 #pragma once
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
+#include <sycl-sandbox/rt/collector.h>
+#include <sycl-sandbox/rt/aabb.h>
 #include <sycl-sandbox/rt/types.h>
 #include <sycl-sandbox/kernel/execution_context.h>
 #include <sycl-sandbox/sandbox_api.h>
@@ -7,8 +9,10 @@
 #ifndef KERNEL_NATIVE
 #include <sycl/sycl.hpp>
 #endif
-#include <sycl-sandbox/profiler.h>
 #include <algorithm>
+#ifndef KERNEL_BUILD
+#include <unordered_map>
+#endif
 #include <vector>
 
 namespace rt {
@@ -20,24 +24,9 @@ namespace rt {
 /// The render loop reads SceneView (device only, trivially copyable).
 
 // ── Type tags ──────────────────────────────────────────────────────────
-
-/// Identifies a hittable type packed into the upper bits of Handle::hittable.
-enum class HittableType : uint32_t {
-    Sphere = 0,
-    Triangle = 1,
-    Quad = 2,
-    Box = 3,
-    Portal = 4,   ///< Portal: teleports the ray (no material)
-};
-
-/// Identifies a material type packed into the upper bits of Handle::material.
-enum class MaterialType : uint32_t {
-    Lambertian = 0,
-    Metal = 1,
-    Dielectric = 2,
-    DiffuseLight = 3,
-    TexturedLambertian = 4,
-};
+// HittableType / MaterialType live in rt/types_fwd.h so deep pipeline
+// code (primitive hit(), material scatter()/emit(), textures) can name
+// their kind when reporting through the trace collector.
 
 // ── Handle ─────────────────────────────────────────────────────────────
 
@@ -63,20 +52,6 @@ inline uint32_t handle_tag(uint32_t packed) {
 inline uint32_t handle_index(uint32_t packed) {
     return packed & 0x00FFFFFF;
 }
-
-/// Sentinel value indicating a BVH leaf node (left child = invalid).
-static constexpr uint32_t BVH_LEAF = 0xFFFFFFFF;
-
-// ── BVH node (future) ─────────────────────────────────────────────────
-
-/// Flat BVH node stored in a contiguous array.
-/// Leaf nodes: left == BVH_LEAF, right == handle index.
-/// Internal nodes: left and right are indices into the bvh_nodes array.
-struct BvhNode {
-    Aabb bounds;    ///< Bounding box enclosing both children.
-    uint32_t left;  ///< Left child index (BVH_LEAF for leaf).
-    uint32_t right; ///< Right child index or handle index (leaf).
-};
 
 // ── Light info (future) ───────────────────────────────────────────────
 
@@ -108,6 +83,10 @@ struct HittableTag<hittables::Quad> {
 template <>
 struct HittableTag<hittables::Box> {
     static constexpr HittableType value = HittableType::Box;
+};
+template <>
+struct HittableTag<hittables::Mesh> {
+    static constexpr HittableType value = HittableType::Mesh;
 };
 
 /// Compile-time mapping from a C++ material type to its MaterialType tag.
@@ -159,6 +138,8 @@ struct SceneView {
     int num_boxes;
     hittables::Portal *portals;
     int num_portals;
+    hittables::Mesh *meshes;
+    int num_meshes;
 
     // ── Material arrays (per-type) ────────────────────────────────────
     materials::Lambertian *lambertians;
@@ -179,6 +160,15 @@ struct SceneView {
     BvhNode *bvh_nodes;
     int num_bvh_nodes;
     int bvh_root;
+
+    // ── Optional: per-mesh BVHs (built via SceneBuilder::build_mesh_bvhs()) ──
+    // Flat concatenation of one BVH per Mesh hittable; each mesh's root is
+    // stored in its hittables::Mesh::bvh_root (index into this array).
+    // Mesh::hit() traverses it; without it meshes fall back to a linear
+    // scan of their triangle window.  Leaf nodes reference ABSOLUTE
+    // triangle indices into the triangles array.
+    BvhNode *mesh_bvh_nodes;
+    int num_mesh_bvh_nodes;
 
     // ── Optional: light list (built during build if lights exist) ─────
     LightInfo *lights;
@@ -215,21 +205,31 @@ struct SceneData : SceneView {
 // ── Dispatch functions (device-capable) ────────────────────────────────
 
 /// Test a handle's hittable against a ray.
+///
+/// \param ctx per-call kernel context: forwarded to the primitive's hit()
+///        so it can record profiler zones and report hit tests through
+///        the trace collector.
 inline optional<HitRecord>
-handle_hit(Handle h, const Ray &ray, float t_min, float t_max, const SceneView &scene) {
+handle_hit(Handle h, const Ray &ray, float t_min, float t_max, const SceneView &scene,
+           const Context &ctx = Context{}) {
+            PROFILER_FUNCTION();
+
     auto type = static_cast<HittableType>(handle_tag(h.hittable));
     uint32_t idx = handle_index(h.hittable);
     switch ( type ) {
         case HittableType::Sphere:
-            return scene.spheres[idx].hit(ray, t_min, t_max);
+            return scene.spheres[idx].hit(ray, t_min, t_max, ctx);
         case HittableType::Triangle:
-            return scene.triangles[idx].hit(ray, t_min, t_max);
+            return scene.triangles[idx].hit(ray, t_min, t_max, ctx);
         case HittableType::Quad:
-            return scene.quads[idx].hit(ray, t_min, t_max);
+            return scene.quads[idx].hit(ray, t_min, t_max, ctx);
         case HittableType::Box:
-            return scene.boxes[idx].hit(ray, t_min, t_max);
+            return scene.boxes[idx].hit(ray, t_min, t_max, ctx);
         case HittableType::Portal:
-            return scene.portals[idx].hit(ray, t_min, t_max);
+            return scene.portals[idx].hit(ray, t_min, t_max, ctx);
+        case HittableType::Mesh:
+            return scene.meshes[idx].hit(ray, t_min, t_max, scene.triangles,
+                                         scene.mesh_bvh_nodes, ctx);
     }
     return nullopt;
 }
@@ -239,41 +239,91 @@ inline optional<ScatterRecord> handle_scatter(Handle h,
                                               const Ray &incoming_ray,
                                               const HitRecord &hit,
                                               RNG &rng,
-                                              const SceneView &scene) {
+                                              const SceneView &scene,
+                                              const Context &ctx = Context{}) {
+    PROFILER_FUNCTION();
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
         case MaterialType::Lambertian:
-            return scene.lambertians[idx].scatter(incoming_ray, hit, rng);
+            return scene.lambertians[idx].scatter(incoming_ray, hit, rng, ctx);
         case MaterialType::Metal:
-            return scene.metals[idx].scatter(incoming_ray, hit, rng);
+            return scene.metals[idx].scatter(incoming_ray, hit, rng, ctx);
         case MaterialType::Dielectric:
-            return scene.dielectrics[idx].scatter(incoming_ray, hit, rng);
+            return scene.dielectrics[idx].scatter(incoming_ray, hit, rng, ctx);
         case MaterialType::DiffuseLight:
-            return scene.diffuse_lights[idx].scatter(incoming_ray, hit, rng);
+            return scene.diffuse_lights[idx].scatter(incoming_ray, hit, rng, ctx);
         case MaterialType::TexturedLambertian:
-            return scene.textured_lambertians[idx].scatter(incoming_ray, hit, rng);
+            return scene.textured_lambertians[idx].scatter(incoming_ray, hit, rng, ctx);
     }
     return nullopt;
 }
 
 /// Emit light from a handle's material.
-inline float3 handle_emit(Handle h, const HitRecord &hit, const SceneView &scene) {
+inline float3 handle_emit(Handle h, const HitRecord &hit, const SceneView &scene,
+                          const Context &ctx = Context{}) {
     auto type = static_cast<MaterialType>(handle_tag(h.material));
     uint32_t idx = handle_index(h.material);
     switch ( type ) {
         case MaterialType::Lambertian:
-            return scene.lambertians[idx].emit(hit);
+            return scene.lambertians[idx].emit(hit, ctx);
         case MaterialType::Metal:
-            return scene.metals[idx].emit(hit);
+            return scene.metals[idx].emit(hit, ctx);
         case MaterialType::Dielectric:
-            return scene.dielectrics[idx].emit(hit);
+            return scene.dielectrics[idx].emit(hit, ctx);
         case MaterialType::TexturedLambertian:
-            return scene.textured_lambertians[idx].emit(hit);
+            return scene.textured_lambertians[idx].emit(hit, ctx);
         case MaterialType::DiffuseLight:
-            return scene.diffuse_lights[idx].emit(hit);
+            return scene.diffuse_lights[idx].emit(hit, ctx);
     }
     return {0, 0, 0};
+}
+
+// ── Trace debug collection ────────────────────────────────────────────
+
+/// Per-bounce snapshot of a path traced by rt::trace(): everything the
+/// scene-debug view needs to draw and explain one step (see
+/// src/ui/scene_debug/ray_trace.h).  Kept a plain POD so it is
+/// device-compilable — the real kernel path leaves the collector
+/// inactive (rt/collector.h), whose hooks are empty and eliminated by
+/// the compiler, so the instrumentation costs nothing on the rendering
+/// path.
+struct TraceStepRecord {
+    Ray ray = {};                          ///< ray entering this step
+    bool hit = false;                      ///< did the ray hit an object
+    Handle handle = {};                    ///< hit handle (valid when hit)
+    HitRecord record = {};                 ///< closest hit record
+    float3 emit = {0, 0, 0};               ///< emission of the hit material
+    bool scattered = false;                ///< did the material scatter
+    Ray scattered_ray = {};                ///< continuation ray (when scattered)
+    float3 scatter_attenuation = {1, 1, 1}; ///< this scatter's attenuation
+    float3 throughput = {1, 1, 1};         ///< running attenuation entering
+                                           ///< the step (product so far)
+    bool escaped = false;                  ///< ray left the scene (no hit)
+    bool absorbed = false;                 ///< material absorbed the ray
+    bool bounce_limit = false;             ///< path cut short by max_bounces
+    uint32_t event_start = 0;              ///< event-ring position captured
+                                           ///< when the step finished; the
+                                           ///< events that fired while this
+                                           ///< step was evaluated are
+                                           ///< [prev.event_start,
+                                           ///<  this.event_start) (or
+                                           ///< [0, this.event_start) for the
+                                           ///< first step).  Set by
+                                           ///< TraceCollector::record_step.
+};
+
+/// Append a completed path step to the collector's step ring.  Defined
+/// here (not in rt/collector.h) because TraceStepRecord is complete in
+/// this header.  Stamps the step's event_start with the event-ring
+/// position at record time, so the reader can attach this step's events.
+inline void TraceCollector::record_step(const TraceStepRecord &r) const {
+    if ( !active() ) {
+        return;
+    }
+    const uint32_t pos = bump(&header->step_pos) & (step_capacity - 1);
+    steps[pos] = r;
+    steps[pos].event_start = header->event_pos;
 }
 
 // ── BVH traversal ───────────────────────────────────────────────────
@@ -292,9 +342,17 @@ struct BvhHitResult {
 ///        (front_face == false) are ignored WITHOUT tightening t_max,
 ///        so the ray continues past them and can hit objects behind
 ///        the surface (e.g. seeing inside an enclosed scene).
+/// \param ctx per-call kernel context: carries the device profiler
+///        ring, the work-item id, and the trace collector — every node
+///        whose AABB the ray enters is reported through
+///        ctx.collector.on_bvh_node() (the scene-debug view highlights
+///        them).  The kernel passes an inactive context: empty hooks,
+///        zero cost.
 inline optional<BvhHitResult>
 bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene,
-        bool skip_backfaces = false) {
+        bool skip_backfaces = false, const Context &ctx = Context{}) {
+    PROFILER_FUNCTION();
+
     if ( !scene.bvh_nodes || scene.bvh_root < 0 ) {
         return nullopt;
     }
@@ -305,17 +363,21 @@ bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene,
     stack[stack_size++] = (uint32_t)scene.bvh_root;
 
     while ( stack_size > 0 ) {
+        PROFILER_ZONE("bvh_traverse");
+
         uint32_t node_index = stack[--stack_size];
         const BvhNode &node = scene.bvh_nodes[node_index];
 
         // Test ray against this node's bounding box
-        if ( !aabb_hit(node.bounds, ray, t_min, t_max) ) {
+        if ( !aabb_hit(node.bounds, ray, t_min, t_max, ctx) ) {
             continue;
         }
+        ctx.collector.on_bvh_node(node_index);
 
         // Leaf node: test the single object
         if ( node.left == BVH_LEAF ) {
-            auto hit = handle_hit(scene.handles[node.right], ray, t_min, t_max, scene);
+            auto hit = handle_hit(scene.handles[node.right], ray, t_min, t_max, scene,
+                                  ctx);
             if ( hit ) {
                 // X-ray mode: pass through hits from behind — do not
                 // tighten t_max, the ray must continue past them.
@@ -338,6 +400,8 @@ bvh_hit(const Ray &ray, float t_min, float t_max, const SceneView &scene,
 
 // ── SceneBuilder (host-side) ──────────────────────────────────────────
 
+#ifndef KERNEL_BUILD
+
 /// Host-side scene builder.  Accumulates hittable/material pairs via add(),
 /// then uploads per-type arrays to device memory via build().
 ///
@@ -357,8 +421,7 @@ public:
     /// The hittable and material are dispatched to their per-type arrays.
     void add(Hittable h, Material m);
 
-    /// Add a portal (entry <-> exit) to the scene.
-    /// Portals are BIDIRECTIONAL: a ray hitting either shape teleports
+    /// Add a portal (entry <-> exit) to the scene.    /// Portals are BIDIRECTIONAL: a ray hitting either shape teleports
     /// to the other.  They are instanced as regular objects with a
     /// material.  The default is a dummy white Lambertian: every
     /// material's scatter() teleports portal records (see
@@ -376,9 +439,24 @@ public:
         add(obj.hittable, obj.material);
     }
 
+    /// Add a triangle mesh: copies the triangles into the scene's
+    /// per-type triangle array and adds ONE handle whose hittable is a
+    /// Mesh window into that range (see hittables::Mesh).  The mesh's
+    /// AABB is the union of its triangle AABBs, so the BVH culls the
+    /// whole mesh as a single object.  Empty meshes are skipped.
+    void add_mesh(const std::vector<hittables::Triangle> &triangles,
+                  const Material &material, bool smooth = false);
+
     /// Optional: build a BVH over the scene for acceleration.
     /// Must be called before build().
     void build_bvh();
+
+    /// Optional: build one BVH per Mesh hittable (over its triangle
+    /// window), so hit() culls the mesh interior instead of scanning it
+    /// linearly.  Must be called after all add()/add_mesh() calls and
+    /// before build().  Meshes without a per-mesh BVH (none built, or
+    /// fewer than 2 triangles) fall back to a linear scan.
+    void build_mesh_bvhs();
 
     /// Upload all accumulated data to device/host memory using the Runtime
     /// abstraction and return an owning SceneData.  When rt->queue is
@@ -430,6 +508,7 @@ private:
     std::vector<hittables::Quad> quads_;
     std::vector<hittables::Box> boxes_;
     std::vector<hittables::Portal> portal_pairs_;
+    std::vector<hittables::Mesh> meshes_;
 
     /// Material staging vectors (one per type).
     std::vector<materials::Lambertian> lambertians_;
@@ -454,6 +533,14 @@ private:
     std::vector<BvhNode> bvh_nodes_;
     int num_bvh_nodes_ = 0;
     int bvh_root_ = -1;
+
+    /// Per-mesh BVH nodes (built via build_mesh_bvhs(), before build()).
+    /// Flat concatenation of one BVH per Mesh hittable; each mesh's root
+    /// is stored in its hittables::Mesh::bvh_root (index into this
+    /// array), uploaded with the meshes_.  Leaves reference ABSOLUTE
+    /// triangle indices into triangles_.
+    std::vector<BvhNode> mesh_bvh_nodes_;
+    int num_mesh_bvh_nodes_ = 0;
 
     /// Compute the surface area of a hittable referenced by a handle.
     float compute_area(Handle h) const;
@@ -482,6 +569,7 @@ inline void SceneData::free(rt::Runtime *rt) {
     de(quads);               num_quads = 0;
     de(boxes);               num_boxes = 0;
     de(portals);             num_portals = 0;
+    de(meshes);              num_meshes = 0;
     de(lambertians);         num_lambertians = 0;
     de(metals);              num_metals = 0;
     de(dielectrics);         num_dielectrics = 0;
@@ -489,6 +577,7 @@ inline void SceneData::free(rt::Runtime *rt) {
     de(textured_lambertians); num_textured_lambertians = 0;
     de(aabbs);
     de(bvh_nodes);           num_bvh_nodes = 0; bvh_root = -1;
+    de(mesh_bvh_nodes);      num_mesh_bvh_nodes = 0;
     de(lights);              num_lights = 0;
 }
 
@@ -513,8 +602,17 @@ inline void SceneBuilder::add(Hittable h, Material m) {
         } else if constexpr ( std::is_same_v<H, hittables::Box> ) {
             handle.hittable = pack_handle(tag, (uint32_t)boxes_.size());
             boxes_.push_back(hittable);
+        } else if constexpr ( std::is_same_v<H, hittables::Mesh> ) {
+            handle.hittable = pack_handle(tag, (uint32_t)meshes_.size());
+            meshes_.push_back(hittable);
         }
-        box = hittable.aabb();
+        // Mesh AABBs need the triangle array (the mesh's triangles were
+        // pushed into triangles_ before add() — see add_mesh()).
+        if constexpr ( std::is_same_v<H, hittables::Mesh> ) {
+            box = hittable.aabb(triangles_.data());
+        } else {
+            box = hittable.aabb();
+        }
     });
 
     visit(m, [&](const auto &material) {
@@ -587,6 +685,17 @@ inline float SceneBuilder::compute_area(Handle h) const {
         case HittableType::Box: {
             float3 ext = sub(boxes_[idx].box_max, boxes_[idx].box_min);
             return 2.f * (ext.x * ext.y + ext.y * ext.z + ext.x * ext.z);
+        }
+        case HittableType::Mesh: {
+            // Sum of the mesh's triangle areas (surface area of the
+            // whole mesh, for light-list importance sampling).
+            const auto &m = meshes_[idx];
+            float area = 0.f;
+            for ( uint32_t i = 0; i < m.num_triangles; i++ ) {
+                const auto &t = triangles_[m.first_triangle + i];
+                area += 0.5f * len(cross(sub(t.b, t.a), sub(t.c, t.a)));
+            }
+            return area;
         }
         case HittableType::Portal:
             // A portal's surface area is undefined (rays teleport);
@@ -661,6 +770,82 @@ inline void SceneBuilder::add_portal(hittables::PortalShape entry,
     aabbs_.push_back(portal_pairs_.back().aabb());
 }
 
+// ── SceneBuilder::add_mesh ────────────────────────────────────────────
+
+inline void SceneBuilder::add_mesh(const std::vector<hittables::Triangle> &triangles,
+                                    const Material &material, bool smooth) {
+    if ( triangles.empty() ) {
+        return;
+    }
+    // The mesh's triangles go into the SAME per-type triangle array as
+    // standalone Triangle hittables; the Mesh handle records the range.
+    //
+    // Zero-area (degenerate) triangles are dropped here: they can never
+    // produce a hit, and carrying them is a NaN risk on GPU fast-math
+    // builds (their normals are zeroed, see hittables::Triangle).
+    uint32_t first = (uint32_t)triangles_.size();
+
+    if (smooth) {
+        // Compute per-vertex normals by averaging adjacent face normals.
+        struct VKey {
+            float x, y, z;
+            bool operator==(const VKey &o) const {
+                return x == o.x && y == o.y && z == o.z;
+            }
+        };
+        struct VKeyHash {
+            size_t operator()(const VKey &k) const {
+                return (size_t)((unsigned)k.x * 73856093u +
+                                (unsigned)k.y * 19349663u +
+                                (unsigned)k.z * 83492791u);
+            }
+        };
+        std::unordered_map<VKey, float3, VKeyHash> normal_sums;
+        size_t nt = triangles.size();
+        std::vector<size_t> valid_idx;
+        for (size_t i = 0; i < nt; ++i) {
+            float3 ab = sub(triangles[i].b, triangles[i].a);
+            float3 ac = sub(triangles[i].c, triangles[i].a);
+            if (len2(cross(ab, ac)) < 1e-12f) continue;
+            float3 fn = rt::norm(triangles[i].normal);
+            VKey ka{triangles[i].a.x, triangles[i].a.y, triangles[i].a.z};
+            VKey kb{triangles[i].b.x, triangles[i].b.y, triangles[i].b.z};
+            VKey kc{triangles[i].c.x, triangles[i].c.y, triangles[i].c.z};
+            auto it = normal_sums.find(ka);
+            if (it == normal_sums.end()) normal_sums[ka] = fn;
+            else it->second = rt::add(it->second, fn);
+            it = normal_sums.find(kb);
+            if (it == normal_sums.end()) normal_sums[kb] = fn;
+            else it->second = rt::add(it->second, fn);
+            it = normal_sums.find(kc);
+            if (it == normal_sums.end()) normal_sums[kc] = fn;
+            else it->second = rt::add(it->second, fn);
+            valid_idx.push_back(i);
+        }
+        for (size_t vi : valid_idx) {
+            const auto &t = triangles[vi];
+            float3 na = rt::norm(normal_sums[VKey{t.a.x, t.a.y, t.a.z}]);
+            float3 nb = rt::norm(normal_sums[VKey{t.b.x, t.b.y, t.b.z}]);
+            float3 nc = rt::norm(normal_sums[VKey{t.c.x, t.c.y, t.c.z}]);
+            triangles_.push_back(hittables::Triangle(t.a, t.b, t.c, na, nb, nc));
+        }
+    } else {
+        for ( const auto &t : triangles ) {
+            float3 ab = sub(t.b, t.a), ac = sub(t.c, t.a);
+            if ( len2(cross(ab, ac)) < 1e-12f ) {
+                continue;
+            }
+            triangles_.push_back(t);
+        }
+    }
+
+    uint32_t count = (uint32_t)triangles_.size() - first;
+    if ( count == 0 ) {
+        return;
+    }
+    add(hittables::Mesh {first, count}, material);
+}
+
 /// Copy a float3 into a float[3] array.
 static void copy_float3(float dst[3], float3 src) {
     dst[0] = src.x;
@@ -706,6 +891,11 @@ inline void SceneBuilder::build_debug_geometry() {
             case HittableType::Triangle:
                 // Triangles not used in current scenes, skip
                 break;
+            case HittableType::Mesh:
+                // Meshes are drawn from the triangle array by the
+                // scene-debug renderer (no legacy debug buffer for
+                // them), skip
+                break;
             case HittableType::Box: {
                 const auto &b = boxes_[hidx];
                 DebugBox db;
@@ -747,21 +937,31 @@ inline void SceneBuilder::build_debug_geometry() {
     }
 }
 
-// ── SceneBuilder::build_bvh ────────────────────────────────────────────
+// ── SceneBuilder BVH construction ──────────────────────────────────────
 
-inline void SceneBuilder::build_bvh() {
-    if ( handles_.empty() ) {
-        return;
+/// Build a flat binary BVH over `leaf_values.size()` leaves, using the
+/// per-leaf AABBs in `aabbs` (aabbs[i] and leaf_values[i] describe the
+/// same leaf i).  Leaves partition by centroid along the longest axis
+/// (median split); nodes are flattened to a pre-order array where a leaf
+/// stores its object index (scene handle index or absolute triangle
+/// index) in `right`.  Returns an empty vector for zero leaves.
+///
+/// This is the shared core of the scene BVH (SceneBuilder::build_bvh)
+/// and the per-mesh BVHs (SceneBuilder::build_mesh_bvhs): identical
+/// structure, different leaf payloads.
+static std::vector<BvhNode> build_flat_bvh(const std::vector<Aabb> &aabbs,
+                                           const std::vector<uint32_t> &leaf_values) {
+    int num_objects = (int)leaf_values.size();
+    if ( num_objects == 0 ) {
+        return {};
     }
 
-    int num_objects = (int)handles_.size();
-
-    // ── Compute the centroid of each handle's AABB ─────────────────────
+    // ── Compute the centroid of each leaf's AABB ──────────────────────
     std::vector<float3> centroids(num_objects);
     for ( int i = 0; i < num_objects; i++ ) {
-        centroids[i] = {(aabbs_[i].min.x + aabbs_[i].max.x) * 0.5f,
-                        (aabbs_[i].min.y + aabbs_[i].max.y) * 0.5f,
-                        (aabbs_[i].min.z + aabbs_[i].max.z) * 0.5f};
+        centroids[i] = {(aabbs[i].min.x + aabbs[i].max.x) * 0.5f,
+                        (aabbs[i].min.y + aabbs[i].max.y) * 0.5f,
+                        (aabbs[i].min.z + aabbs[i].max.z) * 0.5f};
     }
 
     // ── Working index list (sorted into subtrees via nth_element) ─────
@@ -774,14 +974,15 @@ inline void SceneBuilder::build_bvh() {
     std::vector<BvhNode> nodes;
     nodes.reserve(num_objects * 2 - 1);
 
-    // Recursive lambda using an explicit stack to avoid deep recursion on GPU
+    // Recursive construction using an explicit stack to avoid deep
+    // recursion on GPU
     struct StackFrame {
         int start;
         int end;
         uint32_t parent_index;
         bool is_right;
     };
-    // Sentinel: the frame covering the whole scene reuses the pre-pushed
+    // Sentinel: the frame covering the whole range reuses the pre-pushed
     // node 0 as its node (it has no parent to link into).
     constexpr uint32_t NO_PARENT = 0xFFFFFFFFu;
 
@@ -815,17 +1016,18 @@ inline void SceneBuilder::build_bvh() {
         }
 
         // ── Compute bounding box for this range ────────────────────────
-        Aabb bounds = aabbs_[indices[start]];
+        Aabb bounds = aabbs[indices[start]];
         for ( int i = start + 1; i < end; i++ ) {
-            bounds = aabb_merge(bounds, aabbs_[indices[i]]);
+            bounds = aabb_merge(bounds, aabbs[indices[i]]);
         }
 
         // ── Leaf node: single object ───────────────────────────────────
         if ( count == 1 ) {
+            uint32_t leaf = leaf_values[indices[start]];
             if ( is_root ) {
-                nodes[root_index] = {bounds, BVH_LEAF, indices[start]};
+                nodes[root_index] = {bounds, BVH_LEAF, leaf};
             } else {
-                nodes.push_back({bounds, BVH_LEAF, indices[start]});
+                nodes.push_back({bounds, BVH_LEAF, leaf});
             }
             continue;
         }
@@ -870,10 +1072,82 @@ inline void SceneBuilder::build_bvh() {
         stack.push_back({mid, end, node_index, true});
     }
 
-    // ── Upload to device memory ─────────────────────────────────────────
-    bvh_nodes_ = std::move(nodes);
+    return nodes;
+}
+
+inline void SceneBuilder::build_bvh() {
+    if ( handles_.empty() ) {
+        return;
+    }
+
+    int num_objects = (int)handles_.size();
+    // The scene BVH's leaves are handle indices (identity).
+    std::vector<uint32_t> leaf_values(num_objects);
+    for ( int i = 0; i < num_objects; i++ ) {
+        leaf_values[i] = (uint32_t)i;
+    }
+    bvh_nodes_ = build_flat_bvh(aabbs_, leaf_values);
     num_bvh_nodes_ = (int)bvh_nodes_.size();
-    bvh_root_ = 0;
+    bvh_root_ = bvh_nodes_.empty() ? -1 : 0;
+}
+
+// ── SceneBuilder::build_mesh_bvhs ──────────────────────────────────────
+
+inline void SceneBuilder::build_mesh_bvhs() {
+    mesh_bvh_nodes_.clear();
+    num_mesh_bvh_nodes_ = 0;
+    if ( meshes_.empty() ) {
+        return;
+    }
+
+    // Reserve a generous upper bound: one node per triangle (median-split
+    // BVH over n triangles has ~2n nodes).
+    size_t total_tris = 0;
+    for ( const auto &m : meshes_ ) {
+        total_tris += m.num_triangles;
+    }
+    mesh_bvh_nodes_.reserve(total_tris * 2);
+
+    for ( auto &m : meshes_ ) {
+        // One or zero triangles — a BVH adds nothing over the linear scan.
+        if ( m.num_triangles < 2 ) {
+            m.bvh_root = -1;
+            continue;
+        }
+        // Build the mesh's local AABB list; leaves reference ABSOLUTE
+        // triangle indices so traversal can index triangles_ directly.
+        std::vector<Aabb> aabbs;
+        aabbs.reserve(m.num_triangles);
+        std::vector<uint32_t> leaf_values;
+        leaf_values.reserve(m.num_triangles);
+        for ( uint32_t i = 0; i < m.num_triangles; i++ ) {
+            aabbs.push_back(triangles_[m.first_triangle + i].aabb());
+            leaf_values.push_back(m.first_triangle + i);
+        }
+        auto nodes = build_flat_bvh(aabbs, leaf_values);
+        if ( nodes.empty() ) {
+            m.bvh_root = -1;
+            continue;
+        }
+        // Rewrite internal child pointers from LOCAL (0-based within this
+        // tree) to ABSOLUTE indices into the shared mesh_bvh_nodes_ array:
+        // build_flat_bvh() returns a self-contained tree starting at node
+        // 0, but every mesh's tree is concatenated into one flat array, so
+        // a non-zero tree offset must be added to each child link.  Leaf
+        // nodes are untouched (left == BVH_LEAF, right == absolute
+        // triangle index — no offset applies).
+        int base = (int)mesh_bvh_nodes_.size();
+        for ( auto &n : nodes ) {
+            if ( n.left != BVH_LEAF ) {
+                n.left += (uint32_t)base;
+                n.right += (uint32_t)base;
+            }
+        }
+        m.bvh_root = base;
+        mesh_bvh_nodes_.insert(mesh_bvh_nodes_.end(), nodes.begin(),
+                               nodes.end());
+    }
+    num_mesh_bvh_nodes_ = (int)mesh_bvh_nodes_.size();
 }
 
 // ── SceneBuilder::build ────────────────────────────────────────────────
@@ -892,6 +1166,7 @@ inline SceneData SceneBuilder::build(rt::Runtime *rt) {
     upload(quads_,          data.quads,          data.num_quads);
     upload(boxes_,          data.boxes,          data.num_boxes);
     upload(portal_pairs_,   data.portals,        data.num_portals);
+    upload(meshes_,         data.meshes,         data.num_meshes);
     upload(lambertians_,    data.lambertians,    data.num_lambertians);
     upload(metals_,         data.metals,         data.num_metals);
     upload(dielectrics_,    data.dielectrics,    data.num_dielectrics);
@@ -918,6 +1193,16 @@ inline SceneData SceneBuilder::build(rt::Runtime *rt) {
         data.bvh_root = -1;
     }
 
+    // Per-mesh BVHs (upload if built via build_mesh_bvhs()); the meshes_
+    // uploaded above carry each mesh's bvh_root into the array.
+    if ( !mesh_bvh_nodes_.empty() ) {
+        data.mesh_bvh_nodes = upload_array(rt, mesh_bvh_nodes_);
+        data.num_mesh_bvh_nodes = num_mesh_bvh_nodes_;
+    } else {
+        data.mesh_bvh_nodes = nullptr;
+        data.num_mesh_bvh_nodes = 0;
+    }
+
     // Build light list from DiffuseLight materials
     if ( !light_handle_indices_.empty() ) {
         std::vector<LightInfo> light_infos;
@@ -939,5 +1224,7 @@ inline SceneData SceneBuilder::build(rt::Runtime *rt) {
 
     return data;
 }
+
+#endif // KERNEL_BUILD
 
 } // namespace rt

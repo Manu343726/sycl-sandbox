@@ -1,7 +1,5 @@
 # known kernel subdirectories — add new ones here
-set(KERNEL_DIRS minimal raytracer mandelbrot
-    raymarching_primitives seascape creation cyber_fuji lover
-    octagrams fractal_pyramid rainforest cinelava basewarp)
+set(KERNEL_DIRS raytracer)
 
 foreach(kdir ${KERNEL_DIRS})
     file(GLOB_RECURSE ksources "${kdir}/*.cpp")

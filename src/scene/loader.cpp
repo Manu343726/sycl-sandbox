@@ -1,4 +1,5 @@
 #include <sycl-sandbox/scene_loader.h>
+#include <sycl-sandbox/stl_loader.h>
 #include <sycl-sandbox/profiler.h>
 #include <yaml-cpp/yaml.h>
 #include <spdlog/spdlog.h>
@@ -6,6 +7,7 @@
 #include <random>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 
 using namespace rt;
@@ -177,13 +179,13 @@ std::vector<StatDescriptor> auto_standard_stats() {
     });
     out.push_back({
         .name = "frame_time_ms",
-        .description = "Frame time in milliseconds (render + compositing)",
+        .description = "Render frame interval in milliseconds",
         .type = ParamType::FLOAT,
         .viz = VisualizationHint::Graph,
         .category = ParamCategory::Render,
         .has_range = true,
         .range_min_f = 0.0f,
-        .range_max_f = 100.0f,
+        .range_max_f = 500.0f,
     });
     out.push_back({
         .name = "spp",
@@ -1366,6 +1368,49 @@ void build_scene(rt::SceneBuilder& builder, const ResolvedScene& config) {
                     if (hnode["v1"]) v1 = resolve_vec3_instance(hnode["v1"], config, index);
                     if (hnode["v2"]) v2 = resolve_vec3_instance(hnode["v2"], config, index);
                     builder.add(Triangle(v0, v1, v2), hmaterial);
+                } else if (htype == "mesh") {
+                    // Triangle mesh loaded from an STL file (ASCII or
+                    // binary, auto-detected).  `file` is resolved
+                    // relative to the scene YAML's directory; optional
+                    // `position` / `rotation` (Euler degrees, applied
+                    // Z → Y → X) / `scale` (float or vec3) place the
+                    // model in the scene.
+                    std::string file = resolve_string_instance(hnode["file"], config, index);
+                    if (file.empty()) {
+                        spdlog::warn("[scene] mesh object #{} missing `file`, skipping", i);
+                        return;
+                    }
+                    std::filesystem::path full_path =
+                        std::filesystem::path(config.yaml_path).parent_path() / file;
+                    auto stl_result = stl::load_stl(full_path.string());
+                    if (!stl_result.ok) {
+                        spdlog::error("[scene] mesh object #{}: failed to load '{}': {}",
+                                      i, full_path.string(), stl_result.error);
+                        return;
+                    }
+                    stl::MeshTransform mesh_transform;
+                    if (hnode["position"])
+                        mesh_transform.position = resolve_vec3_instance(hnode["position"], config, index);
+                    if (hnode["rotation"])
+                        mesh_transform.rotation_degrees = resolve_vec3_instance(hnode["rotation"], config, index);
+                    if (hnode["scale"]) {
+                        auto scale_val = resolve_value_instance(hnode["scale"], config, index);
+                        float uniform_scale = 1.f;
+                        if (scale_val.type == ValueType::Vec3) {
+                            mesh_transform.scale = scale_val.vec3_val;
+                        } else if (scale_val.type == ValueType::Int) {
+                            uniform_scale = (float)scale_val.int_val;
+                            mesh_transform.scale = {uniform_scale, uniform_scale, uniform_scale};
+                        } else {
+                            uniform_scale = scale_val.float_val;
+                            mesh_transform.scale = {uniform_scale, uniform_scale, uniform_scale};
+                        }
+                    }
+                    stl::apply_transform(stl_result.triangles, mesh_transform);
+                    spdlog::info("[scene] mesh object #{}: loaded '{}' ({} triangles)",
+                                 i, full_path.string(), stl_result.triangles.size());
+                    bool smooth = hnode["smooth"] ? hnode["smooth"].as<bool>() : false;
+                    builder.add_mesh(stl_result.triangles, hmaterial, smooth);
                 }
             };
 

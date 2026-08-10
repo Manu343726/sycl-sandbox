@@ -1,10 +1,10 @@
 #pragma once
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/aabb.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
 #include <sycl-sandbox/math.h>
-#include <sycl-sandbox/profiler.h>
 
 namespace rt::hittables {
 
@@ -12,11 +12,23 @@ class Triangle {
 public:
     float3 a, b, c;
     float3 normal;
+    float3 n0{}, n1{}, n2{};  ///< per-vertex normals (smooth shading)
+    bool smooth = false;
 
     Triangle() = default;
-    Triangle(float3 a_, float3 b_, float3 c_) : a(a_), b(b_), c(c_) {
+    Triangle(float3 a_, float3 b_, float3 c_, bool smooth_ = false)
+        : a(a_), b(b_), c(c_), smooth(smooth_) {
         float3 ab = sub(b, a), ac = sub(c, a);
-        normal = norm(cross(ab, ac));
+        float3 n = cross(ab, ac);
+        normal = len2(n) < 1e-12f ? float3{0, 0, 0} : norm(n);
+        if (smooth) { n0 = normal; n1 = normal; n2 = normal; }
+    }
+    Triangle(float3 a_, float3 b_, float3 c_,
+             float3 n0_, float3 n1_, float3 n2_)
+        : a(a_), b(b_), c(c_), n0(n0_), n1(n1_), n2(n2_), smooth(true) {
+        float3 ab = sub(b, a), ac = sub(c, a);
+        float3 n = cross(ab, ac);
+        normal = len2(n) < 1e-12f ? float3{0, 0, 0} : norm(n);
     }
 
     /// Return the axis-aligned bounding box enclosing this triangle.
@@ -26,7 +38,14 @@ public:
     }
 
     /// Ray-triangle intersection using barycentric coordinates (Cramer's rule).
-    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+    ///
+    /// \param ctx per-call kernel context: records a "hit_triangle"
+    ///        profiler zone (decimated by work-item id) and reports the
+    ///        hit test to the trace collector.
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max,
+                            const Context &ctx = Context{}) const {
+        PROFILER_FUNCTION();
+        ctx.collector.on_hit_test(HittableType::Triangle, ray, t_min, t_max);
         // Compute the ray-plane intersection; reject rays parallel to the plane
         float denom = dot(normal, ray.dir);
         if ( math::fabs(denom) < 1e-8f ) {
@@ -68,7 +87,13 @@ public:
         HitRecord rec;
         rec.t = t;
         rec.p = hit_point;
-        rec.normal = (denom < 0) ? normal : scale(normal, -1.f);
+        if (smooth) {
+            float w = 1.0f - u - v;  // barycentric weight of vertex a
+            float3 sn = norm(add(add(scale(n0, w), scale(n1, u)), scale(n2, v)));
+            rec.normal = (denom < 0) ? sn : scale(sn, -1.f);
+        } else {
+            rec.normal = (denom < 0) ? normal : scale(normal, -1.f);
+        }
         rec.front_face = denom < 0;
         // Barycentric coordinates double as texture (u, v): u weights
         // vertex b, v weights vertex c (both in [0,1] inside the triangle).

@@ -1,6 +1,0 @@
-name: "Raymarching Primitives"
-kernel: raymarching_primitives
-scene_type: 3d
-
-params: {}
-statistics: {}

@@ -13,6 +13,7 @@ class SyclSandboxConan(ConanFile):
         "imgui/1.92.8",
         "adaptivecpp/25.10.0",
         "spdlog/1.17.0",
+        "argparse/3.2",
         # Tracy server dependencies — Tracy's vendor.cmake finds these via
         # pkg-config and skips its own CPM downloads when present.
         "capstone/5.0.7",

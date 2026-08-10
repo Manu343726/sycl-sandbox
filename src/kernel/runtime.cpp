@@ -5,6 +5,8 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
 
 // ── Construction ──────────────────────────────────────────────────────
 
@@ -14,6 +16,7 @@ KernelRuntime::KernelRuntime(const std::string &build_dir,
     : lib_(std::make_unique<KernelLibrary>(build_dir, "")) // suffix set below
     , builder_(std::make_unique<KernelBuildSystem>(build_dir, *lib_))
     , watcher_(std::make_unique<SourceWatcher>(build_dir, project_root))
+    , build_dir_(build_dir)
 {
     // ── Probe + select backend ───────────────────────────────────
     probe_and_select_backend(preferred_backend);
@@ -52,6 +55,16 @@ KernelRuntime::KernelRuntime(const std::string &build_dir,
     }
     krt_.queue = q_;
 
+    // ── Cancellation flag (USM shared when queue exists, plain heap
+    //    in software mode — device/host visible in either case).
+    //    Plain int, not std::atomic — see execution_context.h rationale.
+    if (q_) {
+        cancel_flag_ = sycl::malloc_shared<int>(1, *q_);
+    } else {
+        cancel_flag_ = new int(0);
+    }
+    krt_.cancel_flag = cancel_flag_;
+
     // Per-frame trace counters (num_hits / num_bvh_hits)
     d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
     krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
@@ -66,6 +79,14 @@ KernelRuntime::~KernelRuntime() {
     if (d_trace_counters_) {
         krt_.dealloc(d_trace_counters_);
         d_trace_counters_ = nullptr;
+    }
+
+    // Free cancellation flag
+    if (cancel_flag_) {
+        if (q_) sycl::free(cancel_flag_, *q_);
+        else    delete cancel_flag_;
+        cancel_flag_ = nullptr;
+        krt_.cancel_flag = nullptr;
     }
 
     // Free host scene
@@ -209,22 +230,28 @@ void KernelRuntime::reinit_kernel() {
     krt_.copy_to_device(d_params_,
                         active_scene_desc_->current_buffer.data(),
                         sz);
-    try {
-        call_init_kernel(active_kernel_->handle,
-                         q_,
-                         width_, height_,
-                         d_params_,
-                         sz);
-    } catch (const std::exception &e) {
-        spdlog::error("[sycl] init error: {}", e.what());
-    }
 
-    if (active_scene_) {
+    // Rebuild the YAML scene from the current live params (kernels that
+    // accept a host-built scene; others skip it entirely).
+    if (active_scene_ && active_scene_->uses_scene) {
         rebuild_yaml_scene(&krt_,
                            active_scene_->yaml_path,
-                           active_kernel_->handle,
                            *active_scene_desc_,
                            host_scene_);
+    }
+
+    // Refresh the host-side stat writer (the kernel writes into it via
+    // ctx->stats during the render call — no device round-trip).
+    {
+        stat_buffer_.assign(active_scene_desc_->current_stat_buffer.size(),
+                            0.f);
+        stat_writer_ = rt::StatWriter{};
+        if (!stat_buffer_.empty()) {
+            stat_writer_.set_buffer(stat_buffer_.data());
+            stat_writer_.set_entries(
+                active_scene_desc_->stat_lookup_entries.data(),
+                (int)active_scene_desc_->stat_lookup_entries.size());
+        }
     }
 
     clear_accum();
@@ -344,12 +371,6 @@ bool KernelRuntime::ordered_reload(const SceneDef &scene) {
     spdlog::info("[scene] switch complete: kernel loaded (gen {})",
                  active_kernel_->generation);
 
-    // Apply Runtime pointer
-    {
-        auto fn = resolve_set_runtime(active_kernel_->handle);
-        if (fn) fn(&krt_);
-    }
-
     // Load + build scene descriptor
     active_scene_ = &scene;
     active_scene_desc_ =
@@ -357,10 +378,25 @@ bool KernelRuntime::ordered_reload(const SceneDef &scene) {
             scene_loader::load_scene_descriptor(scene.yaml_path));
     active_scene_desc_->build_layout();
 
-    // Build the runtime-owned stat buffer + writer.  Kernels write here
-    // (both via set_stat_lookup and RenderContext::stats); the render
-    // thread publishes it to the UI through a seqlock — the scene
-    // descriptor's own stat buffer stays UI-thread-private.
+    // Allocate + upload params.  Host-visible (alloc_host): the kernel
+    // reads its param snapshot through a ParamLookup over this buffer.
+    auto sz = active_scene_desc_->buffer_size();
+    d_params_ = krt_.alloc_host<float>(sz / sizeof(float));
+    krt_.copy_to_device(d_params_,
+                        active_scene_desc_->current_buffer.data(),
+                        sz);
+
+    // Rebuild the YAML scene first — the per-frame ctx carries the scene
+    // view, so the geometry must exist before the first render call.
+    if (active_scene_->uses_scene) {
+        rebuild_yaml_scene(&krt_,
+                           scene.yaml_path,
+                           *active_scene_desc_,
+                           host_scene_);
+    }
+
+    // Host-side stat writer for this scene (handed to the kernel via
+    // ctx->stats each frame — no Setup op, no kernel call).
     {
         stat_buffer_.assign(active_scene_desc_->current_stat_buffer.size(),
                             0.f);
@@ -371,45 +407,10 @@ bool KernelRuntime::ordered_reload(const SceneDef &scene) {
                 active_scene_desc_->stat_lookup_entries.data(),
                 (int)active_scene_desc_->stat_lookup_entries.size());
         }
-        auto fn = resolve_set_stat_lookup(active_kernel_->handle);
-        if (fn) fn(stat_buffer_.empty() ? nullptr : &stat_writer_);
     }
-
-    // Apply param lookup
-    {
-        auto fn = resolve_set_param_lookup(active_kernel_->handle);
-        if (fn && active_scene_desc_) {
-            auto lookup = active_scene_desc_->make_lookup();
-            fn(&lookup);
-        }
-    }
-
-    // Allocate + upload params
-    auto sz = active_scene_desc_->buffer_size();
-    d_params_ = krt_.alloc_host<float>(sz / sizeof(float));
-    krt_.copy_to_device(d_params_,
-                        active_scene_desc_->current_buffer.data(),
-                        sz);
-
-    // Init kernel
-    call_init_kernel(active_kernel_->handle,
-                     q_,
-                     width_, height_,
-                     d_params_,
-                     sz);
 
     // Clear accum
     clear_accum();
-
-    // Scene debug fn
-    scene_debug_fn_ = resolve_scene_debug(active_kernel_->handle);
-
-    // Rebuild YAML scene
-    rebuild_yaml_scene(&krt_,
-                       scene.yaml_path,
-                       active_kernel_->handle,
-                       *active_scene_desc_,
-                       host_scene_);
 
     return true;
 }
@@ -431,6 +432,14 @@ void KernelRuntime::free_device_resources() {
         d_trace_counters_ = nullptr;
     }
 
+    // Free cancellation flag
+    if (cancel_flag_) {
+        if (q_) sycl::free(cancel_flag_, *q_);
+        else    delete cancel_flag_;
+        cancel_flag_ = nullptr;
+        krt_.cancel_flag = nullptr;
+    }
+
     // Free host scene
     if (!host_scene_.data.empty()) {
         host_scene_.data.free(&krt_);
@@ -448,6 +457,17 @@ void KernelRuntime::alloc_device_resources() {
     // Trace counters — persistent across scenes, re-created per backend
     d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
     krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+
+    // Re-allocate cancellation flag after a backend switch (freed by
+    // free_device_resources() above).  Guard against double-allocation.
+    if (!cancel_flag_) {
+        if (q_) {
+            cancel_flag_ = sycl::malloc_shared<int>(1, *q_);
+        } else {
+            cancel_flag_ = new int(0);
+        }
+        krt_.cancel_flag = cancel_flag_;
+    }
 }
 
 sycl::queue KernelRuntime::make_queue(int backend_idx) {
@@ -513,6 +533,10 @@ void KernelRuntime::probe_and_select_backend(const std::string &preferred_backen
     }
 
     // ── Select initial backend ───────────────────────────────────
+    // "auto": always use cascading best-available (GPU SYCL > CPU SYCL > CPU Software).
+    // "gpu" / "cpu" / "software": explicit preferences with fallback.
+    bool try_auto = (preferred_backend == "auto");
+
     if (preferred_backend == "gpu") {
         for (int i = 0; i < (int)backends_.size(); i++) {
             if (backends_[i].id == "gpu_sycl") {
@@ -523,6 +547,7 @@ void KernelRuntime::probe_and_select_backend(const std::string &preferred_backen
                 } else {
                     spdlog::warn("[startup] GPU SYCL not available (--backend gpu), "
                                  "falling back to best available");
+                    try_auto = true;
                 }
                 break;
             }
@@ -545,17 +570,19 @@ void KernelRuntime::probe_and_select_backend(const std::string &preferred_backen
     // preferred_backend == "software" was already handled above —
     // active_backend_ and is_software_ are already set.
 
-    // If no explicit preference matched, auto-select best available
+    // Auto-select best available backend.
     // Priority: GPU SYCL > CPU SYCL > CPU Software
-    if (!backends_[active_backend_].available) {
+    if (try_auto || !backends_[active_backend_].available) {
         for (int i = (int)backends_.size() - 1; i >= 0; i--) {
             if (backends_[i].available) {
                 active_backend_ = i;
                 break;
             }
         }
-        spdlog::info("[startup] auto-selected {} backend (best available)",
-                     backends_[active_backend_].label);
+        spdlog::info("[startup] {} {} backend{}",
+                     (preferred_backend == "auto") ? "auto-selected" : "fell back to",
+                     backends_[active_backend_].label,
+                     (preferred_backend == "auto") ? "" : " (best available)");
     }
 
     // Ultimate fallback
@@ -571,4 +598,86 @@ void KernelRuntime::probe_and_select_backend(const std::string &preferred_backen
     }
 
     is_software_ = (backends_[active_backend_].id == "cpu_software");
+}
+
+// ── Cancellation ──────────────────────────────────────────────────────
+
+void KernelRuntime::cancel() {
+    // Host-side only — never touches USM.  Safe to call from any thread
+    // regardless of queue lifecycle (backend switch, shutdown, etc.).
+    cancel_requested_.store(1, std::memory_order_relaxed);
+}
+
+void KernelRuntime::begin_frame() {
+    // Mirror the host cancel state to device-visible USM before the
+    // kernel dispatch, then clear the host flag.  Only the render
+    // thread calls this — it owns the queue, so USM is always valid.
+    int *cf = cancel_flag_;
+    if (cf) {
+        int v = cancel_requested_.load(std::memory_order_relaxed);
+        __atomic_store_n(cf, v, __ATOMIC_RELAXED);
+    }
+    cancel_requested_.store(0, std::memory_order_relaxed);
+}
+
+// ── Profiler flag (on-the-fly kernel builds) ──────────────────────────
+
+void KernelRuntime::set_profiler_enabled(bool enabled) {
+    std::string value = enabled ? "ON" : "OFF";
+    spdlog::info("[profiler] reconfiguring kernel builds with "
+                 "SANDBOX_ENABLE_PROFILER={}", value);
+
+    // Re-run CMake configure so the cache variable changes.  Passing the
+    // existing build dir as the argument re-uses the cached source dir;
+    // the rebuilt targets pick up the new compile definition.
+    std::string cmd = "cmake -DSANDBOX_ENABLE_PROFILER=" + value +
+                      " " + build_dir_ + " 2>&1";
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        spdlog::error("[profiler] popen failed for cmake reconfigure");
+        return;
+    }
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe)) {
+        // Reconfigure output is short — route through spdlog at debug.
+        std::string line(buf);
+        if (!line.empty() && line.back() == '\n') line.pop_back();
+        spdlog::debug("[profiler] cmake: {}", line);
+    }
+    int rc = pclose(pipe);
+    if (rc != 0) {
+        spdlog::error("[profiler] cmake reconfigure failed (exit {}), "
+                      "kernel builds keep the previous flag", rc);
+        return;
+    }
+
+    // Rebuild + reload the active kernel with the new flag.  build_sync
+    // no-ops cheaply when the binary is already up to date (no source
+    // change → only the define changed → cmake re-runs the compile).
+    if (active_scene_ && active_kernel_) {
+        std::string name = active_kernel_->name;
+        builder_->cancel(name);
+        BuildResult br = builder_->build_sync(name);
+        if (!br.success) {
+            spdlog::error("[profiler] kernel '{}' rebuild failed with "
+                          "profiler={} — falling back to old binary", name, value);
+            return;
+        }
+        ordered_reload(*active_scene_);
+        spdlog::info("[profiler] kernel '{}' rebuilt (SANDBOX_ENABLE_PROFILER={})",
+                     name, value);
+    }
+}
+
+bool KernelRuntime::profiler_enabled() const {
+    std::ifstream f(build_dir_ + "/CMakeCache.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("SANDBOX_ENABLE_PROFILER:", 0) == 0) {
+            auto pos = line.find('=');
+            if (pos != std::string::npos)
+                return line.compare(pos + 1, 2, "ON") == 0;
+        }
+    }
+    return true;
 }

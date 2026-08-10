@@ -59,21 +59,6 @@ inline void RegisterControlsTests(ImGuiTestEngine* e, AppState* state) {
         }
     };
 
-    // ── Show Profiler checkbox toggles ─────────────────────────────
-    t = IM_REGISTER_TEST(e, "controls", "show_profiler_toggle");
-    t->TestFunc = [](ImGuiTestContext* ctx) {
-        AppState* s = g_test_state;
-        ctx->SetRef("Controls");
-        bool initial = s->show_profiler;
-        ctx->ItemClick("Show Profiler");
-        ctx->Yield();
-        IM_CHECK_NE(s->show_profiler, initial);
-        // Restore
-        if (s->show_profiler != initial) {
-            ctx->ItemClick("Show Profiler");
-        }
-    };
-
     // ── Show System Metrics checkbox toggles ───────────────────────
     t = IM_REGISTER_TEST(e, "controls", "show_metrics_toggle");
     t->TestFunc = [](ImGuiTestContext* ctx) {

@@ -1,655 +1,623 @@
+// sycl-sandbox — Scene Debug window (ImGui side)
+//
+// The window itself is plain ImGui: toolbar checkboxes, a stats line,
+// orbit-camera mouse handling, and the 3D view drawn as a texture via
+// ImGui::Image.  All OpenGL rendering happens on the background render
+// thread (SceneDebugRenderer); this panel only feeds it shared state
+// (scene snapshot, flags, camera input, render resolution) and presents
+// the newest ready slot texture.
+
 #include "panel.h"
-#include "gl_loader.h"
-#include <cstdio>
-#include <cmath>
-#include <vector>
+
+#include "imgui.h"
+
+#include <sycl-sandbox/rt/math.h>
+
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 #include <spdlog/spdlog.h>
 
-// Scene debug panel implementation
-// Renders a 3D OpenGL viewport showing scene geometry, BVH volumes, and camera frustum.
+namespace {
 
-// ── OpenGL resources ──────────────────────────────────────────────────
-static GLuint g_debug_vao = 0;
-static GLuint g_debug_vbo = 0;
-static bool g_debug_inited = false;
+SceneDebugRenderer g_renderer;
 
-void init_scene_debug() {
-    if (g_debug_inited) return;
-    glGenVertexArrays(1, &g_debug_vao);
-    glGenBuffers(1, &g_debug_vbo);
-    g_debug_inited = true;
-    spdlog::debug("[scene_debug] OpenGL resources created (vao={}, vbo={})", g_debug_vao, g_debug_vbo);
+/// Label of one bounce step in the hits tree.
+static std::string step_label(const rt::RayTraceResult &trace, size_t i) {
+    const rt::RayTraceStep &s = trace.steps[i];
+    const char *hn = hittable_name(static_cast<rt::HittableType>(
+        rt::handle_tag(s.handle.hittable)));
+    const char *mn = material_name(static_cast<rt::MaterialType>(
+        rt::handle_tag(s.handle.material)));
+    char buf[160];
+    if ( s.escaped ) {
+        std::snprintf(buf, sizeof(buf), "bounce %zu — escaped (sky)", i);
+    } else if ( s.absorbed ) {
+        std::snprintf(buf, sizeof(buf),
+                      "bounce %zu — absorbed by %s#%u (%s)", i, hn,
+                      rt::handle_index(s.handle.hittable), mn);
+    } else {
+        std::snprintf(buf, sizeof(buf),
+                      "bounce %zu — %s#%u (%s) t=%.3f", i, hn,
+                      rt::handle_index(s.handle.hittable), mn, s.record.t);
+    }
+    return buf;
+}
+
+/// Square colour indicator + label + numeric values (HDR radiance can
+/// exceed [0,1], so the swatch is clamped while the values stay raw).
+static void draw_color_row(const char *label, rt::float3 c, float size = 18.f) {
+    ImGui::ColorButton(label,
+                       ImVec4(std::clamp(c.x, 0.f, 1.f),
+                              std::clamp(c.y, 0.f, 1.f),
+                              std::clamp(c.z, 0.f, 1.f), 1.f),
+                       ImGuiColorEditFlags_NoTooltip |
+                           ImGuiColorEditFlags_NoPicker,
+                       ImVec2(size, size));
+    ImGui::SameLine();
+    ImGui::Text("%s = (%.3f, %.3f, %.3f)", label, c.x, c.y, c.z);
+}
+
+/// Details of one recorded hit: full HitRecord + scatter result.
+static void draw_step_details(const rt::RayTraceResult &trace, int idx,
+                              const SceneRenderParams &render) {
+    const rt::RayTraceStep &s = trace.steps[idx];
+    char buf[320];
+
+    std::snprintf(buf, sizeof(buf), "bounce %d of %zu", idx,
+                  trace.steps.size());
+    ImGui::TextUnformatted(buf);
+    ImGui::Separator();
+
+    if ( s.escaped ) {
+        ImGui::TextColored(ImVec4(0.65f, 0.8f, 1.f, 1.f),
+                           "state: escaped (sky)");
+    } else if ( s.absorbed ) {
+        ImGui::TextColored(ImVec4(1.f, 0.65f, 0.45f, 1.f),
+                           "state: absorbed");
+    } else {
+        ImGui::TextColored(ImVec4(0.55f, 1.f, 0.65f, 1.f),
+                           "state: hit, scattered");
+    }
+
+    // Back-propagated output colour of this hit: the radiance the path
+    // sends back along this step's ray (emit + attenuation × the folded
+    // continuation).
+    draw_color_row("output color", s.color);
+    // How the framebuffer actually shows this radiance (exposure →
+    // tone-map operator → gamma) — matches the 3D overlay colour.
+    draw_color_row("displayed", scene_debug_display_color(s.color, render));
+
+    if ( s.hit ) {
+        std::snprintf(buf, sizeof(buf), "handle: %s#%u · %s material",
+                      hittable_name(static_cast<rt::HittableType>(
+                          rt::handle_tag(s.handle.hittable))),
+                      rt::handle_index(s.handle.hittable),
+                      material_name(static_cast<rt::MaterialType>(
+                          rt::handle_tag(s.handle.material))));
+        ImGui::TextUnformatted(buf);
+        std::snprintf(buf, sizeof(buf), "t = %.4f   u = %.4f   v = %.4f",
+                      s.record.t, s.record.u, s.record.v);
+        ImGui::TextUnformatted(buf);
+        ImGui::TextUnformatted(s.record.front_face ? "front face: yes"
+                                                   : "front face: no");
+        rt::float3 p =
+            rt::add(s.ray.orig, rt::scale(s.ray.dir, s.record.t));
+        std::snprintf(buf, sizeof(buf), "point  = (%.3f, %.3f, %.3f)", p.x,
+                      p.y, p.z);
+        ImGui::TextUnformatted(buf);
+        std::snprintf(buf, sizeof(buf), "normal = (%.3f, %.3f, %.3f)",
+                      s.record.normal.x, s.record.normal.y, s.record.normal.z);
+        ImGui::TextUnformatted(buf);
+        draw_color_row("emit", s.emit);
+        if ( s.record.is_portal ) {
+            std::snprintf(buf, sizeof(buf),
+                          "portal origin = (%.3f, %.3f, %.3f)",
+                          s.record.portal_origin.x, s.record.portal_origin.y,
+                          s.record.portal_origin.z);
+            ImGui::TextUnformatted(buf);
+            std::snprintf(buf, sizeof(buf),
+                          "portal dir    = (%.3f, %.3f, %.3f)",
+                          s.record.portal_dir.x, s.record.portal_dir.y,
+                          s.record.portal_dir.z);
+            ImGui::TextUnformatted(buf);
+        }
+        ImGui::Separator();
+        if ( s.scattered ) {
+            draw_color_row("attenuation", s.attenuation);
+            std::snprintf(buf, sizeof(buf),
+                          "scattered ray: orig (%.3f, %.3f, %.3f) dir "
+                          "(%.3f, %.3f, %.3f)",
+                          s.scattered_ray.orig.x, s.scattered_ray.orig.y,
+                          s.scattered_ray.orig.z, s.scattered_ray.dir.x,
+                          s.scattered_ray.dir.y, s.scattered_ray.dir.z);
+            ImGui::TextUnformatted(buf);
+        } else {
+            ImGui::TextDisabled("no scatter");
+        }
+        ImGui::Separator();
+    }
+    std::snprintf(buf, sizeof(buf), "BVH nodes entered: %zu",
+                  s.bvh_visited.size());
+    ImGui::TextUnformatted(buf);
+    if ( !s.bvh_visited.empty() ) {
+        std::string nodes;
+        for ( size_t i = 0; i < s.bvh_visited.size(); i++ ) {
+            if ( i ) nodes += ", ";
+            nodes += std::to_string(s.bvh_visited[i]);
+        }
+        ImGui::TextWrapped("%s", nodes.c_str());
+    }
+    std::snprintf(buf, sizeof(buf), "mesh BVH nodes entered: %zu",
+                  s.hittable_bvh_visited.size());
+    ImGui::TextUnformatted(buf);
+    if ( !s.hittable_bvh_visited.empty() ) {
+        std::string nodes;
+        for ( size_t i = 0; i < s.hittable_bvh_visited.size(); i++ ) {
+            if ( i ) nodes += ", ";
+            nodes += std::to_string(s.hittable_bvh_visited[i]);
+        }
+        ImGui::TextWrapped("%s", nodes.c_str());
+    }
+}
+
+/// Selection state shared between the hits tree and the details
+/// dialog: clicking a node selects the bounce and opens (or updates)
+/// the "Hit Details" dialog; closing that dialog keeps the selection
+/// so the next click reopens it for the same hit.
+static int sel_step = -1;
+static bool details_open = false;
+
+/// Hits treeview (one node per bounce).  Clicking a node opens the
+/// hit-details dialog for that bounce.  Renders from a snapshot of
+/// the latest trace; the selection index survives between frames.
+static void draw_trace_inspector(const rt::RayTraceResult &trace,
+                                 const SceneRenderParams &render) {    // Overall statistics of the trace
+    size_t hits = 0, nodes = 0, mesh_nodes = 0;
+    bool escaped = false, absorbed = false;
+    for ( const auto &s : trace.steps ) {
+        hits += s.hit ? 1 : 0;
+        nodes += s.bvh_visited.size();
+        mesh_nodes += s.hittable_bvh_visited.size();
+        escaped |= s.escaped;
+        absorbed |= s.absorbed;
+    }
+    char buf[256];
+    // Step 0's back-propagated colour is the final pixel colour of the
+    // traced ray.
+    const rt::float3 &final = trace.steps.empty()
+                                  ? rt::float3{0.f, 0.f, 0.f}
+                                  : trace.steps[0].color;
+    std::snprintf(buf, sizeof(buf),
+                  "bounces: %zu  ·  hits: %zu  ·  bvh nodes entered: %zu"
+                  "  ·  mesh bvh nodes: %zu  ·  end: %s%s  ·  color: "
+                  "(%.3f, %.3f, %.3f)",
+                  trace.steps.size(), hits, nodes, mesh_nodes,
+                  escaped ? "escaped (sky)" : (absorbed ? "absorbed" : "hit"),
+                  trace.bounce_limit ? "  ·  (bounce limit)" : "",
+                  final.x, final.y, final.z);
+    ImGui::TextDisabled("%s", buf);
+    ImGui::Separator();
+
+    if ( sel_step >= (int)trace.steps.size() ) sel_step = -1;
+
+    ImGui::BeginChild("##hit_tree", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    for ( size_t i = 0; i < trace.steps.size(); i++ ) {
+        const rt::RayTraceStep &s = trace.steps[i];
+        ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow |
+                                ImGuiTreeNodeFlags_SpanAvailWidth;
+        if ( (int)i == sel_step ) fl |= ImGuiTreeNodeFlags_Selected;
+        std::string label = step_label(trace, i);
+        bool open = ImGui::TreeNodeEx((void *)(intptr_t)(i + 1), fl, "%s",
+                                      label.c_str());
+        if ( ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() ) {
+            sel_step = (int)i;
+            details_open = true;  // (re)open the details dialog
+        }
+        if ( open ) {
+            if ( s.hit ) {
+                ImGui::TextDisabled("handle: %s#%u (%s)",
+                                    hittable_name(static_cast<rt::HittableType>(
+                                        rt::handle_tag(s.handle.hittable))),
+                                    rt::handle_index(s.handle.hittable),
+                                    material_name(static_cast<rt::MaterialType>(
+                                        rt::handle_tag(s.handle.material))));
+                ImGui::TextDisabled("t = %.4f · u = %.4f · v = %.4f",
+                                    s.record.t, s.record.u, s.record.v);
+                draw_color_row("color", s.color, 14.f);
+                draw_color_row("displayed",
+                               scene_debug_display_color(s.color, render),
+                               14.f);
+                draw_color_row("emit", s.emit, 14.f);
+                if ( s.scattered )
+                    draw_color_row("attenuation", s.attenuation, 14.f);
+            }
+            // BVH traversal of this bounce: the scene-BVH nodes the ray
+            // entered while finding the closest hit, then the per-mesh
+            // (hittable) BVH nodes entered inside Mesh primitives.  The
+            // indices index into SceneView::bvh_nodes / mesh_bvh_nodes.
+            ImGui::PushID((int)i);
+            std::string nodes;
+            std::snprintf(buf, sizeof(buf), "scene bvh nodes (%zu)",
+                          s.bvh_visited.size());
+            if ( ImGui::TreeNode(buf) ) {
+                nodes.clear();
+                for ( size_t k = 0; k < s.bvh_visited.size(); k++ ) {
+                    if ( k ) nodes += ", ";
+                    nodes += std::to_string(s.bvh_visited[k]);
+                }
+                ImGui::TextWrapped("%s", nodes.empty() ? "(none)" : nodes.c_str());
+                ImGui::TreePop();
+            }
+            std::snprintf(buf, sizeof(buf), "mesh bvh nodes (%zu)",
+                          s.hittable_bvh_visited.size());
+            if ( ImGui::TreeNode(buf) ) {
+                nodes.clear();
+                for ( size_t k = 0; k < s.hittable_bvh_visited.size(); k++ ) {
+                    if ( k ) nodes += ", ";
+                    nodes += std::to_string(s.hittable_bvh_visited[k]);
+                }
+                ImGui::TextWrapped("%s", nodes.empty() ? "(none)" : nodes.c_str());
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+}
+
+/// "Hit Details" dialog: full details of the selected hit (t/u/v,
+/// front face, point, normal, emit, portal, attenuation, scattered
+/// ray, BVH nodes), opened by clicking a node in the Ray Inspector
+/// tree.  A regular dockable window with a title-bar close button;
+/// selecting another hit updates it in place.
+static void draw_hit_details_window(const rt::RayTraceResult &trace,
+                                    const SceneRenderParams &render) {
+    if ( !details_open ) return;
+    ImGui::SetNextWindowSize(ImVec2(360, 420), ImGuiCond_FirstUseEver);
+    if ( !ImGui::Begin("Hit Details", &details_open) ) {
+        ImGui::End();
+        return;
+    }
+    if ( sel_step >= 0 && sel_step < (int)trace.steps.size() ) {
+        draw_step_details(trace, sel_step, render);
+    } else {
+        ImGui::TextDisabled("no hit selected");
+    }
+    ImGui::End();
+}
+
+/// Dockable "Ray Inspector" window: the trace summary + hits treeview
+/// (all raytracing details — the Scene Debug window keeps only its
+/// toolbar and 3D view, so its size never depends on the trace data).
+/// As a regular ImGui window inside the dockspace it can be docked
+/// anywhere.  The hit-details dialog is an independent window drawn
+/// alongside it (Tracy-style: click a hit to open it).
+static void draw_ray_inspector_window(SceneDebugRenderer::State &st) {
+    rt::RayTraceResult trace;
+    std::string summary;
+    SceneRenderParams render;
+    {
+        std::lock_guard<std::mutex> lk(st.mutex);
+        trace = st.ray_trace;
+        summary = st.ray_trace_text;
+        render = st.render;
+    }
+
+    // Independent dialog — stays open (showing the last trace) even if
+    // the tree window is collapsed or closed.
+    draw_hit_details_window(trace, render);
+
+    ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_FirstUseEver);
+    if ( !ImGui::Begin("Ray Inspector") ) {
+        ImGui::End();
+        return;
+    }
+    if ( !summary.empty() ) {
+        ImGui::TextWrapped("%s", summary.c_str());
+        ImGui::Separator();
+    }
+    if ( trace.steps.empty() ) {
+        ImGui::TextDisabled(
+            "no trace yet — pick a ray in the Scene Debug view (RMB) to "
+            "inspect its hits");
+        ImGui::End();
+        return;
+    }
+    draw_trace_inspector(trace, render);
+    ImGui::End();
+}
+
+} // namespace
+
+void init_scene_debug(GLFWwindow *share_window) {
+    if ( !g_renderer.init(share_window) ) {
+        spdlog::error("[scene_debug] renderer initialization failed");
+    }
 }
 
 void shutdown_scene_debug() {
-    if (!g_debug_inited) return;
-    glDeleteVertexArrays(1, &g_debug_vao);
-    glDeleteBuffers(1, &g_debug_vbo);
-    g_debug_vao = 0;
-    g_debug_vbo = 0;
-    g_debug_inited = false;
-    spdlog::debug("[scene_debug] OpenGL resources freed");
+    g_renderer.shutdown();
 }
 
-// ── Simple 3D line rendering helper ──────────────────────────────────
-static void draw_lines(const float *verts, int count, const float color[3], float line_width = 1.0f) {
-    if (count < 2) return;
-    glLineWidth(line_width);
-    glColor3fv(color);
-    glBindVertexArray(g_debug_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, g_debug_vbo);
-    glBufferData(GL_ARRAY_BUFFER, count * 3 * sizeof(float), verts, GL_DYNAMIC_DRAW);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 0, nullptr);
-    glDrawArrays(GL_LINES, 0, count);
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
-}
-
-// ── Sphere wireframe helper (latitude/longitude rings) ───────────────
-static void draw_sphere_wireframe(const float *center, float radius,
-                                   const float color[3], int segments = 12) {
-    // Meridians (longitude rings)
-    float verts[1024];
-    int count = 0;
-    for (int m = 0; m < segments; m++) {
-        float theta = (float)m / segments * 2.0f * 3.14159265f;
-        float ct = cosf(theta), st = sinf(theta);
-        for (int i = 0; i <= segments; i++) {
-            float phi = (float)i / segments * 3.14159265f;
-            float cp = cosf(phi), sp = sinf(phi);
-            verts[count*3+0] = center[0] + radius * sp * ct;
-            verts[count*3+1] = center[1] + radius * cp;
-            verts[count*3+2] = center[2] + radius * sp * st;
-            count++;
-        }
-    }
-    draw_lines(verts, count, color, 0.5f);
-}
-
-// ── Solid sphere (lat/long quad grid) ────────────────────────────────
-static void draw_sphere_solid(const float *center, float radius,
-                               const float color[3], int segments = 16) {
-    glColor3fv(color);
-    glBegin(GL_QUADS);
-    for (int lat = 0; lat < segments; lat++) {
-        float phi0 = (float)lat / segments * 3.14159265f;
-        float phi1 = (float)(lat + 1) / segments * 3.14159265f;
-        for (int lon = 0; lon < segments; lon++) {
-            float th0 = (float)lon / segments * 2.0f * 3.14159265f;
-            float th1 = (float)(lon + 1) / segments * 2.0f * 3.14159265f;
-            auto corner = [&](float phi, float theta) {
-                float cp = cosf(phi), sp = sinf(phi);
-                float ct = cosf(theta), st = sinf(theta);
-                glVertex3f(center[0] + radius * sp * ct,
-                           center[1] + radius * cp,
-                           center[2] + radius * sp * st);
-            };
-            corner(phi0, th0); corner(phi0, th1);
-            corner(phi1, th1); corner(phi1, th0);
-        }
-    }
-    glEnd();
-}
-
-// ── Solid quad (parallelogram base/u/v, 2 triangles) ─────────────────
-static void draw_quad_solid(const float *base, const float *u, const float *v,
-                             const float color[3]) {
-    glColor3fv(color);
-    glBegin(GL_TRIANGLES);
-    // base, base+u, base+u+v
-    glVertex3fv(base);
-    glVertex3f(base[0]+u[0], base[1]+u[1], base[2]+u[2]);
-    glVertex3f(base[0]+u[0]+v[0], base[1]+u[1]+v[1], base[2]+u[2]+v[2]);
-    // base, base+u+v, base+v
-    glVertex3fv(base);
-    glVertex3f(base[0]+u[0]+v[0], base[1]+u[1]+v[1], base[2]+u[2]+v[2]);
-    glVertex3f(base[0]+v[0], base[1]+v[1], base[2]+v[2]);
-    glEnd();
-}
-
-// ── Quad wireframe edges ─────────────────────────────────────────────
-static void draw_quad_wireframe(const float *base, const float *u, const float *v,
-                                 const float color[3]) {
-    float verts[12];
-    verts[0]=base[0]; verts[1]=base[1]; verts[2]=base[2];
-    verts[3]=base[0]+u[0]; verts[4]=base[1]+u[1]; verts[5]=base[2]+u[2];
-    verts[6]=base[0]+u[0]+v[0]; verts[7]=base[1]+u[1]+v[1]; verts[8]=base[2]+u[2]+v[2];
-    verts[9]=base[0]+v[0]; verts[10]=base[1]+v[1]; verts[11]=base[2]+v[2];
-    // closed loop: 4 segments
-    float loop[24];
-    for (int i = 0; i < 4; i++) {
-        int a = i, b = (i + 1) % 4;
-        loop[i*6+0]=verts[a*3+0]; loop[i*6+1]=verts[a*3+1]; loop[i*6+2]=verts[a*3+2];
-        loop[i*6+3]=verts[b*3+0]; loop[i*6+4]=verts[b*3+1]; loop[i*6+5]=verts[b*3+2];
-    }
-    draw_lines(loop, 8, color, 1.0f);
-}
-
-// ── Solid box (6 faces, per-face colours) ────────────────────────────
-// Face order: 0=-x 1=+x 2=-y 3=+y 4=-z 5=+z.  The near/far constant
-// coordinate is taken from min/max; the other two span the face.
-static void draw_box_solid(const float *mn, const float *mx,
-                            const float colors[6][3]) {
-    auto face = [&](int axis, float coord, float lo_a, float hi_a,
-                    float lo_b, float hi_b, const float color[3]) {
-        glColor3fv(color);
-        float v[4][3] = {
-            {coord, lo_a, lo_b}, {coord, hi_a, lo_b},
-            {coord, hi_a, hi_b}, {coord, lo_a, hi_b},
-        };
-        // Reorder so the quad is (axis-consistent) CCW for a nice look;
-        // lighting is off so winding only matters for culling (off too).
-        glBegin(GL_QUADS);
-        glVertex3fv(v[0]); glVertex3fv(v[1]);
-        glVertex3fv(v[2]); glVertex3fv(v[3]);
-        glEnd();
-    };
-    face(0, mn[0], mn[1], mx[1], mn[2], mx[2], colors[0]);
-    face(1, mx[0], mn[1], mx[1], mn[2], mx[2], colors[1]);
-    face(2, mn[1], mn[0], mx[0], mn[2], mx[2], colors[2]);
-    face(3, mx[1], mn[0], mx[0], mn[2], mx[2], colors[3]);
-    face(4, mn[2], mn[0], mx[0], mn[1], mx[1], colors[4]);
-    face(5, mx[2], mn[0], mx[0], mn[1], mx[1], colors[5]);
-}
-
-// ── Box wireframe (12 edges) ─────────────────────────────────────────
-static void draw_box_wireframe(const float *mn, const float *mx,
-                                const float color[3]) {
-    float corners[8][3] = {
-        {mn[0], mn[1], mn[2]}, {mx[0], mn[1], mn[2]},
-        {mx[0], mx[1], mn[2]}, {mn[0], mx[1], mn[2]},
-        {mn[0], mn[1], mx[2]}, {mx[0], mn[1], mx[2]},
-        {mx[0], mx[1], mx[2]}, {mn[0], mx[1], mx[2]},
-    };
-    int edges[24] = {
-        0,1, 1,2, 2,3, 3,0,
-        4,5, 5,6, 6,7, 7,4,
-        0,4, 1,5, 2,6, 3,7
-    };
-    float verts[72];
-    for (int i = 0; i < 24; i++) {
-        verts[i*3+0] = corners[edges[i]][0];
-        verts[i*3+1] = corners[edges[i]][1];
-        verts[i*3+2] = corners[edges[i]][2];
-    }
-    draw_lines(verts, 24, color, 0.5f);
-}
-
-// ── CPU ray helpers (occlusion tests against debug geometry) ─────────
-struct CpuRay {
-    float o[3];
-    float d[3];   // normalized
-};
-
-// Ray/sphere: returns nearest positive hit distance.
-static bool ray_hit_sphere(const float *center, float radius, const CpuRay &r,
-                           float &t) {
-    float oc[3] = {r.o[0]-center[0], r.o[1]-center[1], r.o[2]-center[2]};
-    float a = r.d[0]*r.d[0] + r.d[1]*r.d[1] + r.d[2]*r.d[2];
-    float half_b = oc[0]*r.d[0] + oc[1]*r.d[1] + oc[2]*r.d[2];
-    float c = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - radius*radius;
-    float disc = half_b*half_b - a*c;
-    if (disc <= 0.f) return false;
-    float sq = sqrtf(disc);
-    t = (-half_b - sq) / a;
-    if (t <= 0.f) t = (-half_b + sq) / a;   // inside sphere → exit
-    return t > 0.f;
-}
-
-// Ray/parallelogram (base + u·edge_u + v·edge_v, u,v in [0,1]).
-static bool ray_hit_quad(const float *base, const float *u, const float *v,
-                         const CpuRay &r, float &t) {
-    float n[3] = {
-        u[1]*v[2] - u[2]*v[1],
-        u[2]*v[0] - u[0]*v[2],
-        u[0]*v[1] - u[1]*v[0],
-    };
-    float denom = n[0]*r.d[0] + n[1]*r.d[1] + n[2]*r.d[2];
-    if (fabsf(denom) < 1e-8f) return false;
-    float w[3] = {base[0]-r.o[0], base[1]-r.o[1], base[2]-r.o[2]};
-    t = (n[0]*w[0] + n[1]*w[1] + n[2]*w[2]) / denom;
-    if (t <= 0.f) return false;
-    float p[3] = {r.o[0]+r.d[0]*t, r.o[1]+r.d[1]*t, r.o[2]+r.d[2]*t};
-    float duu = u[0]*u[0] + u[1]*u[1] + u[2]*u[2];
-    float dvv = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
-    if (duu < 1e-12f || dvv < 1e-12f) return false;
-    float a = ((p[0]-base[0])*u[0] + (p[1]-base[1])*u[1] + (p[2]-base[2])*u[2]) / duu;
-    float b = ((p[0]-base[0])*v[0] + (p[1]-base[1])*v[1] + (p[2]-base[2])*v[2]) / dvv;
-    return a >= -1e-4f && a <= 1.f + 1e-4f && b >= -1e-4f && b <= 1.f + 1e-4f;
-}
-
-// Ray/AABB (slab method): returns the entry distance.
-static bool ray_hit_box(const float *mn, const float *mx, const CpuRay &r,
-                        float &t) {
-    float tmin = -1e30f, tmax = 1e30f;
-    for (int axis = 0; axis < 3; axis++) {
-        if (fabsf(r.d[axis]) < 1e-9f) {
-            if (r.o[axis] < mn[axis] || r.o[axis] > mx[axis]) return false;
-            continue;
-        }
-        float inv = 1.f / r.d[axis];
-        float t1 = (mn[axis] - r.o[axis]) * inv;
-        float t2 = (mx[axis] - r.o[axis]) * inv;
-        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-        tmin = fmaxf(tmin, t1);
-        tmax = fminf(tmax, t2);
-    }
-    if (tmax < tmin || tmax <= 0.f) return false;
-    t = fmaxf(tmin, 0.f);
+bool debug_apply_scene_camera(float *cam_eye, float *cam_at, float *cam_up) {
+    auto &st = g_renderer.state();
+    std::lock_guard<std::mutex> lk(st.mutex);
+    if (!st.set_scene_camera) return false;
+    st.set_scene_camera = false;
+    cam_eye[0] = st.set_scene_eye[0];
+    cam_eye[1] = st.set_scene_eye[1];
+    cam_eye[2] = st.set_scene_eye[2];
+    cam_at[0] = st.set_scene_at[0];
+    cam_at[1] = st.set_scene_at[1];
+    cam_at[2] = st.set_scene_at[2];
+    cam_up[0] = st.set_scene_up[0];
+    cam_up[1] = st.set_scene_up[1];
+    cam_up[2] = st.set_scene_up[2];
     return true;
 }
 
-// ── Visibility from the scene camera ─────────────────────────────────
-// Casts a ray from `eye` to `p` and checks whether ANY debug object
-// (sphere/quad/box) occludes the segment before the target point.
-static bool point_visible_from(const float p[3], const float eye[3],
-                               const SceneDebugInfo *dbg) {
-    CpuRay ray;
-    ray.o[0] = eye[0]; ray.o[1] = eye[1]; ray.o[2] = eye[2];
-    float dx = p[0]-eye[0], dy = p[1]-eye[1], dz = p[2]-eye[2];
-    float len = sqrtf(dx*dx + dy*dy + dz*dz);
-    if (len < 1e-6f) return true;
-    ray.d[0] = dx/len; ray.d[1] = dy/len; ray.d[2] = dz/len;
-    // Slightly short of the target so the target surface itself (which
-    // lies exactly at `len`) is not counted as an occluder.
-    float t_target = len - 0.002f;
-    float t;
-    if (dbg->spheres) {
-        for (int i = 0; i < dbg->num_spheres; i++) {
-            const float *s = reinterpret_cast<const float*>(&dbg->spheres[i]);
-            if (ray_hit_sphere(s, s[3], ray, t) && t < t_target) return false;
-        }
+void render_scene_debug(const HostScene *host_scene,
+                        const float *cam_eye,
+                        const float *cam_at,
+                        const float *cam_up,
+                        float cam_fov,
+                        float cam_aspect,
+                        int fb_w,
+                        int fb_h,
+                        const SceneRenderParams &render,
+                        DebugViewFlags &flags) {
+    auto &st = g_renderer.state();
+
+    // Mirror the kernel's render parameters to the render thread (the
+    // debug trace + overlay display follow the kernel exactly).
+    {
+        std::lock_guard<std::mutex> lk(st.mutex);
+        st.render = render;
     }
-    if (dbg->quads) {
-        for (int i = 0; i < dbg->num_quads; i++) {
-            const float *q = reinterpret_cast<const float*>(&dbg->quads[i]);
-            if (ray_hit_quad(q, q+3, q+6, ray, t) && t < t_target) return false;
-        }
+
+    // Default the debug bounce depth to the kernel's max_bounces (the
+    // path the debugger traces then matches the rendered path).  The
+    // user can still override it with the slider; on a scene change
+    // (or a param edit) the default is restored.
+    static int last_scene_bounces = -1;
+    if ( render.max_bounces != last_scene_bounces ) {
+        flags.ray_bounces = std::max(render.max_bounces, 1);
+        last_scene_bounces = render.max_bounces;
     }
-    if (dbg->boxes) {
-        for (int i = 0; i < dbg->num_boxes; i++) {
-            const float *b = reinterpret_cast<const float*>(&dbg->boxes[i]);
-            if (ray_hit_box(b, b+3, ray, t) && t < t_target) return false;
-        }
+
+    ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+    if ( !ImGui::Begin("Scene Debug") ) {
+        // Collapsed/hidden — tell the renderer to skip frames.
+        std::lock_guard<std::mutex> lk(st.mutex);
+        st.window_open = false;
+        ImGui::End();
+        // The Ray Inspector is an independent dockable window: keep it
+        // alive (showing the last trace) even while the 3D view is
+        // collapsed.
+        if ( flags.show_ray ) draw_ray_inspector_window(st);
+        return;
     }
-    return true;
-}
 
-// Shade a colour by visibility: visible → material colour, occluded →
-// darkened (used by the visibility overlay).
-static void shade_by_visibility(float out[3], const float color[3], bool visible) {
-    if (visible) {
-        out[0] = color[0]; out[1] = color[1]; out[2] = color[2];
-    } else {
-        out[0] = color[0] * 0.12f + 0.02f;
-        out[1] = color[1] * 0.12f + 0.02f;
-        out[2] = color[2] * 0.12f + 0.02f;
-    }
-}
-
-// ── Floor grid ───────────────────────────────────────────────────────
-static void draw_floor_grid(float size, int divs, const float color[3]) {
-    float half = size * 0.5f;
-    float step = size / divs;
-    std::vector<float> verts;
-    for (int i = 0; i <= divs; i++) {
-        float x = -half + i * step;
-        verts.push_back(x); verts.push_back(0); verts.push_back(-half);
-        verts.push_back(x); verts.push_back(0); verts.push_back(half);
-        float z = -half + i * step;
-        verts.push_back(-half); verts.push_back(0); verts.push_back(z);
-        verts.push_back(half);  verts.push_back(0); verts.push_back(z);
-    }
-    draw_lines(verts.data(), (int)verts.size() / 3, color, 0.5f);
-}
-
-// ── Frustum (camera view volume) ─────────────────────────────────────
-static void draw_frustum(const float *eye, const float *at, const float *up,
-                          float fov_deg, float aspect, float near_d, float far_d,
-                          const float color[3]) {
-    // Calculate frustum corners at near/far planes
-    float forward[3] = {at[0]-eye[0], at[1]-eye[1], at[2]-eye[2]};
-    float dist = sqrtf(forward[0]*forward[0] + forward[1]*forward[1] + forward[2]*forward[2]);
-    if (dist < 1e-6f) return;
-    forward[0] /= dist; forward[1] /= dist; forward[2] /= dist;
-
-    // Right vector (forward × world_up)
-    float world_up[3] = {0,1,0};
-    float right[3];
-    right[0] = forward[1]*world_up[2] - forward[2]*world_up[1];
-    right[1] = forward[2]*world_up[0] - forward[0]*world_up[2];
-    right[2] = forward[0]*world_up[1] - forward[1]*world_up[0];
-    float rlen = sqrtf(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
-    if (rlen < 1e-6f) return;
-    right[0] /= rlen; right[1] /= rlen; right[2] /= rlen;
-
-    // Real up vector
-    float cam_up[3] = {up[0], up[1], up[2]};
-    float ulen = sqrtf(cam_up[0]*cam_up[0]+cam_up[1]*cam_up[1]+cam_up[2]*cam_up[2]);
-    if (ulen < 1e-6f) return;
-    cam_up[0] /= ulen; cam_up[1] /= ulen; cam_up[2] /= ulen;
-
-    float fov_rad = fov_deg * 3.14159265f / 180.0f;
-    float half_h_near = tanf(fov_rad * 0.5f) * near_d;
-    float half_w_near = half_h_near * aspect;
-    float half_h_far  = tanf(fov_rad * 0.5f) * far_d;
-    float half_w_far  = half_h_far * aspect;
-
-    // 8 corners of the frustum
-    float corners[8][3];
-    auto frustum_corner = [&](int idx, float half_w, float half_h, float d) {
-        float cx = eye[0] + forward[0]*d + right[0]*(idx&1 ? half_w : -half_w) + cam_up[0]*(idx&2 ? half_h : -half_h);
-        float cy = eye[1] + forward[1]*d + right[1]*(idx&1 ? half_w : -half_w) + cam_up[1]*(idx&2 ? half_h : -half_h);
-        float cz = eye[2] + forward[2]*d + right[2]*(idx&1 ? half_w : -half_w) + cam_up[2]*(idx&2 ? half_h : -half_h);
-        corners[idx][0] = cx; corners[idx][1] = cy; corners[idx][2] = cz;
-    };
-    for (int i = 0; i < 4; i++) frustum_corner(i, half_w_near, half_h_near, near_d);
-    for (int i = 0; i < 4; i++) frustum_corner(4+i, half_w_far, half_h_far, far_d);
-
-    float verts[72]; // 24 edges * 3
-    int e[24] = {0,1, 1,3, 3,2, 2,0,  4,5, 5,7, 7,6, 6,4,  0,4, 1,5, 2,6, 3,7};
-    for (int i = 0; i < 24; i++) {
-        verts[i*3+0] = corners[e[i]][0];
-        verts[i*3+1] = corners[e[i]][1];
-        verts[i*3+2] = corners[e[i]][2];
-    }
-    draw_lines(verts, 24, color, 1.5f);
-}
-
-// ── Main render function ──────────────────────────────────────────────
-void render_scene_debug(const SceneDebugInfo *dbg,
-                         const float *cam_eye,
-                         const float *cam_at,
-                         const float *cam_up,
-                         float cam_fov,
-                         float aspect,
-                         DebugViewFlags &flags) {
-    ImGui::BeginGroup();
-    ImVec2 region = ImGui::GetContentRegionAvail();
-    float size = std::min(region.x, region.y);
-    if (size < 32) { ImGui::EndGroup(); return; }
-
-    // ── Controls ──────────────────────────────────────────────────
-    ImGui::Checkbox("Floor", &flags.show_floor); ImGui::SameLine();
-    ImGui::Checkbox("Grid", &flags.show_grid); ImGui::SameLine();
-    ImGui::Checkbox("Objects", &flags.show_objects); ImGui::SameLine();
-    ImGui::Checkbox("Wireframe", &flags.show_wireframe); ImGui::SameLine();
-    ImGui::Checkbox("AABBs", &flags.show_aabbs); ImGui::SameLine();
-    ImGui::Checkbox("Frustum", &flags.show_frustum); ImGui::SameLine();
-    ImGui::Checkbox("Camera", &flags.show_camera); ImGui::SameLine();
+    // ── Toolbar ─────────────────────────────────────────────────────
+    ImGui::Checkbox("Floor", &flags.show_floor);
+    ImGui::SameLine();
+    ImGui::Checkbox("Grid", &flags.show_grid);
+    ImGui::SameLine();
+    ImGui::Checkbox("Objects", &flags.show_objects);
+    ImGui::SameLine();
+    ImGui::Checkbox("Wireframe", &flags.show_wireframe);
+    ImGui::SameLine();
+    ImGui::Checkbox("AABBs", &flags.show_aabbs);
+    ImGui::Separator();
+    ImGui::Checkbox("Frustum", &flags.show_frustum);
+    ImGui::SameLine();
+    ImGui::Checkbox("Camera", &flags.show_camera);
+    ImGui::SameLine();
     ImGui::Checkbox("Visibility", &flags.show_visibility);
+    ImGui::SameLine();
+    ImGui::Checkbox("BVH", &flags.show_bvh);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.f);
+    ImGui::SliderInt("BVH depth", &flags.bvh_depth, 1, 16);
+    ImGui::SameLine();
+    if ( ImGui::Button("Reset View") ) {
+        std::lock_guard<std::mutex> lk(st.mutex);
+        st.reset_view = true;
+    }
+    ImGui::SameLine();
+    if ( ImGui::Button("Set Scene Camera") && cam_eye && cam_at && cam_up ) {
+        std::lock_guard<std::mutex> lk(st.mutex);
+        float cp = std::cos(st.orbit_pitch), sp = std::sin(st.orbit_pitch);
+        float sn = std::sin(st.orbit_yaw), ct = std::cos(st.orbit_yaw);
+        float forward[3] = {cp * sn, sp, cp * ct};
+        st.set_scene_eye[0] = st.orbit_eye[0];
+        st.set_scene_eye[1] = st.orbit_eye[1];
+        st.set_scene_eye[2] = st.orbit_eye[2];
+        st.set_scene_at[0] = st.orbit_eye[0] + st.orbit_dist * forward[0];
+        st.set_scene_at[1] = st.orbit_eye[1] + st.orbit_dist * forward[1];
+        st.set_scene_at[2] = st.orbit_eye[2] + st.orbit_dist * forward[2];
+        st.set_scene_up[0] = 0.f; st.set_scene_up[1] = 1.f; st.set_scene_up[2] = 0.f;
+        st.set_scene_camera = true;
+    }
+    ImGui::Separator();
+    ImGui::Checkbox("Ray", &flags.show_ray);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.f);
+    ImGui::SliderInt("bounces", &flags.ray_bounces, 0, 16);
+    ImGui::SameLine();
+    if ( ImGui::Button("Reset Ray") ) {
+        std::lock_guard<std::mutex> lk(st.mutex);
+        st.reset_ray = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("RMB: pick ray");
+    ImGui::Separator();
 
-    // ── Viewport ──────────────────────────────────────────────────
-    ImVec2 vp_pos = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##debug_vp", ImVec2(size, size));
-    bool hovered = ImGui::IsItemHovered();
-
-    // Save OpenGL state
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-
-    // Set up viewport
-    glViewport((int)vp_pos.x, (int)(ImGui::GetIO().DisplaySize.y - vp_pos.y - size),
-               (int)size, (int)size);
-    glScissor((int)vp_pos.x, (int)(ImGui::GetIO().DisplaySize.y - vp_pos.y - size),
-              (int)size, (int)size);
-    glEnable(GL_SCISSOR_TEST);
-
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    // Simple perspective (fov 45°, near 0.1, far 200)
-    float fov_rad = 45.0f * 3.14159265f / 180.0f;
-    float top = tanf(fov_rad * 0.5f) * 0.1f;
-    float bottom = -top;
-    float right_val = top * (size / size); // square aspect
-    float left_val = -right_val;
-    glFrustum(left_val, right_val, bottom, top, 0.1f, 200.0f);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    if (cam_eye && cam_at && cam_up) {
-        // Manual look-at matrix (replaces gluLookAt)
-        {
-            float fwd[3] = {cam_at[0]-cam_eye[0], cam_at[1]-cam_eye[1], cam_at[2]-cam_eye[2]};
-            float len = sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
-            if (len > 0.f) { fwd[0]/=len; fwd[1]/=len; fwd[2]/=len; }
-            float side[3];
-            side[0] = fwd[1]*cam_up[2] - fwd[2]*cam_up[1];
-            side[1] = fwd[2]*cam_up[0] - fwd[0]*cam_up[2];
-            side[2] = fwd[0]*cam_up[1] - fwd[1]*cam_up[0];
-            float slen = sqrtf(side[0]*side[0]+side[1]*side[1]+side[2]*side[2]);
-            if (slen > 0.f) { side[0]/=slen; side[1]/=slen; side[2]/=slen; }
-            float up2[3];
-            up2[0] = side[1]*fwd[2] - side[2]*fwd[1];
-            up2[1] = side[2]*fwd[0] - side[0]*fwd[2];
-            up2[2] = side[0]*fwd[1] - side[1]*fwd[0];
-            float m[16] = {side[0], up2[0], -fwd[0], 0,
-                           side[1], up2[1], -fwd[1], 0,
-                           side[2], up2[2], -fwd[2], 0,
-                           0,0,0,1};
-            glMultMatrixf(m);
-            glTranslatef(-cam_eye[0], -cam_eye[1], -cam_eye[2]);
-        }
+    // ── Scene stats ─────────────────────────────────────────────────
+    if ( host_scene && host_scene->debug_scene ) {
+        const auto &v = host_scene->debug_scene->view;
+        ImGui::TextDisabled("%d objects · %d BVH nodes · %d portals · scene v%llu",
+                            v.num_handles, v.num_bvh_nodes, v.num_portals,
+                            (unsigned long long)host_scene->debug_scene->version);
     } else {
-        // Default fallback camera (no lookAt — identity view)
+        ImGui::TextDisabled("no scene (kernel without YAML scene)");
     }
 
-    glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
+    // ── Ray trace inspector ────────────────────────────────────────
+    // All raytracing details (trace summary, hits treeview, hit
+    // details dialog) live in their OWN dockable windows — nothing
+    // here but the fixed toolbar, so the 3D view size never changes
+    // with the trace data.
+    if ( flags.show_ray ) draw_ray_inspector_window(st);
 
-    // ── Floor + Grid ──────────────────────────────────────────────
-    float grid_color[3] = {0.3f, 0.3f, 0.35f};
-    if (flags.show_floor) {
-        float floor_col[3] = {0.2f, 0.22f, 0.25f};
-        float floor_verts[12] = {-10,0,-10, 10,0,-10, 10,0,10, -10,0,10};
-        draw_lines(floor_verts, 4, floor_col);
+    // ── 3D view: presented texture + mouse input ────────────────────
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    float w = std::max(avail.x, 64.f);
+    float h = std::max(avail.y - ImGui::GetTextLineHeightWithSpacing(), 64.f);
+
+    // Release the previous slot + pick the newest ready frame.  The
+    // returned texture is sampled during ImGui::Render (composite_frame)
+    // and is never overwritten before the next present() call.
+    GLuint tex = g_renderer.present();
+    if ( tex ) {
+        // Present V-flipped: GL FBO textures are bottom-up (v=0 is the
+        // rendered image's bottom row), but ImGui::Image maps uv (0,0)
+        // to the top of the widget — the same convention the main
+        // viewport compensates for in the tone-mapper (Y-flip).  With
+        // default UVs the whole scene would display upside down.
+        ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(w, h),
+                     ImVec2(0.f, 1.f), ImVec2(1.f, 0.f));
+    } else {
+        // No frame yet (renderer starting up / unavailable)
+        ImGui::InvisibleButton("##scene_debug_empty", ImVec2(w, h));
+        ImVec2 pos = ImGui::GetItemRectMin();
+        ImGui::SetCursorScreenPos(ImVec2(pos.x + 8.f, pos.y + 8.f));
+        ImGui::TextDisabled("scene debug renderer unavailable");
     }
-    if (flags.show_grid) {
-        draw_floor_grid(20, 20, grid_color);
-    }
 
-    // ── Scene objects ─────────────────────────────────────────────
-    if (dbg && flags.show_objects) {
-        // Fixed-function shading is off; glColor3f is the material colour.
-        glDisable(GL_LIGHTING);
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(1.0f, 1.0f);
-        float aabb_color[3] = {1.0f, 0.2f, 0.2f};
-        // Neutral edge colour used by the visibility overlay so the
-        // shaded fills stay readable.
-        float edge_vis[3] = {0.85f, 0.85f, 0.95f};
+    bool hovered = ImGui::IsItemHovered();
+    // Camera controls mirror the main Viewport exactly: LMB pans the
+    // Right-click picks a ray; dragging keeps re-picking every frame so
+    // the ray and its trace/stats follow the cursor.  Clicking ON the
+    // scene-camera framebuffer rectangle selects the exact framebuffer
+    // pixel there (the render thread resolves the rectangle hit).
+    bool pick_click = hovered &&
+                      (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+                       ImGui::IsMouseDragging(ImGuiMouseButton_Right));
+    const ImGuiIO &io = ImGui::GetIO();
 
-        // Spheres — solid (material colour) + wireframe overlay.
-        // Visibility: the front point facing the camera is tested.
-        if (dbg->num_spheres > 0 && dbg->spheres) {
-            for (int i = 0; i < dbg->num_spheres; i++) {
-                const float *s = reinterpret_cast<const float*>(&dbg->spheres[i]);
-                const float *mat_col = s + 4;   // DebugSphere color[3]
-                float fill[3];
-                if (flags.show_visibility && cam_eye) {
-                    // Front point of the sphere as seen from the camera
-                    float fp[3];
-                    float dx = s[0]-cam_eye[0], dy = s[1]-cam_eye[1], dz = s[2]-cam_eye[2];
-                    float len = sqrtf(dx*dx + dy*dy + dz*dz);
-                    if (len > 1e-6f) {
-                        fp[0] = s[0] + dx/len*s[3];
-                        fp[1] = s[1] + dy/len*s[3];
-                        fp[2] = s[2] + dz/len*s[3];
-                    } else {
-                        fp[0] = s[0]; fp[1] = s[1]; fp[2] = s[2];
-                    }
-                    shade_by_visibility(fill, mat_col,
-                                        point_visible_from(fp, cam_eye, dbg));
-                } else {
-                    fill[0] = mat_col[0]; fill[1] = mat_col[1]; fill[2] = mat_col[2];
-                }
-                draw_sphere_solid(s, s[3], fill);
-                if (flags.show_wireframe) {
-                    draw_sphere_wireframe(s, s[3],
-                        flags.show_visibility ? edge_vis : mat_col);
-                }
-            }
+    {
+        std::lock_guard<std::mutex> lk(st.mutex);
+
+        // Ray pick: convert the click to NDC (y up); the render thread
+        // resolves it with the exact camera used for the frame.
+        if ( pick_click ) {
+            ImVec2 rect_min = ImGui::GetItemRectMin();
+            ImVec2 rect_max = ImGui::GetItemRectMax();
+            ImVec2 mouse = ImGui::GetMousePos();
+            ImVec2 frac = {(mouse.x - rect_min.x) / (rect_max.x - rect_min.x),
+                           (mouse.y - rect_min.y) / (rect_max.y - rect_min.y)};
+            st.pick_ray_request = true;
+            st.pick_ndc_x = 2.f * frac.x - 1.f;
+            st.pick_ndc_y = 1.f - 2.f * frac.y;
         }
 
-        // Quads — solid + wireframe edges.  Visibility: quad centre.
-        if (dbg->num_quads > 0 && dbg->quads) {
-            for (int i = 0; i < dbg->num_quads; i++) {
-                const float *q = reinterpret_cast<const float*>(&dbg->quads[i]);
-                const float *mat_col = q + 9;   // DebugQuad color[3]
-                float fill[3];
-                if (flags.show_visibility && cam_eye) {
-                    float c[3] = {
-                        q[0] + 0.5f*q[3] + 0.5f*q[6],
-                        q[1] + 0.5f*q[4] + 0.5f*q[7],
-                        q[2] + 0.5f*q[5] + 0.5f*q[8],
-                    };
-                    shade_by_visibility(fill, mat_col,
-                                        point_visible_from(c, cam_eye, dbg));
-                } else {
-                    fill[0] = mat_col[0]; fill[1] = mat_col[1]; fill[2] = mat_col[2];
-                }
-                draw_quad_solid(q, q+3, q+6, fill);
-                if (flags.show_wireframe) {
-                    draw_quad_wireframe(q, q+3, q+6,
-                        flags.show_visibility ? edge_vis : mat_col);
-                }
+        // Scene snapshot (shared_ptr hand-off keeps it alive while the
+        // render thread is mid-frame with it).
+        st.scene = host_scene ? host_scene->debug_scene : nullptr;
+
+        // Scene camera (frustum + visibility overlays only — the debug
+        // camera is independent).
+        st.scene_cam_valid = cam_eye && cam_at && cam_up;
+        if ( st.scene_cam_valid ) {
+            std::memcpy(st.scene_cam_eye, cam_eye, sizeof(st.scene_cam_eye));
+            std::memcpy(st.scene_cam_at, cam_at, sizeof(st.scene_cam_at));
+            std::memcpy(st.scene_cam_up, cam_up, sizeof(st.scene_cam_up));
+        }
+        st.scene_cam_fov = cam_fov;
+        st.scene_cam_aspect = cam_aspect;
+        st.fb_w = fb_w;
+        st.fb_h = fb_h;
+        st.size_w = (int)w;
+        st.size_h = (int)h;
+        st.flags = flags;
+        st.window_open = true;
+
+        // ── First-person camera input (matches the main Viewport). ──
+        bool cam_changed = false;
+
+        // MMB drag = rotate camera (yaw/pitch)
+        if ( ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ) {
+            auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+            st.orbit_yaw -= d.x * 0.005f;
+            st.orbit_pitch -= d.y * 0.005f;
+            st.orbit_pitch = std::clamp(st.orbit_pitch, -1.5f, 1.5f);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+            cam_changed = true;
+        }
+        // LMB drag = pan in camera-local plane
+        if ( ImGui::IsMouseDragging(ImGuiMouseButton_Left) ) {
+            auto d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            float ct = std::cos(st.orbit_yaw), sn = std::sin(st.orbit_yaw);
+            float cp = std::cos(st.orbit_pitch), sp = std::sin(st.orbit_pitch);
+            float forward[3] = {cp * sn, sp, cp * ct};
+            float right[3]   = {ct, 0.f, -sn};
+            float up[3]       = {-sp * sn, cp, -sp * ct};
+            float speed = st.orbit_dist * 0.002f;
+            if (io.KeyCtrl) {
+                st.orbit_eye[0] += d.y * forward[0] * speed;
+                st.orbit_eye[1] += d.y * forward[1] * speed;
+                st.orbit_eye[2] += d.y * forward[2] * speed;
+            } else {
+                st.orbit_eye[0] -= d.x * right[0] * speed + d.y * up[0] * speed;
+                st.orbit_eye[1] -= d.x * right[1] * speed + d.y * up[1] * speed;
+                st.orbit_eye[2] -= d.x * right[2] * speed + d.y * up[2] * speed;
             }
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            cam_changed = true;
         }
 
-        // Boxes — solid with PER-FACE visibility shading + wireframe.
-        if (dbg->num_boxes > 0 && dbg->boxes) {
-            for (int i = 0; i < dbg->num_boxes; i++) {
-                const float *b = reinterpret_cast<const float*>(&dbg->boxes[i]);
-                const float *mn = b, *mx = b + 3;
-                const float *mat_col = b + 6;   // DebugBox color[3]
-                float face_cols[6][3];
-                if (flags.show_visibility && cam_eye) {
-                    // Face centres (see draw_box_solid face order)
-                    float centers[6][3] = {
-                        {mn[0], 0.5f*(mn[1]+mx[1]), 0.5f*(mn[2]+mx[2])},
-                        {mx[0], 0.5f*(mn[1]+mx[1]), 0.5f*(mn[2]+mx[2])},
-                        {0.5f*(mn[0]+mx[0]), mn[1], 0.5f*(mn[2]+mx[2])},
-                        {0.5f*(mn[0]+mx[0]), mx[1], 0.5f*(mn[2]+mx[2])},
-                        {0.5f*(mn[0]+mx[0]), 0.5f*(mn[1]+mx[1]), mn[2]},
-                        {0.5f*(mn[0]+mx[0]), 0.5f*(mn[1]+mx[1]), mx[2]},
-                    };
-                    for (int f = 0; f < 6; f++) {
-                        shade_by_visibility(face_cols[f], mat_col,
-                                            point_visible_from(centers[f], cam_eye, dbg));
-                    }
-                } else {
-                    for (int f = 0; f < 6; f++) {
-                        face_cols[f][0] = mat_col[0];
-                        face_cols[f][1] = mat_col[1];
-                        face_cols[f][2] = mat_col[2];
-                    }
-                }
-                draw_box_solid(mn, mx, face_cols);
-                if (flags.show_wireframe) {
-                    draw_box_wireframe(mn, mx,
-                        flags.show_visibility ? edge_vis : mat_col);
-                }
-            }
+        // Scroll = move along look axis
+        if ( hovered && io.MouseWheel != 0.f ) {
+            float ct = std::cos(st.orbit_yaw), sn = std::sin(st.orbit_yaw);
+            float cp = std::cos(st.orbit_pitch), sp = std::sin(st.orbit_pitch);
+            float forward[3] = {cp * sn, sp, cp * ct};
+            float speed = st.orbit_dist * 0.2f;
+            st.orbit_eye[0] -= io.MouseWheel * forward[0] * speed;
+            st.orbit_eye[1] -= io.MouseWheel * forward[1] * speed;
+            st.orbit_eye[2] -= io.MouseWheel * forward[2] * speed;
+            cam_changed = true;
         }
 
-        glDisable(GL_POLYGON_OFFSET_FILL);
+        // Keyboard: WASD/QE
+        if ( hovered && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) ) {
+            float ct = std::cos(st.orbit_yaw), sn = std::sin(st.orbit_yaw);
+            float cp = std::cos(st.orbit_pitch), sp = std::sin(st.orbit_pitch);
+            float forward[3] = {cp * sn, sp, cp * ct};
+            float right[3]   = {ct, 0.f, -sn};
+            float up[3]       = {-sp * sn, cp, -sp * ct};
+            float tspeed = 0.3f;
 
-        // AABBs
-        if (flags.show_aabbs && dbg->num_aabbs > 0 && dbg->aabb_data) {
-            for (int i = 0; i < dbg->num_aabbs; i++) {
-                const float *aabb = dbg->aabb_data + i * 6;
-                draw_box_wireframe(aabb, aabb + 3, aabb_color);
-            }
+            if ( ImGui::IsKeyDown(ImGuiKey_W) ) { st.orbit_eye[0] += forward[0] * tspeed; st.orbit_eye[1] += forward[1] * tspeed; st.orbit_eye[2] += forward[2] * tspeed; cam_changed = true; }
+            if ( ImGui::IsKeyDown(ImGuiKey_S) ) { st.orbit_eye[0] -= forward[0] * tspeed; st.orbit_eye[1] -= forward[1] * tspeed; st.orbit_eye[2] -= forward[2] * tspeed; cam_changed = true; }
+            if ( ImGui::IsKeyDown(ImGuiKey_A) ) { st.orbit_eye[0] += right[0] * tspeed;  st.orbit_eye[1] += right[1] * tspeed;  st.orbit_eye[2] += right[2] * tspeed; cam_changed = true; }
+            if ( ImGui::IsKeyDown(ImGuiKey_D) ) { st.orbit_eye[0] -= right[0] * tspeed;  st.orbit_eye[1] -= right[1] * tspeed;  st.orbit_eye[2] -= right[2] * tspeed; cam_changed = true; }
+            if ( ImGui::IsKeyDown(ImGuiKey_Q) ) { st.orbit_eye[0] -= up[0] * 0.3f; st.orbit_eye[1] -= up[1] * 0.3f; st.orbit_eye[2] -= up[2] * 0.3f; cam_changed = true; }
+            if ( ImGui::IsKeyDown(ImGuiKey_E) ) { st.orbit_eye[0] += up[0] * 0.3f; st.orbit_eye[1] += up[1] * 0.3f; st.orbit_eye[2] += up[2] * 0.3f; cam_changed = true; }
         }
+
+        if ( cam_changed ) st.camera_user_interacted = true;
+
+        if ( cam_changed ) st.camera_user_interacted = true;
     }
 
-    // ── Camera frustum ────────────────────────────────────────────
-    if (flags.show_frustum && cam_eye && cam_at && cam_up) {
-        float fcol[3] = {0.2f, 1.0f, 0.2f};
-        draw_frustum(cam_eye, cam_at, cam_up, cam_fov, aspect, 0.5f, 5.0f, fcol);
-    }
-
-    // ── Camera position indicator ─────────────────────────────────
-    if (flags.show_camera && cam_eye) {
-        float ccol[3] = {1.0f, 1.0f, 0.2f};
-        // Small cross at camera position
-        float cross_sz = 0.3f;
-        float cv[6] = {
-            cam_eye[0]-cross_sz, cam_eye[1], cam_eye[2],
-            cam_eye[0]+cross_sz, cam_eye[1], cam_eye[2]
-        };
-        draw_lines(cv, 2, ccol, 2.0f);
-        // Cross on the other two axes so the eye is easy to spot
-        float cv2[6] = {
-            cam_eye[0], cam_eye[1]-cross_sz, cam_eye[2],
-            cam_eye[0], cam_eye[1]+cross_sz, cam_eye[2]
-        };
-        draw_lines(cv2, 2, ccol, 2.0f);
-
-        // View direction: line from the eye along forward with an
-        // arrowhead, plus the camera up vector (short, cyan).
-        if (cam_at) {
-            float fwd[3] = {cam_at[0]-cam_eye[0], cam_at[1]-cam_eye[1],
-                            cam_at[2]-cam_eye[2]};
-            float len = sqrtf(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
-            if (len > 1e-6f) {
-                float inv = 1.f/len;
-                fwd[0] *= inv; fwd[1] *= inv; fwd[2] *= inv;
-                float arrow_len = 2.5f;
-                float tip[3] = {cam_eye[0]+fwd[0]*arrow_len,
-                                cam_eye[1]+fwd[1]*arrow_len,
-                                cam_eye[2]+fwd[2]*arrow_len};
-                float shaft[6] = {cam_eye[0], cam_eye[1], cam_eye[2],
-                                  tip[0], tip[1], tip[2]};
-                draw_lines(shaft, 2, ccol, 2.0f);
-                // Arrowhead: two short segments at ±~30° from the shaft
-                float up_dir[3] = {0.f, 1.f, 0.f};
-                float side[3];
-                side[0] = fwd[1]*up_dir[2] - fwd[2]*up_dir[1];
-                side[1] = fwd[2]*up_dir[0] - fwd[0]*up_dir[2];
-                side[2] = fwd[0]*up_dir[1] - fwd[1]*up_dir[0];
-                float sl = sqrtf(side[0]*side[0]+side[1]*side[1]+side[2]*side[2]);
-                if (sl > 1e-6f) {
-                    side[0] /= sl; side[1] /= sl; side[2] /= sl;
-                    float up2[3];
-                    up2[0] = side[1]*fwd[2] - side[2]*fwd[1];
-                    up2[1] = side[2]*fwd[0] - side[0]*fwd[2];
-                    up2[2] = side[0]*fwd[1] - side[1]*fwd[0];
-                    float back = arrow_len * 0.35f, wing = 0.18f;
-                    float b0[3] = {tip[0]-fwd[0]*back + up2[0]*wing,
-                                   tip[1]-fwd[1]*back + up2[1]*wing,
-                                   tip[2]-fwd[2]*back + up2[2]*wing};
-                    float b1[3] = {tip[0]-fwd[0]*back - up2[0]*wing,
-                                   tip[1]-fwd[1]*back - up2[1]*wing,
-                                   tip[2]-fwd[2]*back - up2[2]*wing};
-                    float w1[6] = {tip[0], tip[1], tip[2], b0[0], b0[1], b0[2]};
-                    float w2[6] = {tip[0], tip[1], tip[2], b1[0], b1[1], b1[2]};
-                    draw_lines(w1, 2, ccol, 2.0f);
-                    draw_lines(w2, 2, ccol, 2.0f);
-                }
-                // Camera up vector (short cyan line from the eye)
-                float ucol[3] = {0.4f, 1.0f, 1.0f};
-                float ulen2 = 0.8f;
-                float uv[6] = {cam_eye[0], cam_eye[1], cam_eye[2],
-                               cam_eye[0]+cam_up[0]*ulen2,
-                               cam_eye[1]+cam_up[1]*ulen2,
-                               cam_eye[2]+cam_up[2]*ulen2};
-                draw_lines(uv, 2, ucol, 1.5f);
-            }
-        }
-    }
-
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glPopAttrib();
-
-    ImGui::EndGroup();
+    ImGui::TextDisabled("LMB pan · MMB orbit · wheel zoom · arrows orbit · "
+                        "Shift+arrows pan · WASD/QE move · RMB pick/drag ray "
+                        "(on the framebuffer rect: pixel pick)");
+    ImGui::End();
 }

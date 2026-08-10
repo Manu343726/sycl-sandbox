@@ -16,6 +16,7 @@
 /// would make the variant recursively infinite.  All data is plain
 /// POD, so the texture stays trivially copyable and device-uploadable.
 
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/textures/solid_color.h>
 #include <sycl-sandbox/rt/textures/colorchecker.h>
@@ -49,12 +50,15 @@ struct Blend {
 
     /// Alpha-blend all layers at (u, v, time): source-over compositing.
     /// The path RNG is passed through to stochastic layers.
-    float3 sample(float u, float v, float time, RNG &rng) const {
+    float3 sample(float u, float v, float time, RNG &rng,
+                  const Context &ctx = Context{}) const {
+        PROFILER_ZONE("sample_blend");
+        ctx.collector.on_texture_sample(3);
         float3 result = {0, 0, 0};
         for ( int i = 0; i < num_layers && i < MAX_LAYERS; i++ ) {
             float3 layer_color = {0, 0, 0};
             visit(layers[i],
-                  [&](const auto &tex) { layer_color = tex.sample(u, v, time, rng); });
+                  [&](const auto &tex) { layer_color = tex.sample(u, v, time, rng, ctx); });
             result = lerp(result, layer_color, alphas[i]);
         }
         return result;

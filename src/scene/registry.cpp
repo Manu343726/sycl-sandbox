@@ -44,6 +44,8 @@ void SceneRegistry::load_yaml(const std::string &path, SceneDef &def) {
         YAML::Node root = YAML::LoadFile(path);
         def.name = root["name"].as<std::string>("");
         def.kernel = root["kernel"].as<std::string>("");
+        def.max_spp = root["max_spp"].as<int>(1);
+        def.uses_scene = root["uses_scene"].as<bool>(true);
 
         auto params_node = root["params"];
         if ( params_node ) {

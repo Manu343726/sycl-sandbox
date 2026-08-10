@@ -4,6 +4,7 @@
 #include "frame_loop.h"
 #include "io/log_sink.h"
 #include "io/acpp_spdlog_stream.h"
+#include "diags/diags.h"
 #include "tests/tests_register.h"
 
 // AdaptiveCpp patched logging — must be included after the SYCL chain
@@ -16,11 +17,13 @@
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/rotating_file_sink.h>
-#include <args.hxx>
+#include <argparse/argparse.hpp>
 #include <filesystem>
+#include <iostream>
 
 #include <sycl/sycl.hpp>
 #include <memory>
+#include <pthread.h>
 
 // ── GLFW error callback ────────────────────────────────────────────────
 static void glfw_error_cb(int error, const char *desc) {
@@ -33,34 +36,48 @@ ImGuiTestEngine* g_test_engine = nullptr;
 
 // ── main ───────────────────────────────────────────────────────────────
 int main(int argc, char **argv) {
-    // ---- CLI args ----
-    args::ArgumentParser parser("sycl-sandbox");
-    args::ValueFlag<std::string> backend_arg(parser, "software|cpu|gpu", "SYCL backend", {'b', "backend"});
-    args::ValueFlag<std::string> log_level_arg(parser,
-                                               "trace|debug|info|warn|error",
-                                               "spdlog log level",
-                                               {'l', "log-level"});
-    args::ValueFlag<std::string> log_file_arg(parser, "path",
-                                              "rotating log file path (default: sandbox.log)",
-                                              {"log-file"});
+    // ---- CLI args ----------------
+    argparse::ArgumentParser program("sycl-sandbox", "0.1.0",
+                                     argparse::default_arguments::help);
+    program.add_argument("-b", "--backend")
+        .default_value(std::string("auto"))
+        .help("SYCL backend: auto|software|cpu|gpu (auto: GPU SYCL > CPU SYCL > CPU Software)");
+    program.add_argument("-l", "--log-level")
+        .default_value(std::string("info"))
+        .help("spdlog log level: trace|debug|info|warn|error");
+    program.add_argument("--log-file")
+        .default_value(std::string("sycl-sandbox.log"))
+        .help("rotating log file path");
+    program.add_argument("--launch-tracy")
+        .help("Launch Tracy profiler GUI on startup (auto-connects to the "
+              "in-process client)")
+        .default_value(false)
+        .implicit_value(true);
+    register_diag_subcommands(program);
+
     try {
-        parser.ParseCLI(argc, argv);
-    } catch ( const args::Help & ) {
-        std::cerr << parser;
-        return 0;
-    } catch ( const args::ParseError &e ) {
+        program.parse_args(argc, argv);
+    } catch ( const std::exception &e ) {
         spdlog::error("{}", e.what());
-        std::cerr << parser;
+        std::cerr << program;
         return 1;
     }
 
-    std::string preferred_backend = backend_arg ? backend_arg.Get() : "gpu";
-    if ( preferred_backend != "software" && preferred_backend != "cpu" && preferred_backend != "gpu" ) {
-        spdlog::error("backend must be 'software', 'cpu', or 'gpu', got '{}'", preferred_backend);
+    // Diagnostic subcommands run standalone — before any GLFW/ImGui/app
+    // state is created (each exits with its own code).
+    if ( program.is_subcommand_used("diag") ) {
+        return run_diag_subcommand(program);
+    }
+
+    pthread_setname_np(pthread_self(), "sycl-ui");
+
+    std::string preferred_backend = program.get<std::string>("--backend");
+    if ( preferred_backend != "auto" && preferred_backend != "software" && preferred_backend != "cpu" && preferred_backend != "gpu" ) {
+        spdlog::error("backend must be 'auto', 'software', 'cpu', or 'gpu', got '{}'", preferred_backend);
         return 1;
     }
 
-    std::string log_level = log_level_arg ? log_level_arg.Get() : "info";
+    std::string log_level = program.get<std::string>("--log-level");
     auto sl = spdlog::level::from_str(log_level);
     if ( sl == spdlog::level::off && log_level != "off" ) {
         spdlog::error("invalid log level '{}'", log_level);
@@ -86,7 +103,7 @@ int main(int argc, char **argv) {
     // ── Rotating file sink ──────────────────────────────────────────
     // 5 MiB per file, keep up to 3 rotated logs.
     // Flush immediately so log output survives crashes.
-    std::string log_path = log_file_arg ? log_file_arg.Get() : "sycl-sandbox.log";
+    std::string log_path = program.get<std::string>("--log-file");
     try {
         auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             log_path, 5 * 1024 * 1024, 3);
@@ -134,7 +151,10 @@ int main(int argc, char **argv) {
 
     ImGui_ImplGlfw_InitForOpenGL(state.window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
-    init_scene_debug();
+
+    // Scene debug renderer: hidden window sharing the main GL context +
+    // background render thread (offscreen 3D view for the debug window).
+    init_scene_debug(state.window);
 
     // ---- Test Engine (UI automation/testing) ----
     g_test_state = &state;
@@ -174,12 +194,17 @@ int main(int argc, char **argv) {
         }
         spdlog::info("[startup] using build directory: {}", build_dir);
     }
+    state.build_dir = build_dir;
     // Derive project root from build directory
     fs::path project_root = fs::canonical(fs::path(build_dir) / "..");
     spdlog::info("[startup] project root: {}", project_root.string());
 
     state.kr = std::make_unique<KernelRuntime>(build_dir, project_root.string(),
                                                 preferred_backend);
+
+    // Profiler compile-time flag for on-the-fly kernel builds — start the
+    // UI checkbox from the CMake cache so it matches reality.
+    state.profiler_enabled = state.kr->profiler_enabled();
 
     // ── Display target (triple-buffered frame pipeline) ──────────────
     // The factory picks CUDA-GL zero-copy on NVIDIA (after a successful
@@ -202,9 +227,26 @@ int main(int argc, char **argv) {
     // ── Register all kernels ─────────────────────────────────────────
     state.kr->setup_all_kernels(*state.scenes);
 
-    // ── Profiler (host ring + device ring) ───────────────────────────
-    state.kernel_profiler.init(&state.kr->runtime());
-    state.kernel_profiler.init_device_ring(state.kr->queue_ptr());
+    // ── Device profiler ring ─────────────────────────────────────
+    state.init_profiler_buffers(&state.kr->runtime(),
+                                state.kr->queue_ptr());
+
+    // Device zone-name registry: the build-time extractor (libclang,
+    // CMake dependency) compiles every profiler-macro string literal from
+    // the kernel + host sources into a constexpr perfect-hash table.
+#ifndef SANDBOX_HAVE_GENERATED_ZONE_NAMES
+    profiler::scan_zone_names_from_sources((project_root / "src").string());
+    profiler::scan_zone_names_from_sources((project_root / "include").string());
+#endif
+
+    // ── Tracy profiler client ────────────────────────────────────
+    state.tracy_bridge.init();
+
+#ifdef SANDBOX_ENABLE_TRACY
+    if (program.get<bool>("--launch-tracy")) {
+        tracy_launcher::launch_profiler(state.build_dir, "127.0.0.1", 8086);
+    }
+#endif
 
     // Clear accumulator
     state.kr->clear_accum();
@@ -215,7 +257,7 @@ int main(int argc, char **argv) {
         state.kr->switch_scene(state.scenes->all().front(),
                                 state.width, state.height);
         state.current_spp = 0;
-        state.target_spp = state.kr->kernel() ? state.kr->kernel()->desc.max_spp : 1;
+        state.target_spp = state.kr->scene() ? state.kr->scene()->max_spp : 1;
         state.tick.store(0);
         state.scene_start_time = std::chrono::steady_clock::now();
         state.on_scene_changed();

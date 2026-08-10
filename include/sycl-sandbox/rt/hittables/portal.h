@@ -32,8 +32,9 @@
 /// Box is NOT supported as a portal shape — its hit() does not record
 /// which face was hit, so UVs would be ambiguous.
 
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/aabb.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/hittables/sphere.h>
 #include <sycl-sandbox/rt/hittables/triangle.h>
@@ -77,14 +78,21 @@ public:
     /// t-range and the CLOSEST hit wins (the pair may overlap).  The
     /// record carries the hit shape's distance (closest-hit ordering)
     /// and the OTHER shape's surface point, UV-mapped via point_at_uv().
-    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+    ///
+    /// \param ctx per-call kernel context: records a "hit_portal"
+    ///        profiler zone and reports the hit test to the trace
+    ///        collector; forwarded to the entry/exit shape hit tests.
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max,
+                            const Context &ctx = Context{}) const {
+        PROFILER_FUNCTION();
+        ctx.collector.on_hit_test(HittableType::Portal, ray, t_min, t_max);
         optional<HitRecord> entry_hit;
         visit(entry, [&](const auto &shape) {
-            entry_hit = shape.hit(ray, t_min, t_max);
+            entry_hit = shape.hit(ray, t_min, t_max, ctx);
         });
         optional<HitRecord> exit_hit;
         visit(exit, [&](const auto &shape) {
-            exit_hit = shape.hit(ray, t_min, t_max);
+            exit_hit = shape.hit(ray, t_min, t_max, ctx);
         });
         if ( !entry_hit && !exit_hit ) {
             return nullopt;

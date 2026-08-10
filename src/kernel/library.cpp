@@ -1,4 +1,6 @@
 #include "library.h"
+#include "kernel/dispatch.h"
+#include "kernel/zone_names.h"
 #include <sycl-sandbox/profiler.h>
 #include <dlfcn.h>
 #include <cstdio>
@@ -201,19 +203,24 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
 
-    // Resolve get_kernel_desc
-    using desc_fn_t = KernelDesc *(*)();
-    auto desc_fn = reinterpret_cast<desc_fn_t>(dlsym(handle, "get_kernel_desc"));
-    if ( !desc_fn ) {
-        spdlog::error("[kernel] get_kernel_desc not found in {}", ver_so.string());
+    // Resolve the single entry point (kernel ABI: one function, no ops)
+    if ( !resolve_kernel_entry(handle) ) {
+        spdlog::error("[kernel] kernel_entry not found in {}", ver_so.string());
         dlclose(handle);
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
     }
-    KernelDesc *desc = desc_fn();
-    if ( !desc ) {
-        spdlog::error("[kernel] get_kernel_desc returned null in {}", ver_so.string());
-        dlclose(handle);
-        return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
+
+    // Profiler zone-name registry: re-scan this kernel's sources + the
+    // shared headers (they live under <build_dir>/../include) so device
+    // zone-id hashes resolve to names — a hot-reloaded kernel may have
+    // introduced new PROFILER_ZONE literals since the startup
+    // scan.  Idempotent: duplicates overwrite identical entries.
+    {
+        auto src_dir = kernel_source_dir(kernel_name);
+        if (!src_dir.empty())
+            profiler::scan_zone_names_from_sources(src_dir);
+        profiler::scan_zone_names_from_sources(
+            (fs::path(build_dir_) / ".." / "include").string());
     }
 
     // Create (or update) the KernelHandle
@@ -224,7 +231,6 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
         kh->path = ver_so.string();
         kh->generation = gen;
         kh->handle = handle;
-        kh->desc = *desc;
         kh->src_mtime = so_time;
         auto *raw = kh.get();
         handles_[kernel_name] = std::move(kh);
@@ -238,7 +244,6 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
         kh->path = ver_so.string();
         kh->generation = gen;
         kh->handle = handle;
-        kh->desc = *desc;
         kh->src_mtime = so_time;
         active_[kernel_name] = kh.get();
         spdlog::info("[kernel] reloaded '{}' (gen {})", kernel_name, gen);

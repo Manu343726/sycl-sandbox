@@ -10,7 +10,6 @@
 #include "tests_viewport.h"
 #include "tests_scene_debug.h"
 #include "tests_build_monitor.h"
-#include "tests_profiler.h"
 #include "tests_logs.h"
 #include "tests_workflow.h"
 
@@ -20,7 +19,6 @@ inline void RegisterSandboxTests(ImGuiTestEngine* engine) {
     RegisterViewportTests(engine, g_test_state);
     RegisterSceneDebugTests(engine, g_test_state);
     RegisterBuildMonitorTests(engine, g_test_state);
-    RegisterProfilerTests(engine, g_test_state);
     RegisterLogSinkTests(engine, g_test_state);
     RegisterWorkflowTests(engine, g_test_state);
 }

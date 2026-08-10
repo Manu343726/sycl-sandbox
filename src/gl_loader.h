@@ -31,6 +31,7 @@ extern GLint             glGetUniformLocation(GLuint program, const GLchar *name
 extern void              glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 extern void              glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 extern void              glUniform1i(GLint location, GLint v0);
+extern void              glUniform1f(GLint location, GLfloat v0);
 
 // ── Vertex Array Objects (OpenGL 3.0+ / core) ──────────────────────────
 extern void              glGenVertexArrays(GLsizei n, GLuint *arrays);
@@ -70,9 +71,5 @@ extern void              glDeleteRenderbuffers(GLsizei n, const GLuint *renderbu
 extern void              glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
 extern void              glLineWidth(GLfloat width);
 extern void              glPointSize(GLfloat size);
-
-// ── Matrix stack (OpenGL 1.x compat — used by scene_debug for fixed-function 3D) ─
-extern void              glMultMatrixf(const GLfloat *m);
-extern void              glTranslatef(GLfloat x, GLfloat y, GLfloat z);
 
 } // extern "C"

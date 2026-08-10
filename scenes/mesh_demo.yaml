@@ -1,0 +1,142 @@
+name: "Mesh Demo"
+kernel: raytracer
+max_spp: 1024
+scene_type: 3d
+
+# ── Scene parameters ──────────────────────────────────────────────────
+params:
+  background:
+    type: color
+    description: "Background colour (ignored in enclosed box)"
+    default: [0.0, 0.0, 0.0]
+  light_color:
+    type: color
+    description: "Ceiling light colour (base tint, 0-1)"
+    default: [1.0, 1.0, 1.0]
+  light_intensity:
+    type: float
+    description: "Ceiling light intensity multiplier"
+    default: 15.0
+    range: [0, 50]
+  tonemap_enabled:
+    type: bool
+    description: "Enable the tone-mapping stage (Reinhard + gamma by default)"
+    default: true
+
+# ── Scene geometry ───────────────────────────────────────────────────
+# Demonstrates `type: mesh` objects loaded from STL files (ASCII or
+# binary, auto-detected).  `file` is resolved relative to this YAML's
+# directory; `position` / `rotation` (Euler degrees, applied Z → Y → X)
+# / `scale` (float or vec3) place the model in the scene.
+objects:
+  # Floor  (Y=0)
+  - type: quad
+    base: [-3, 0, -3]
+    u: [6, 0, 0]
+    v: [0, 0, 6]
+    material:
+      type: lambertian
+      albedo: [0.73, 0.73, 0.73]
+
+  # Back wall  (Z=-3)
+  - type: quad
+    base: [-3, 0, -3]
+    u: [6, 0, 0]
+    v: [0, 4, 0]
+    material:
+      type: lambertian
+      albedo: [0.73, 0.73, 0.73]
+
+  # Left wall  (X=-3, red)
+  - type: quad
+    base: [-3, 0, -3]
+    u: [0, 4, 0]
+    v: [0, 0, 6]
+    material:
+      type: lambertian
+      albedo: [0.65, 0.05, 0.05]
+
+  # Right wall  (X=3, green)
+  - type: quad
+    base: [3, 0, -3]
+    u: [0, 4, 0]
+    v: [0, 0, 6]
+    material:
+      type: lambertian
+      albedo: [0.12, 0.45, 0.15]
+
+  # Ceiling  (Y=4)
+  - type: quad
+    base: [-3, 4, -3]
+    u: [6, 0, 0]
+    v: [0, 0, 6]
+    material:
+      type: lambertian
+      albedo: [0.73, 0.73, 0.73]
+
+  # Light panel on ceiling
+  - type: quad
+    base: [-1.5, 3.99, -1.5]
+    u: [3, 0, 0]
+    v: [0, 0, 3]
+    material:
+      type: diffuse_light
+      emit: $light_color
+      intensity: $light_intensity
+
+  # Polished metal sphere from an STL file (320 triangles)
+   - type: mesh
+     file: models/uv_sphere.stl
+     position: [-0.9, 1.0, 0.4]
+     scale: 1.0
+     smooth: true
+    material:
+      type: metal
+      albedo: [0.9, 0.85, 0.7]
+      roughness: 0.15
+
+  # Pyramid from an STL file, scaled + rotated
+  - type: mesh
+    file: models/pyramid.stl
+    position: [1.1, 0.0, -0.6]
+    rotation: [0, 45, 0]
+    scale: 1.4
+    material:
+      type: lambertian
+      albedo: [0.3, 0.6, 0.9]
+
+  # Tiny gold sphere pair — same file instanced twice
+  - type: mesh
+    file: models/uv_sphere.stl
+    position: [1.3, 0.25, 1.2]
+    scale: 0.25
+    material:
+      type: metal
+      albedo: [1.0, 0.71, 0.29]
+      roughness: 0.3
+  - type: mesh
+    file: models/uv_sphere.stl
+    position: [1.8, 0.35, 1.2]
+    scale: 0.35
+    material:
+      type: metal
+      albedo: [1.0, 0.71, 0.29]
+      roughness: 0.3
+
+  # Glass rubber duck (15168 triangles, CC0) — solid closed mesh, so the
+  # dielectric refracts/reflects like real glass.  The model is Z-up (its
+  # +Z is the vertical, 127 units tall) with the beak pointing -Y, so it
+  # needs rx=-90 to stand upright in this Y-up scene.  After rx=-90 the
+  # beak faces +Z and the base sits at y=-55.2 (×0.008 → -0.44), so the
+  # position lifts it back onto the floor (y≈0).  It is placed between the
+  # back wall and the metal sphere (sphere at (-0.9, 1.0, 0.4)) so its
+  # +Z-facing beak points at the sphere.
+   - type: mesh
+     file: models/duck.stl
+     position: [-0.9, 0.4416, 3.0]
+     rotation: [-90, 0, 0]
+     scale: 0.008
+     smooth: true
+    material:
+      type: dielectric
+      index: 1.5

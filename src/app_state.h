@@ -2,8 +2,9 @@
 
 #include <sycl-sandbox/kernel/execution_context.h>
 #include <sycl-sandbox/scene_loader.h>
+#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/profiler.h>
 #include "kernel/runtime.h"
-#include "kernel/profiler_host.h"
 #include "scene/registry.h"
 #include "scene/host_scene.h"
 #include "camera/orbit.h"
@@ -15,6 +16,7 @@
 #include "ui/stat/panel.h"
 #include "ui/build_monitor/panel.h"
 #include "ui/metrics/system_metrics.h"
+#include "tracy/tracy_bridge.h"
 
 #include <sycl/sycl.hpp>
 #include <GLFW/glfw3.h>
@@ -24,9 +26,6 @@
 #include <string>
 #include <vector>
 #include <chrono>
-
-// ── Forward declarations for kernel API functions ────────────────────
-using get_scene_debug_info_fn = const SceneDebugInfo *(*)();
 
 // ── AppState ─────────────────────────────────────────────────────────
 /// Groups all mutable state for the sycl-sandbox application.
@@ -60,7 +59,10 @@ struct AppState {
     /// device queue.  Main thread only.  Restore with resume_pipeline().
     /// Required before any operation that frees device memory the render
     /// thread may be using (resize, backend switch).
+    /// Sets the kernel cancellation flag so in-flight work can bail out
+    /// early while we wait for the frame to finish.
     bool pause_pipeline() {
+        if (kr) kr->cancel();
         bool was_ready = kernel_ready.exchange(false);
         while (render_busy.load())
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -68,7 +70,9 @@ struct AppState {
         return was_ready;
     }
 
-    void resume_pipeline(bool was_ready) { kernel_ready.store(was_ready); }
+    void resume_pipeline(bool was_ready) {
+        kernel_ready.store(was_ready);
+    }
 
     void recreate_buffers(int w, int h) {
         bool was_ready = pause_pipeline();
@@ -109,10 +113,53 @@ struct AppState {
     /// Animation clock — steady time-point for elapsed-time computation.
     std::chrono::steady_clock::time_point scene_start_time;
 
-    // ── Profiler + stats ────────────────────────────────────────
-    KernelProfiler kernel_profiler;
+    // ── Device profiler ring ─────────────────────────────────
+    profiler::DeviceRingHeader *d_ring_header_ = nullptr;
+    profiler::DeviceRecord *d_ring_records_ = nullptr;
+    sycl::queue *ring_q_ = nullptr;
+    static constexpr uint32_t RING_CAPACITY = 256 * 1024;
+    static constexpr size_t   SAMPLED_ITEMS = 1024;
+
+    void init_profiler_buffers(rt::Runtime *, sycl::queue *q) {
+        free_profiler_buffers();
+        if (!q) return;
+        ring_q_ = q;
+        // USM shared — the ring is written from device code (via
+        // sycl::atomic_ref) and read from host code (kernel .so
+        // KERNEL_BUILD path via sycl::atomic_ref).  malloc_device
+        // is not host-accessible on CUDA.
+        d_ring_header_ = sycl::malloc_shared<profiler::DeviceRingHeader>(1, *q);
+        d_ring_records_ = sycl::malloc_shared<profiler::DeviceRecord>(RING_CAPACITY, *q);
+        q->memset(d_ring_header_, 0, sizeof(profiler::DeviceRingHeader)).wait();
+    }
+    void free_profiler_buffers() {
+        if (ring_q_) {
+            if (d_ring_header_) sycl::free(d_ring_header_, *ring_q_);
+            if (d_ring_records_) sycl::free(d_ring_records_, *ring_q_);
+        }
+        d_ring_header_ = nullptr;
+        d_ring_records_ = nullptr;
+        ring_q_ = nullptr;
+    }
+    profiler::DeviceRing device_ring(size_t work_items) const {
+        if (!d_ring_header_) return {};
+        profiler::DeviceRing ring;
+        ring.header = d_ring_header_;
+        ring.records = d_ring_records_;
+        ring.capacity = RING_CAPACITY;
+        ring.sample_interval =
+            (uint32_t)std::max<size_t>(1, work_items / SAMPLED_ITEMS);
+        return ring;
+    }
+
     StatStore stat_store;
     BuildMonitor build_monitor;
+
+    // ── Tracy profiler (optional, SANDBOX_ENABLE_TRACY) ───────────
+    /// Forwards device-ring records to the Tracy client as GPU zones.
+    /// The profiler UI is Tracy's own standalone tracy-profiler app,
+    /// launched from the Controls panel (see tracy/tracy_launcher.*).
+    tracy_bridge::Bridge tracy_bridge;
 
     // ── System resource metrics (CPU / RAM / GPU) ────────────────
     SystemMetrics system_metrics;
@@ -125,6 +172,27 @@ struct AppState {
     /// with kernel_ready by pause_pipeline() to stop the pipeline safely.
     std::atomic<bool> render_busy{false};
     std::thread render_thread;
+
+    // ── Timing diagnostics (ms, published by render thread, read by UI) ─
+    /// Pure GPU kernel time (call_kernel_entry → queue wait), ms.
+    std::atomic<double> kernel_time_ms{0.0};
+    /// call_kernel_entry alone (enqueue on GPU, synchronous render on CPU).
+    std::atomic<double> kernel_call_ms{0.0};
+    /// queue wait time (GPU backend only; 0 on software).
+    std::atomic<double> kernel_wait_ms{0.0};
+    /// Render-loop wall-clock interval between iterations, ms (includes spin).
+    std::atomic<double> render_loop_time_ms{0.0};
+    /// Wall-clock interval between productive frames, ms (SPP-incrementing).
+    std::atomic<double> render_interval_ms{0.0};
+    /// Main-thread frame time (poll → composite), ms.
+    std::atomic<double> ui_frame_time_ms{0.0};
+    /// Main-thread phase breakdowns, ms.
+    std::atomic<double> ui_poll_events_ms{0.0};
+    std::atomic<double> ui_rebuild_ms{0.0};
+    std::atomic<double> ui_stats_ms{0.0};
+    std::atomic<double> ui_imgui_ms{0.0};
+    std::atomic<double> ui_upload_ms{0.0};
+    std::atomic<double> ui_composite_ms{0.0};
 
     // ── Camera ─────────────────────────────────────────────────
     OrbitCam orbit;
@@ -143,11 +211,19 @@ struct AppState {
     // ── UI toggles ──────────────────────────────────────────────
     bool show_builds = false;
     bool show_logs = false;
-    bool show_profiler = false;
     bool show_metrics = false;
     bool show_test_engine = false;
+    /// Whether on-the-fly kernel builds compile with profiler support
+    /// (SANDBOX_ENABLE_PROFILER in the CMake cache).  Mirrors the cache
+    /// value at startup; the Controls checkbox toggles it by
+    /// reconfiguring + rebuilding the active kernel.
+    bool profiler_enabled = true;
 
     // ── Convenience helpers ────────────────────────────────────
+    /// Build directory the app was launched from (build/ or build_debug/),
+    /// used to locate the standalone tracy-profiler executable.
+    std::string build_dir;
+
     bool has_3d() const { return camera_eye.valid() && camera_at.valid() && fov.valid(); }
     bool has_2d() const { return center_x.valid() && center_y.valid() && zoom.valid(); }
 

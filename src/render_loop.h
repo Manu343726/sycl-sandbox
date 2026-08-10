@@ -2,8 +2,6 @@
 
 #include "app_state.h"
 #include "kernel/dispatch.h"
-#include "render/tonemap.h"
-
 #include <sycl/sycl.hpp>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -19,6 +17,7 @@ extern ImGuiTestEngine* g_test_engine;
 #include <cstring>
 #include <cmath>
 #include <cstdio>
+#include <pthread.h>
 
 // ── Formatting helpers ────────────────────────────────────────────────
 
@@ -72,17 +71,15 @@ inline void composite_frame(AppState &state) {
 ///      frame and makes the host-side counters truthful)
 ///   5. publish the slot, the stat seqlock, and both profiler rings
 inline void render_thread_func(AppState &state) {
+    pthread_setname_np(pthread_self(), "sycl-render");
     spdlog::debug("[render] thread started");
 
     bool spp_logged = false;
     bool wait_logged = false;
     int  tick_counter = 0;
     std::vector<uint8_t> param_scratch;
-
-    // Resolve device zone-id hashes for the profiler UI.
-    state.kernel_profiler.register_device_zone("trace_px");
-    state.kernel_profiler.register_device_zone("tonemap_px");
-    state.kernel_profiler.register_device_zone("colorchecker_px");
+    auto last_end = std::chrono::steady_clock::now();
+    auto last_productive_end = last_end;
 
     while ( state.render_running.load() ) {
         // ── Wait until kernel is fully initialized ───────────────
@@ -105,6 +102,15 @@ inline void render_thread_func(AppState &state) {
             ~BusyClear() { flag.store(false); }
         } busy_clear{state.render_busy};
         if ( !state.kernel_ready.load() ) continue;  // pause raced in
+
+        // ── Sync cancellation state to device-visible USM ──
+        // The main thread sets cancel_requested_ (host-side atomic,
+        // always valid).  We mirror it to the USM cancel_flag before
+        // dispatch so device code can bail out of long-running kernels.
+        // Only the render thread touches the USM pointer — the main
+        // thread never accesses USM for cancellation, avoiding crashes
+        // when the queue is being torn down (backend switch).
+        if (state.kr) state.kr->begin_frame();
 
         // ── Apply pending parameter snapshot ─────────────────────
         {
@@ -147,11 +153,13 @@ inline void render_thread_func(AppState &state) {
             slot = state.display_target->acquire();
             if ( slot >= 0 ) staging = state.display_target->staging_ptr(slot);
         }
+        bool render_this_frame = true;
         if ( animated && slot < 0 ) {
             // Nothing would ever see this frame — pace to display rate.
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            continue;
+            render_this_frame = false;
         }
+        if (render_this_frame) {
 
         // ── Update tick/time in the render-thread-owned d_params ─
         uint64_t new_tick = state.tick.load() + 1;
@@ -194,132 +202,60 @@ inline void render_thread_func(AppState &state) {
 
         // ── Dispatch render kernel + tone-map (enqueue-only) ─────
         auto &krt = state.kr->runtime();
-        krt.profiler_buffer = state.kernel_profiler.buffer();
-        state.kernel_profiler.reset_frame();
 
         sycl::queue *q = state.kr->queue_ptr();
         int32_t w = state.width, h = state.height;
         size_t pixels = (size_t)w * h;
-        profiler::DeviceRing ring = state.kernel_profiler.device_ring(pixels);
+        profiler::DeviceRing ring = state.device_ring(pixels);
 
+#ifdef SANDBOX_ENABLE_PROFILER
+        // Host timestamp bracket for the device ring → Tracy bridge.
         uint64_t host_t0 = profiler::DeviceRing::timestamp();
+#endif
 
-        // ── Debug pipeline overrides (standard scene params) ───────
-        // debug_colorchecker:     bypass kernel execution, render a
-        //                         ColorChecker chart instead — the
-        //                         tone-map + swapchain continue as usual.
-        // debug_colorchecker_raw: bypass kernel AND tone-map, write the
-        //                         chart directly (raw sRGB) to the
-        //                         display slot.
-        bool dbg_colorchecker = false;
-        bool dbg_colorchecker_raw = false;
+        // ── Frame context for the kernel (single entry, no ops) ──
+        // Params travel as a ParamLookup over the render-thread-owned
+        // d_params buffer (tick/time/spp_frame are written there above).
+        rt::ParamLookup lookup;
         if ( auto *desc = state.kr->scene_desc() ) {
-            auto read_flag = [&](const char *name) {
-                auto ref = desc->find_param_ref(name);
-                if ( !ref.valid() ) return false;
-                return *(const float *)((const char *)state.kr->d_params() +
-                                        ref.offset()) != 0.f;
-            };
-            dbg_colorchecker = read_flag("debug_colorchecker");
-            dbg_colorchecker_raw = read_flag("debug_colorchecker_raw");
+            lookup.set_buffer(state.kr->d_params());
+            lookup.set_entries(desc->lookup_entries.data(),
+                               (int)desc->lookup_entries.size());
         }
 
-        // ── Tone-map settings (standard scene params) ───────────────
-        // tonemap_enabled / tonemap_operator / tonemap_exposure /
-        // tonemap_gamma — auto-generated, scenes may override defaults.
-        tonemap::Params tmap;
-        if ( auto *desc = state.kr->scene_desc() ) {
-            auto read_f = [&](const char *name) -> const float * {
-                auto ref = desc->find_param_ref(name);
-                if ( !ref.valid() || !state.kr->d_params() ) return nullptr;
-                return (const float *)((const char *)state.kr->d_params() +
-                                       ref.offset());
-            };
-            if ( auto *p = read_f("tonemap_enabled") ) tmap.enabled = *p != 0.f;
-            if ( auto *p = read_f("tonemap_operator") ) tmap.operator_id = (int)*p;
-            if ( auto *p = read_f("tonemap_exposure") ) tmap.exposure = *p;
-            if ( auto *p = read_f("tonemap_gamma") ) tmap.gamma = *p;
-        }
-
-        RenderContext ctx = {
-            w, h,
-            state.kr->d_params(),
-            state.kr->d_accum(),
-            spp_frame,
-            (uint32_t)cur_spp,       // samples accumulated before this call
-            new_tick,                // animation frame counter
-            ring,
-            state.kr->stat_writer(),
-            state.kr->trace_counters()
-        };
+        rt::Context ctx;
+        ctx.runtime = &state.kr->runtime();
+        ctx.cancel_flag = state.kr->runtime().cancel_flag;
+        ctx.params = &lookup;
+        ctx.stats = state.kr->stat_writer();
+        ctx.scene = state.kr->host_scene().view.num_handles > 0
+                        ? &state.kr->host_scene().view : nullptr;
+        ctx.prof = ring;
+        ctx.trace_counters = state.kr->trace_counters();
+        ctx.width = w;
+        ctx.height = h;
+        ctx.accum = state.kr->d_accum();
+        ctx.spp_frame = spp_frame;
+        ctx.spp_total = (uint32_t)cur_spp;   // samples before this call
+        ctx.frame_index = new_tick;          // animation frame counter
 
         // Zero the per-frame trace counters (in-order: sequenced before
         // the render kernel, so debug overrides see a clean 0).
         state.kr->zero_trace_counters_async();
 
-        if ( !dbg_colorchecker && !dbg_colorchecker_raw )
-            call_render_kernel(state.kr->kernel()->handle, q, ctx);
+        auto k_t0 = std::chrono::steady_clock::now();
 
-        sycl::event done{};
-        if ( slot >= 0 && staging ) {
-            if ( q ) {
-                if ( dbg_colorchecker_raw ) {
-                    done = tonemap::enqueue_colorchecker_raw(*q, staging,
-                                                             w, h);
-                } else if ( dbg_colorchecker ) {
-                    // Fill accum with the inverse tone-mapped chart, then
-                    // run the standard tone-map — the displayed frame is
-                    // exactly the reference chart through the unmodified
-                    // pipeline.  The fill is calibrated against Reinhard +
-                    // gamma 2.2, so force those settings regardless of the
-                    // live tone-map params.
-                    tonemap::enqueue_colorchecker_fill(*q,
-                                                       state.kr->d_accum(),
-                                                       w, h, ring);
-                    tonemap::Params cal{true};   // enabled, Reinhard, 2.2
-                    done = tonemap::enqueue(*q, state.kr->d_accum(), staging,
-                                            w, h, cal, ring);
-                } else {
-                    done = tonemap::enqueue(*q, state.kr->d_accum(), staging,
-                                            w, h, tmap, ring);
-                }
-            } else {
-                // Software backend: render already completed synchronously.
-                if ( dbg_colorchecker_raw ) {
-                    tonemap::run_cpu_colorchecker_raw(staging, w, h);
-                } else if ( dbg_colorchecker ) {
-                    tonemap::run_cpu_colorchecker_fill(state.kr->d_accum(),
-                                                       w, h);
-                    tonemap::Params cal{true};   // calibrated fill path
-                    tonemap::run_cpu(state.kr->d_accum(), staging, w, h, cal);
-                } else {
-                    tonemap::run_cpu(state.kr->d_accum(), staging, w, h, tmap);
-                }
-            }
-        }
+        ctx.output = staging;
+        if (!ctx.output) ctx.output = krt.alloc_device<uint8_t>(pixels * 4);
+        call_kernel_entry(state.kr->kernel()->handle, ctx);
 
-        // ── Wait for frame completion ────────────────────────────
-        // Bounds in-flight work to one frame: keeps current_spp truthful,
-        // the queue shallow (UI operations never stall behind a backlog),
-        // and gives the device profiler an exact host time bracket.
-        if ( q ) {
-            try {
-                if ( slot >= 0 ) done.wait();
-                else q->wait();
-            } catch (const std::exception &e) {
-                spdlog::error("[render] frame failed: {}", e.what());
-            }
-        }
+        auto k_t1 = std::chrono::steady_clock::now();
+        state.kernel_time_ms.store(
+            std::chrono::duration<double, std::milli>(k_t1 - k_t0).count());
+        if (!staging) krt.dealloc(ctx.output);
+#ifdef SANDBOX_ENABLE_PROFILER
         uint64_t host_t1 = profiler::DeviceRing::timestamp();
-
-        // ── Per-frame stats from the kernel ──────────────────────
-        // Statistics are kernel outputs: collect_frame_stats() lets the
-        // kernel read back its per-frame device data (e.g. the trace
-        // counters) and write them into the stat block via ctx->stats.
-        // Called only when the render kernel actually ran — the debug
-        // colorchecker overrides bypass it, so their counters stay 0.
-        if ( !dbg_colorchecker && !dbg_colorchecker_raw )
-            call_collect_frame_stats(state.kr->kernel()->handle, q, ctx);
+#endif
 
         // ── Publish frame ────────────────────────────────────────
         if ( slot >= 0 && staging ) {
@@ -327,7 +263,7 @@ inline void render_thread_func(AppState &state) {
             info.frame_index = new_tick;
             info.spp = animated ? spp_frame : cur_spp + spp_frame;
             info.time_sec = secs;
-            state.display_target->publish(slot, info, done);
+            state.display_target->publish(slot, info, sycl::event{});
         }
 
         // ── Publish stats (seqlock — UI never blocks this thread) ─
@@ -340,9 +276,28 @@ inline void render_thread_func(AppState &state) {
         else state.current_spp.fetch_add((int)spp_frame);
 
         PROFILER_PLOT("SPP", (float)state.current_spp.load());
-        state.kernel_profiler.collect(state.current_spp.load());
-        state.kernel_profiler.collect_device((int64_t)new_tick,
-                                             host_t0, host_t1);
+#ifdef SANDBOX_ENABLE_PROFILER
+        // Host overhead that only exists when profiler support was
+        // compiled into the app (SANDBOX_ENABLE_PROFILER=ON): the device
+        // ring → Tracy bridge submission.
+        state.tracy_bridge.submit_device_ring(state.d_ring_header_,
+                                              state.d_ring_records_,
+                                              state.RING_CAPACITY,
+                                              q, (int64_t)new_tick,
+                                              host_t0, host_t1);
+        state.tracy_bridge.frame_mark();
+#endif
+        } // if (render_this_frame)
+
+        auto now = std::chrono::steady_clock::now();
+        state.render_loop_time_ms.store(
+            std::chrono::duration<double, std::milli>(now - last_end).count());
+        if (render_this_frame) {
+            state.render_interval_ms.store(
+                std::chrono::duration<double, std::milli>(now - last_productive_end).count());
+            last_productive_end = now;
+        }
+        last_end = now;
     }
     spdlog::debug("[render] thread exiting");
 }

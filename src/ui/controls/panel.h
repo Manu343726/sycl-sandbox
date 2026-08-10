@@ -1,6 +1,9 @@
 #pragma once
 
 #include "app_state.h"
+#ifdef SANDBOX_ENABLE_TRACY
+#include "tracy/tracy_launcher.h"
+#endif
 #include "ui/params/controls.h"
 #include "ui/scene_debug/panel.h"
 #include "ui/stat/panel.h"
@@ -20,9 +23,12 @@ inline void update_standard_stats(AppState &state) {
     if ( !scene_desc ) return;
     auto &krt = state.kr->runtime();
     auto fps = scene_desc->find_stat_ref("fps");
-    if ( fps.valid() ) fps.set(ImGui::GetIO().Framerate);
+    if ( fps.valid() ) {
+        double t = state.render_interval_ms.load();
+        fps.set(t > 0.0 ? (float)(1000.0 / t) : 0.0f);
+    }
     auto ft = scene_desc->find_stat_ref("frame_time_ms");
-    if ( ft.valid() ) ft.set(1000.0f / std::max(ImGui::GetIO().Framerate, 1.0f));
+    if ( ft.valid() ) ft.set((float)state.render_interval_ms.load());
     auto spp = scene_desc->find_stat_ref("spp");
     if ( spp.valid() ) spp.set((int)state.current_spp.load());
     auto px = scene_desc->find_stat_ref("pixel_count");
@@ -55,10 +61,9 @@ inline void render_controls_panel(AppState &state) {
                     state.render_paused.store(true);
                     state.pause_pipeline();
                     if (state.kr->switch_scene(s, state.width, state.height)) {
-                        state.kernel_profiler.clear_data();
                         state.current_spp = 0;
-                        state.target_spp = state.kr->kernel()
-                            ? state.kr->kernel()->desc.max_spp : 1;
+                        state.target_spp = state.kr->scene()
+                            ? state.kr->scene()->max_spp : 1;
                         state.tick.store(0);
                         state.scene_start_time = std::chrono::steady_clock::now();
                         state.orbit_init = false;
@@ -158,6 +163,41 @@ inline void render_controls_panel(AppState &state) {
         render_stat_panel(state.stat_store, *scene_desc);
     }
 
+    // ── Timing diagnostics ─────────────────────────────────────────
+    {
+        ImGui::SeparatorText("Timing");
+        double kt = state.kernel_time_ms.load();
+        double rt = state.render_interval_ms.load();
+        double spin = state.render_loop_time_ms.load();
+        double ut = state.ui_frame_time_ms.load();
+
+        ImGui::Text("Kernel:         %5.1f ms", kt);
+        ImGui::Text("Render interval:%5.1f ms  (%.0f FPS)", rt,
+                    rt > 0.0 ? 1000.0 / rt : 0.0);
+        ImGui::Text("  display wait: %5.1f ms", std::max(0.0, rt - kt));
+        ImGui::Text("Loop spin:      %5.1f ms", spin);
+        ImGui::Separator();
+        ImGui::Text("UI thread:      %5.1f ms", ut);
+        ImGui::Text("  poll:         %5.1f ms", state.ui_poll_events_ms.load());
+        ImGui::Text("  rebuild:      %5.1f ms", state.ui_rebuild_ms.load());
+        ImGui::Text("  stats:        %5.1f ms", state.ui_stats_ms.load());
+        ImGui::Text("  ImGui:        %5.1f ms", state.ui_imgui_ms.load());
+        ImGui::Text("  upload:       %5.1f ms", state.ui_upload_ms.load());
+        ImGui::Text("  composite:    %5.1f ms", state.ui_composite_ms.load());
+
+        static int lag_frame = 0;
+        lag_frame++;
+        if (lag_frame % 120 == 0) {
+            double wait = rt - kt;
+            if (wait > 10.0)
+                spdlog::warn("[timing] display back-pressure {:.1f} ms -- "
+                             "render thread waiting for main thread", wait);
+            if (ut > rt && rt > 0.0)
+                spdlog::warn("[timing] UI frame ({:.1f} ms) > render interval ({:.1f} ms)",
+                             ut, rt);
+        }
+    }
+
     // ---- Backend switcher ----
     {
         ImGui::SeparatorText("Backend");
@@ -197,7 +237,6 @@ inline void render_controls_panel(AppState &state) {
             // Display target + device profiler ring hold allocations on the
             // OLD queue — tear them down while it is still alive, and
             // rebuild against the new one after the switch.
-            state.kernel_profiler.free_device_ring();
             if (state.display_target) {
                 state.display_target->destroy();
                 state.display_target.reset();
@@ -206,10 +245,11 @@ inline void render_controls_panel(AppState &state) {
             state.display_target.reset(create_display_target(
                 state.kr->queue_ptr(), state.width, state.height));
             state.tex = state.display_target->texture();
-            state.kernel_profiler.init_device_ring(state.kr->queue_ptr());
+            state.init_profiler_buffers(&state.kr->runtime(),
+                                        state.kr->queue_ptr());
             state.current_spp = 0;
-            state.target_spp = state.kr->kernel()
-                ? state.kr->kernel()->desc.max_spp : 1;
+            state.target_spp = state.kr->scene()
+                ? state.kr->scene()->max_spp : 1;
             state.tick.store(0);
             state.scene_start_time = std::chrono::steady_clock::now();
             state.on_scene_changed();
@@ -237,8 +277,57 @@ inline void render_controls_panel(AppState &state) {
         ImGui::SeparatorText("Windows");
         ImGui::Checkbox("Show Build Monitor", &state.show_builds);
         ImGui::Checkbox("Show Logs", &state.show_logs);
-        ImGui::Checkbox("Show Profiler", &state.show_profiler);
+#ifdef SANDBOX_ENABLE_TRACY
+        // The profiler UI is Tracy's own standalone tracy-profiler
+        // executable (built from Tracy's CMake) — this button just
+        // launches it; it connects to the in-process client and starts
+        // capturing (on-demand recording).
+        if (ImGui::Button("Launch Tracy Profiler")) {
+            tracy_launcher::launch_profiler(state.build_dir);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Starts the standalone tracy-profiler app, which connects "
+                "to the in-process Tracy client (127.0.0.1:8086). Recording "
+                "runs while the profiler is connected.");
+#endif
         ImGui::Checkbox("Show System Metrics", &state.show_metrics);
+    }
+
+    // ---- Profiler (kernel build compile-time flag) ----
+    {
+        ImGui::SeparatorText("Profiler");
+        bool enabled = state.profiler_enabled;
+        if ( ImGui::Checkbox("Enable profiler (kernel build)", &enabled) &&
+             enabled != state.profiler_enabled ) {
+            // Reconfigure the CMake cache + rebuild the active kernel
+            // with the new compile-time flag (mirrors a backend switch:
+            // stop the pipeline first, rebuild, then resume).
+            state.render_paused.store(true);
+            state.pause_pipeline();
+            state.kr->set_profiler_enabled(enabled);
+            state.profiler_enabled = enabled;
+            state.current_spp = 0;
+            state.target_spp = state.kr->scene()
+                ? state.kr->scene()->max_spp : 1;
+            state.tick.store(0);
+            state.scene_start_time = std::chrono::steady_clock::now();
+            state.on_scene_changed();
+            state.kernel_ready.store(true);
+            state.render_paused.store(false);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if ( ImGui::IsItemHovered() ) {
+            ImGui::SetTooltip(
+                "Toggles the SANDBOX_ENABLE_PROFILER compile-time flag for "
+                "on-the-fly kernel builds.  Off makes every PROFILER_* "
+                "macro a no-op — the kernel carries zero profiling "
+                "overhead.  Changing it reconfigures CMake and rebuilds "
+                "the active kernel.");
+        }
     }
 
     ImGui::End();

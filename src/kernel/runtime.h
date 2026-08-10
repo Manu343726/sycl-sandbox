@@ -61,7 +61,7 @@ public:
     // ── Lifecycle operations ─────────────────────────────────────
     /// Full ordered scene switch: cancel → build → load → init.
     /// On success the caller should:
-    ///   - Reset SPP counters (current_spp = 0, target_spp = kernel()->desc.max_spp)
+    ///   - Reset SPP counters (current_spp = 0, target_spp = scene()->max_spp)
     ///   - Set tick = 0, scene_start_time = now
     ///   - Set kernel_ready = true, render_paused = false
     ///   - Re-init orbit camera
@@ -113,11 +113,11 @@ public:
     sycl::queue *queue_ptr() { return q_; }
     rt::Runtime &runtime() { return krt_; }
 
-    /// Per-frame stat writer for RenderContext::stats.  Points at a
+    /// Per-frame stat writer.  Points at a
     /// runtime-owned buffer (NOT the scene descriptor's — the UI thread
     /// reads that one); the render thread publishes it through the
     /// PublishedStats seqlock after each frame.  Null when the scene has
-    /// no stats.
+    /// no stats.  Handed to the kernel in ctx->stats each frame.
     const rt::StatWriter *stat_writer() const {
         return stat_buffer_.empty() ? nullptr : &stat_writer_;
     }
@@ -140,9 +140,6 @@ public:
     scene_loader::SceneDescriptor *scene_desc() const {
         return active_scene_desc_.get();
     }
-    get_scene_debug_info_fn scene_debug_fn() const {
-        return scene_debug_fn_;
-    }
 
     float *d_params() const { return d_params_; }
 
@@ -163,6 +160,27 @@ public:
     KernelBuildSystem &builder() { return *builder_; }
     SourceWatcher &watcher() { return *watcher_; }
 
+    // ── Cancellation ────────────────────────────────────────────
+    /// Signal in-flight kernel work to abort.  Safe to call from any
+    /// thread — operates on a host-side atomic, never touches USM.
+    void cancel();
+    /// Called by the render thread at the start of each frame.
+    /// Syncs the host cancel state to device-visible USM, then resets
+    /// the host flag.  Only the render thread touches USM.
+    void begin_frame();
+
+    // ── Profiler flag (on-the-fly kernel builds) ─────────────────
+    /// Reconfigure the CMake cache for the on-the-fly kernel builds
+    /// (`SANDBOX_ENABLE_PROFILER=ON|OFF`) and rebuild + reload the
+    /// active kernel with the new compile-time flag.  No-op when no
+    /// kernel is active.  The caller must pause the pipeline first
+    /// (pause_pipeline()) and resume afterwards.
+    void set_profiler_enabled(bool enabled);
+    /// Whether the CMake cache currently has SANDBOX_ENABLE_PROFILER=ON
+    /// (the value the UI checkbox starts from).  Defaults to true when
+    /// the cache file cannot be read.
+    bool profiler_enabled() const;
+
 private:
     // ── Ordered reload (internal) ────────────────────────────────
     /// Core ordered sequence shared by switch_scene, backend switch,
@@ -180,6 +198,9 @@ private:
     std::unique_ptr<KernelLibrary> lib_;
     std::unique_ptr<KernelBuildSystem> builder_;
     std::unique_ptr<SourceWatcher> watcher_;
+    /// CMake build directory (absolute) — used to reconfigure the cache
+    /// when the on-the-fly kernel build flags change.
+    std::string build_dir_;
 
     // ── Backend state ────────────────────────────────────────────
     std::vector<BackendInfo> backends_;
@@ -194,7 +215,6 @@ private:
     KernelHandle *active_kernel_ = nullptr;
     std::unique_ptr<scene_loader::SceneDescriptor> active_scene_desc_;
     float *d_params_ = nullptr;
-    get_scene_debug_info_fn scene_debug_fn_ = nullptr;
     HostScene host_scene_;
 
     // ── Per-frame stats (render-thread private, seqlock-published) ─
@@ -209,4 +229,17 @@ private:
     size_t accum_bytes_ = 0;
     int width_ = 0;
     int height_ = 0;
+
+    // ── Cancellation ────────────────────────────────────────────
+    /// Host-side flag — always valid (plain member, never freed).
+    /// Set by cancel(), read by the render thread each frame start.
+    /// This is the canonical cancel signal for host code; the USM
+    /// pointer below is a mirror for device-code visibility.
+    std::atomic<int> cancel_requested_{0};
+    /// USM-shared flag mirror for device code.  May be null (software
+    /// backend) or briefly null during a backend switch.  Host code
+    /// must NEVER access this pointer — use cancel_requested_ instead.
+    /// Only the render thread (which owns the queue lifecycle) reads
+    /// and writes this pointer.
+    int *cancel_flag_ = nullptr;
 };

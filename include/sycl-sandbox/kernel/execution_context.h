@@ -26,6 +26,8 @@
 
 namespace rt {
 
+template <typename T> struct Buffer;   ///< defined below (owns Runtime memory)
+
 /// Kernel execution context — memory allocator, data transfer, pixel
 /// iteration primitive, profiler buffer, and queue access.
 ///
@@ -63,6 +65,27 @@ struct Runtime {
     int64_t peak_device_memory{0};
     int64_t peak_host_memory{0};
 
+    // ── Cancellation ────────────────────────────────────────────────
+    /// Device-visible cancellation flag (USM shared allocation).
+    /// The host sets this to 1 when it needs to abort in-flight kernel
+    /// work (pause/resize/switch); kernels check it in hot loops and
+    /// bail out early.  Reset to 0 at the start of each frame.
+    /// Null when uninitialised.
+    ///
+    /// Plain int, NOT std::atomic: the pointer lives in USM shared
+    /// memory, and std::atomic operations are not supported in device
+    /// code on the CUDA backend.  Host and device both use the
+    /// __atomic_* GCC/Clang builtins for relaxed access.
+    int *cancel_flag = nullptr;
+
+    /// True when the host has requested cancellation of the current
+    /// frame.  Safe to call from device code (uses __atomic_load_n
+    /// with relaxed ordering).
+    bool cancelled() const {
+        return cancel_flag &&
+               __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0;
+    }
+
     // ── Pixel iteration ──────────────────────────────────────────────
     // ENQUEUE-ONLY: in SYCL mode this submits the parallel_for to the
     // (in-order) queue and returns immediately — the host chains further
@@ -82,24 +105,32 @@ struct Runtime {
     // GPU MMU fault (Xid 31) when switching e.g. mandelbrot <-> cyber_fuji.
     template <typename KernelName, typename Fn>
     void foreach_pixel(int width, int height, Fn &&fn) const {
-        PROFILER_ZONE("foreach_pixel");
 #ifdef KERNEL_NATIVE
-        for (int y = 0; y < height; ++y)
+        for (int y = 0; y < height; ++y) {
+            if (__builtin_expect(cancelled(), 0)) break;
             for (int x = 0; x < width; ++x)
                 fn(x, y, y * width + x);
+        }
 #else
         if (queue) {
             auto pixel_fn = std::forward<Fn>(fn);
+            auto *cf = cancel_flag;
             queue->parallel_for<KernelName>(
                 sycl::range<2>{(size_t)height, (size_t)width},
-                [pixel_fn, width](sycl::item<2> item) {
+                [pixel_fn, width, cf](sycl::item<2> item) {
+                    if (__builtin_expect(cf &&
+                            __atomic_load_n(cf, __ATOMIC_RELAXED) != 0, 0))
+                        return;
                     int x = item[1], y = item[0];
                     pixel_fn(x, y, y * width + x);
                 });
+            queue->wait();
         } else {
-            for (int y = 0; y < height; ++y)
+            for (int y = 0; y < height; ++y) {
+                if (__builtin_expect(cancelled(), 0)) break;
                 for (int x = 0; x < width; ++x)
                     fn(x, y, y * width + x);
+            }
         }
 #endif
     }
@@ -185,8 +216,6 @@ struct Runtime {
         delete[] ptr;
     }
 
-    void event(const char *msg) const { PROFILER_MSG(msg); }
-
     // ── Transfers ────────────────────────────────────────────────────
 
     void copy_to_device(void *dst, const void *src, size_t bytes) {
@@ -210,6 +239,41 @@ struct Runtime {
         std::memset(ptr, val, bytes);
     }
 
+    // ── Generic buffers ────────────────────────────────────────────
+    // One-shot input/output buffers for kernels: upload a host array
+    // (texture data, lookup tables, LUTs) as a device buffer, or
+    // allocate an output buffer for per-pixel results.  The returned
+    // rt::Buffer<T> OWNS the memory and frees it through this Runtime
+    // on destruction — never dealloc() it manually.
+
+    /// Allocate a device (heap in software mode) buffer and copy the
+    /// host data into it.  Returns an empty buffer when count is 0.
+    template <typename T>
+    Buffer<T> make_input(const T *host_data, size_t count) {
+        if (count == 0) return {};
+        T *ptr = alloc_device<T>(count);
+        copy_to_device(ptr, host_data, count * sizeof(T));
+        return Buffer<T>(this, ptr, count);
+    }
+
+    /// Allocate a zero-initialized output buffer.  Returns an empty
+    /// buffer when count is 0.
+    template <typename T>
+    Buffer<T> make_output(size_t count) {
+        if (count == 0) return {};
+        T *ptr = alloc_device<T>(count);
+        fill(ptr, 0, count * sizeof(T));
+        return Buffer<T>(this, ptr, count);
+    }
+
+    /// Copy a buffer back to host memory (synchronous).  No-op when the
+    /// buffer is empty.
+    template <typename T>
+    void read_back(const Buffer<T> &buffer, T *dst) const {
+        if (!buffer.data) return;
+        copy_to_host(dst, buffer.data, buffer.count * sizeof(T));
+    }
+
     std::string device_name() const {
 #ifndef KERNEL_NATIVE
         if (queue) return queue->get_device().get_info<sycl::info::device::name>();
@@ -222,6 +286,66 @@ struct Runtime {
     /// Kernels can install it via set_profiler_buffer() for Tracy-style
     /// GPU device-side profiling zones.
     void *profiler_buffer = nullptr;
+};
+
+/// Owning device (or heap, in software mode) buffer allocated through a
+/// rt::Runtime via make_input() / make_output().  Frees its memory back
+/// to the Runtime on destruction.  Move-only — copy ownership is
+/// meaningless for a raw device pointer.
+///
+/// Usage in a kernel:
+/// @code
+///   auto palette = rt->make_input<float3>(host_colors, num_colors);
+///   ...
+///   // palette.data is a device pointer, usable inside parallel_for
+///   // lambdas (captured by value); the buffer frees itself on scope
+///   // exit, or can be released early with release().
+/// @endcode
+template <typename T>
+struct Buffer {
+    Runtime *runtime = nullptr;
+    T *data = nullptr;
+    size_t count = 0;
+
+    Buffer() = default;
+    Buffer(Runtime *rt, T *ptr, size_t n) : runtime(rt), data(ptr), count(n) {}
+
+    Buffer(const Buffer &) = delete;
+    Buffer &operator=(const Buffer &) = delete;
+
+    Buffer(Buffer &&other) noexcept
+        : runtime(other.runtime), data(other.data), count(other.count) {
+        other.runtime = nullptr;
+        other.data = nullptr;
+        other.count = 0;
+    }
+    Buffer &operator=(Buffer &&other) noexcept {
+        if (this != &other) {
+            release();
+            runtime = other.runtime;
+            data = other.data;
+            count = other.count;
+            other.runtime = nullptr;
+            other.data = nullptr;
+            other.count = 0;
+        }
+        return *this;
+    }
+
+    ~Buffer() { release(); }
+
+    T &operator[](size_t index) { return data[index]; }
+    const T &operator[](size_t index) const { return data[index]; }
+
+    explicit operator bool() const { return data != nullptr; }
+
+    /// Return the memory to the Runtime and reset to empty.
+    void release() {
+        if (runtime && data) runtime->dealloc(data);
+        runtime = nullptr;
+        data = nullptr;
+        count = 0;
+    }
 };
 
 } // namespace rt

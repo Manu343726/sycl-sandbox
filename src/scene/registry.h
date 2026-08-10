@@ -8,6 +8,12 @@ struct SceneDef {
     std::string name;
     std::string kernel;                     // which .so to load
     std::string yaml_path;
+    /// Progressive sample target for this kernel (1 = animated,
+    /// single-frame).  Kernel metadata lives in the scene data — the
+    /// kernel binary itself declares nothing.
+    int max_spp = 1;
+    /// Whether the kernel consumes a host-built YAML scene (ctx->scene).
+    bool uses_scene = true;
     std::vector<float> param_overrides;     // indexed by param buffer_offset
     bool has_overrides = false;
 };

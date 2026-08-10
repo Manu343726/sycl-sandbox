@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <regex>
 #include <sstream>
+#include <pthread.h>
 
 // ── Constructor / Destructor ──────────────────────────────────────────
 
@@ -220,6 +221,7 @@ static float parse_and_log_build_line(const std::string &kernel_name,
 
 void KernelBuildSystem::build_thread_fn(const std::string &kernel_name,
                                          std::shared_ptr<std::atomic<bool>> cancel_flag) {
+    pthread_setname_np(pthread_self(), "sycl-build");
     PROFILER_FUNCTION();
 
     // Use the KernelLibrary to determine the CMake target name

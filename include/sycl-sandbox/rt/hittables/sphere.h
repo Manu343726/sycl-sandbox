@@ -1,10 +1,10 @@
 #pragma once
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
+#include <sycl-sandbox/rt/aabb.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/optional.h>
 #include <sycl-sandbox/math.h>
-#include <sycl-sandbox/profiler.h>
 
 namespace rt::hittables {
 
@@ -24,7 +24,14 @@ public:
     }
 
     /// Ray-sphere intersection using the reduced quadratic formula.
-    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max) const {
+    ///
+    /// \param ctx per-call kernel context: records a "hit_sphere"
+    ///        profiler zone (decimated by work-item id) and reports the
+    ///        hit test to the trace collector.
+    optional<HitRecord> hit(const Ray &ray, float t_min, float t_max,
+                            const Context &ctx = Context{}) const {
+        PROFILER_FUNCTION();
+        ctx.collector.on_hit_test(HittableType::Sphere, ray, t_min, t_max);
         // Compute the vector from the sphere centre to the ray origin
         float3 oc = sub(ray.orig, center);
 

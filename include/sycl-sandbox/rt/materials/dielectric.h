@@ -1,10 +1,9 @@
 #pragma once
-#include <sycl-sandbox/profiler.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/rt/types_fwd.h>
 #include <sycl-sandbox/rt/helpers.h>
 #include <sycl-sandbox/optional.h>
-#include <sycl-sandbox/profiler.h>
 
 namespace rt::materials {
 
@@ -18,7 +17,10 @@ public:
 
     /// Refract or reflect the incoming ray using Snell's law + Schlick Fresnel.
     optional<ScatterRecord>
-    scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng) const {
+    scatter(const Ray &incoming_ray, const HitRecord &hit, RNG &rng,
+            const Context &ctx = Context{}) const {
+        PROFILER_FUNCTION();
+        ctx.collector.on_scatter(MaterialType::Dielectric, incoming_ray, hit);
         if ( hit.is_portal ) {
             return portal_scatter(incoming_ray, hit);
         }
@@ -51,7 +53,7 @@ public:
         }
     }
 
-    float3 emit(const HitRecord &) const {
+    float3 emit(const HitRecord &, const Context & = Context{}) const {
         return {0, 0, 0};
     }
 };

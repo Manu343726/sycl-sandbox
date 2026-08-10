@@ -2,20 +2,8 @@ if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif()
 
-# ---- args (header-only CLI parser) ----
-include(FetchContent)
-FetchContent_Declare(args
-    GIT_REPOSITORY  https://github.com/Taywee/args
-    GIT_TAG         master
-    GIT_SHALLOW     TRUE
-    SOURCE_SUBDIR   NONE
-)
-FetchContent_GetProperties(args)
-if(NOT args_POPULATED)
-    FetchContent_Populate(args)
-endif()
-add_library(args INTERFACE)
-target_include_directories(args INTERFACE "${args_SOURCE_DIR}")
+# ---- argparse (p-ranav, header-only CLI parser with subcommands) ----
+find_package(argparse CONFIG REQUIRED)
 
 # ---- ImGui core + backends (with Docking support) ----
 include(FetchContent)
@@ -132,6 +120,19 @@ target_compile_definitions(imgui_test_engine PRIVATE
     IMGUI_TEST_ENGINE_ENABLE_COROUTINE_STDTHREAD_IMPL=1
 )
 target_link_libraries(imgui_test_engine PUBLIC imgui_core)
+
+# ---- stb (header-only image/write helpers for diagnostics) ----
+include(FetchContent)
+FetchContent_Declare(stb
+    GIT_REPOSITORY  https://github.com/nothings/stb.git
+    GIT_TAG         master
+    GIT_SHALLOW     TRUE
+    SOURCE_SUBDIR   NONE
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
 
 # ---- clangd config generator ------------------------------------------
 # Generates ${CMAKE_SOURCE_DIR}/.clangd from the sycl-sandbox target's resolved
@@ -326,9 +327,11 @@ endfunction()
 # same split the hot-reloadable kernel .so's use.
 add_library(sandbox_tonemap SHARED render/tonemap_kernel.cpp)
 add_sycl_to_target(TARGET sandbox_tonemap SOURCES render/tonemap_kernel.cpp)
+    target_compile_definitions(sandbox_tonemap PRIVATE SANDBOX_ENABLE_TRACY)
 target_include_directories(sandbox_tonemap PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${tracy_SOURCE_DIR}/public
 )
 
 # ---- sycl-sandbox executable (with integrated test engine) ----
@@ -342,11 +345,30 @@ add_executable(sycl-sandbox
     scene/loader.cpp
     ui/params/controls.cpp
     ui/scene_debug/panel.cpp
+    ui/scene_debug/renderer.cpp
     ui/metrics/system_metrics.cpp
     display/factory.cpp
     display/cuda_api.cpp
     display/cuda_gl_target.cpp
+    diags/diags.cpp
+    diags/scene_diag.cpp
+    diags/stl_diag.cpp
+    diags/loader_diag.cpp
+    diags/bvh_diag.cpp
+    diags/mesh_diag.cpp
+    diags/gpu_diag.cpp
+    diags/sycl_diag.cpp
+    diags/camera_diag.cpp
+    diags/stl_viz_diag.cpp
 )
+
+if(SANDBOX_ENABLE_TRACY)
+    target_sources(sycl-sandbox PRIVATE
+        tracy/tracy_bridge.cpp
+        tracy/tracy_launcher.cpp
+    )
+    target_compile_definitions(sycl-sandbox PRIVATE SANDBOX_ENABLE_TRACY)
+endif()
 
 target_compile_options(sycl-sandbox PRIVATE -Werror -Wno-c99-designator)
 
@@ -354,6 +376,7 @@ target_include_directories(sycl-sandbox PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${imguizmo_SOURCE_DIR}/src
+    ${stb_SOURCE_DIR}
 )
 
 find_package(spdlog REQUIRED)
@@ -365,7 +388,7 @@ target_link_libraries(sycl-sandbox PRIVATE
     imgui_helper
     imguizmo
     implot3d
-    args
+    argparse::argparse
     glfw
     glm::glm-header-only
     yaml-cpp::yaml-cpp
@@ -374,6 +397,12 @@ target_link_libraries(sycl-sandbox PRIVATE
     ${CMAKE_DL_LIBS}
     imgui_test_engine
 )
+
+if(SANDBOX_ENABLE_TRACY)
+    target_link_libraries(sycl-sandbox PRIVATE
+        TracyClient
+    )
+endif()
 
 # Generate .clangd config from the fully-resolved sycl-sandbox target properties
 generate_clangd_config(sycl-sandbox)

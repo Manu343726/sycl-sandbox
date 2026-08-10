@@ -2,11 +2,9 @@
 
 #include "app_state.h"
 #include "render_loop.h"
-#include "scene/host_scene.h"
 #include "ui/controls/panel.h"
 #include "ui/viewport/panel.h"
 #include "ui/scene_debug/panel.h"
-#include "ui/profiler/panel.h"
 #include "ui/build_monitor/panel.h"
 #include "io/log_sink.h"
 
@@ -40,7 +38,6 @@ void handle_kernel_rebuild(AppState &state) {
     std::string reloaded = state.kr->poll_hot_reload(
         [&state] { state.pause_pipeline(); });
     if (!reloaded.empty()) {
-        state.kernel_profiler.clear_data();
         state.current_spp = 0;
         state.tick.store(0);
         state.scene_start_time = std::chrono::steady_clock::now();
@@ -71,6 +68,7 @@ void render_ui(AppState &state) {
     PROFILER_ZONE("ImGui frame");
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+
     ImGui::NewFrame();
 
     // Full-window dockspace (always-on background)
@@ -100,38 +98,64 @@ void render_ui(AppState &state) {
     // Viewport panel
     render_viewport_panel(state);
 
-    // Scene debug view
+    // Scene debug view — the window (ImGui + presented texture) is
+    // managed by the panel; the 3D rendering happens on the background
+    // debug thread from a host copy of the scene (read-only).
     {
         static DebugViewFlags debug_flags;
         if (state.kr) {
-            const SceneDebugInfo *dbg = state.kr->scene_debug_fn()
-                ? state.kr->scene_debug_fn()() : nullptr;
-            ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Scene Debug")) {
-                render_scene_debug(dbg,
-                                   state.camera_eye.ptr(),
-                                   state.camera_at.ptr(),
-                                   state.camera_up.ptr(),
-                                   state.fov.valid() ? state.fov.as_float() : 45.f,
-                                   (float)state.width / (float)state.height,
-                                   debug_flags);
+            // Render parameters mirrored from the kernel: the debug ray
+            // is traced with the same background / max_bounces /
+            // transparent_backfaces the kernel uses, and overlay
+            // colours are displayed with the same tone-map + gamma as
+            // the framebuffer.
+            SceneRenderParams render;
+            if (auto *desc = state.kr->scene_desc()) {
+                auto ref = desc->find_param_ref("background");
+                if (ref.valid()) ref.as_vec3(render.background);
+                ref = desc->find_param_ref("max_bounces");
+                if (ref.valid()) render.max_bounces = ref.as_int();
+                ref = desc->find_param_ref("transparent_backfaces");
+                if (ref.valid())
+                    render.transparent_backfaces = ref.as_bool();
+                ref = desc->find_param_ref("tonemap_enabled");
+                if (ref.valid()) render.tonemap_enabled = ref.as_bool();
+                ref = desc->find_param_ref("tonemap_operator");
+                if (ref.valid()) render.tonemap_operator = ref.as_int();
+                ref = desc->find_param_ref("tonemap_exposure");
+                if (ref.valid()) render.tonemap_exposure = ref.as_float();
+                ref = desc->find_param_ref("tonemap_gamma");
+                if (ref.valid()) render.tonemap_gamma = ref.as_float();
             }
-            ImGui::End();
+            render_scene_debug(&state.kr->host_scene(),
+                               state.camera_eye.ptr(),
+                               state.camera_at.ptr(),
+                               state.camera_up.ptr(),
+                               state.fov.valid() ? state.fov.as_float() : 45.f,
+                               (float)state.width / (float)state.height,
+                               state.width,
+                               state.height,
+                               render,
+                               debug_flags);
+
+            if (debug_apply_scene_camera(
+                    const_cast<float *>(state.camera_eye.ptr()),
+                    const_cast<float *>(state.camera_at.ptr()),
+                    const_cast<float *>(state.camera_up.ptr()))) {
+                auto *desc = state.kr->scene_desc();
+                if (desc) {
+                    state.param_store.publish(desc->current_buffer.data(),
+                                              desc->buffer_size(),
+                                              /*restart_accum=*/true);
+                    state.current_spp = 0;
+                }
+            }
         }
     }
 
     // Log viewer
     if (state.show_logs) {
         state.log_sink->draw_imgui("Logs", &state.show_logs);
-    }
-
-    // Kernel profiler
-    if (state.show_profiler) {
-        ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Kernel Profiler", &state.show_profiler)) {
-            render_profiler_panel(state.kernel_profiler);
-        }
-        ImGui::End();
     }
 
     // Build monitor
@@ -178,12 +202,34 @@ void upload_display(AppState &state) {
 // Runs the entire main loop until the window is closed.
 inline void frame_loop(AppState &state) {
     while (!glfwWindowShouldClose(state.window)) {
+        auto ui_t0 = std::chrono::steady_clock::now();
         poll_events(state);
+        auto t1 = std::chrono::steady_clock::now();
         handle_kernel_rebuild(state);
+        auto t2 = std::chrono::steady_clock::now();
         update_frame_stats(state);
+        auto t3 = std::chrono::steady_clock::now();
         render_ui(state);
+        auto t4 = std::chrono::steady_clock::now();
         upload_display(state);
+        auto t5 = std::chrono::steady_clock::now();
         composite_frame(state);
+        auto t6 = std::chrono::steady_clock::now();
+
+        state.ui_frame_time_ms.store(
+            std::chrono::duration<double, std::milli>(t6 - ui_t0).count());
+        state.ui_poll_events_ms.store(
+            std::chrono::duration<double, std::milli>(t1 - ui_t0).count());
+        state.ui_rebuild_ms.store(
+            std::chrono::duration<double, std::milli>(t2 - t1).count());
+        state.ui_stats_ms.store(
+            std::chrono::duration<double, std::milli>(t3 - t2).count());
+        state.ui_imgui_ms.store(
+            std::chrono::duration<double, std::milli>(t4 - t3).count());
+        state.ui_upload_ms.store(
+            std::chrono::duration<double, std::milli>(t5 - t4).count());
+        state.ui_composite_ms.store(
+            std::chrono::duration<double, std::milli>(t6 - t5).count());
     }
 }
 
@@ -205,7 +251,7 @@ inline void shutdown_sandbox(AppState &state) {
         state.display_target->destroy();
         state.display_target.reset();
     }
-    state.kernel_profiler.free_device_ring();
+    state.free_profiler_buffers();
 
     // KernelRuntime destructor handles all kernel/device resource cleanup
     state.kr.reset();
@@ -216,6 +262,11 @@ inline void shutdown_sandbox(AppState &state) {
         ImGuiTestEngine_DestroyContext(g_test_engine);
         g_test_engine = nullptr;
     }
+
+    // Tracy profiler: stop the bridge (render thread already joined).
+    // The standalone tracy-profiler process (if running) is independent
+    // of the sandbox and keeps running.
+    state.tracy_bridge.shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

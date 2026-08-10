@@ -10,6 +10,7 @@
 /// grid of charts.
 
 #include <sycl-sandbox/colorchecker.h>
+#include <sycl-sandbox/context.h>
 #include <sycl-sandbox/rt/math.h>
 #include <sycl-sandbox/math.h>
 
@@ -37,9 +38,12 @@ struct ColorChecker {
     /// Sample the chart at (u, v); out-of-range UVs wrap around, so the
     /// chart repeats forever in both directions.  `time` and `rng` are
     /// ignored (the chart is deterministic).
-    float3 sample(float u, float v, float time, RNG &rng) const {
+    float3 sample(float u, float v, float time, RNG &rng,
+                  const Context &ctx = Context{}) const {
         (void)time;
         (void)rng;
+        PROFILER_ZONE("sample_colorchecker");
+        ctx.collector.on_texture_sample(1);
         // Wrap (u, v) to [0,1) per axis — floor handles negatives too,
         // so on UV overflow the chart just continues.
         u = u * scale_u - math::floor(u * scale_u);

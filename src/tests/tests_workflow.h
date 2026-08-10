@@ -17,7 +17,6 @@ inline void RegisterWorkflowTests(ImGuiTestEngine* e, AppState* state) {
         AppState* s = g_test_state;
         s->show_builds = false;
         s->show_logs = false;
-        s->show_profiler = false;
         s->show_metrics = false;
         ctx->Yield();
         ctx->SetRef("Controls");
@@ -27,17 +26,12 @@ inline void RegisterWorkflowTests(ImGuiTestEngine* e, AppState* state) {
         ctx->ItemClick("Show Logs");
         ctx->Yield();
         IM_CHECK(s->show_logs);
-        ctx->ItemClick("Show Profiler");
-        ctx->Yield();
-        IM_CHECK(s->show_profiler);
         ctx->ItemClick("Show System Metrics");
         ctx->Yield();
         IM_CHECK(s->show_metrics);
         ctx->SetRef("Build Monitor");
         IM_CHECK(true);
         ctx->SetRef("Logs");
-        IM_CHECK(true);
-        ctx->SetRef("Kernel Profiler");
         IM_CHECK(true);
         ctx->SetRef("System Metrics");
         IM_CHECK(true);
@@ -48,7 +42,6 @@ inline void RegisterWorkflowTests(ImGuiTestEngine* e, AppState* state) {
         AppState* s = g_test_state;
         s->show_builds = true;
         s->show_logs = true;
-        s->show_profiler = true;
         s->show_metrics = true;
         ctx->Yield();
         ctx->SetRef("Controls");
@@ -58,9 +51,6 @@ inline void RegisterWorkflowTests(ImGuiTestEngine* e, AppState* state) {
         ctx->ItemClick("Show Logs");
         ctx->Yield();
         IM_CHECK(!s->show_logs);
-        ctx->ItemClick("Show Profiler");
-        ctx->Yield();
-        IM_CHECK(!s->show_profiler);
         ctx->ItemClick("Show System Metrics");
         ctx->Yield();
         IM_CHECK(!s->show_metrics);
