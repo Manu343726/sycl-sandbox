@@ -108,24 +108,83 @@ std::unordered_set<std::string> SourceWatcher::resolve_dependencies(
 
     std::unordered_set<std::string> resolved;
 
-    // Look for compiler-generated .d files in:
-    //   <build_dir>/CMakeFiles/<target>.dir/
-    fs::path dep_dir = fs::path(build_dir_) / "CMakeFiles" / (build_target + ".dir");
+    // CMake nests target .dir directories according to where the
+    // target's add_library() lives in the source tree (e.g. a kernel
+    // defined in kernels/CMakeLists.txt lands in
+    // <build_dir>/kernels/CMakeFiles/<target>.dir, NOT the flat
+    // <build_dir>/CMakeFiles/<target>.dir).  Rather than guess the
+    // nesting, ask CMake: it writes an index file
+    //   <build_dir>/CMakeFiles/TargetDirectories.txt
+    // with one absolute .dir path per line for every configured target.
+    // We match the line ending in "/<target>.dir" (end-of-line match so
+    // "raytracer" doesn't also catch "raytracer_native").
+    fs::path dep_dir;
+    {
+        fs::path index = fs::path(build_dir_) / "CMakeFiles" /
+                             "TargetDirectories.txt";
+        std::ifstream f(index);
+        if (f) {
+            const std::string needle = "/" + build_target + ".dir";
+            std::string line;
+            while (std::getline(f, line)) {
+                // Strip trailing CR/spaces (TargetDirectories.txt is
+                // newline-terminated; be tolerant of CRLF on shared
+                // filesystems).
+                while (!line.empty() && (line.back() == '\r' ||
+                                         line.back() == ' ')) {
+                    line.pop_back();
+                }
+                if (line.size() >= needle.size() &&
+                    line.compare(line.size() - needle.size(),
+                                 needle.size(), needle) == 0) {
+                    if (fs::is_directory(line)) dep_dir = line;
+                    break;
+                }
+            }
+        }
+    }
+    // Fallback to the legacy flat layout (targets defined in the
+    // top-level CMakeLists still live directly off <build>/CMakeFiles).
+    if (dep_dir.empty()) dep_dir = fs::path(build_dir_) / "CMakeFiles" /
+                                       (build_target + ".dir");
+
     if (!fs::is_directory(dep_dir)) {
         spdlog::debug("[watcher] no dep directory '{}' for '{}'",
                      dep_dir.string(), kernel_name);
         return resolved;
     }
 
-    for (auto &entry : fs::directory_iterator(dep_dir)) {
-        if (entry.path().extension() != ".d") continue;
+    uint32_t dep_count = 0, project_count = 0;
+    // The dep files may live either as nested per-object .d files
+    // (<target>.dir/<src>/kernel.cpp.o.d — older/Makefile layout) or as
+    // CMake's aggregated compiler_depend.make at the top of <target>.dir
+    // (modern CMake ≥3.20).  Both use the same "target: dep1 dep2 ..."
+    // syntax that parse_dep_file handles, so scan recursively and pick
+    // up either form (results are deduped by the unordered_set).
+    auto is_dep_file = [](const fs::path &p) {
+        return p.extension() == ".d" ||
+               p.filename() == "compiler_depend.make";
+    };
+    for (auto &entry : fs::recursive_directory_iterator(dep_dir)) {
+        if (!entry.is_regular_file()) continue;
+        if (!is_dep_file(entry.path())) continue;
 
         auto deps = parse_dep_file(entry.path());
+        dep_count += (uint32_t)deps.size();
         for (auto &d : deps) {
             if (is_project_file(d)) {
+                ++project_count;
                 resolved.insert(d);
             }
         }
+    }
+    // Only surface the parse breakdown when something looks wrong (zero
+    // deps resolved despite a populated dep_dir) — the per-kernel
+    // "watching N files" log covers the healthy case without spamming
+    // the 5s re-scan.
+    if (project_count == 0 && dep_count == 0) {
+        spdlog::warn("[watcher] '{}': no deps parsed from .d/.make files in {}",
+                     kernel_name, dep_dir.string());
     }
 
     // Always include the kernel's own source directory as a fallback.

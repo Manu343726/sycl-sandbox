@@ -63,10 +63,8 @@ struct DeviceRing {
     DeviceRingHeader *header = nullptr;
     DeviceRecord *records = nullptr;
     uint32_t capacity = 0;
-    uint32_t sample_interval = 1;
 
     bool active() const { return header && records; }
-    bool want(uint32_t lid) const { return active() && (sample_interval <= 1 || lid % sample_interval == 0); }
 
     static uint64_t timestamp() {
 #if defined(__has_builtin) && __has_builtin(__builtin_readcyclecounter)
@@ -112,12 +110,12 @@ struct DeviceRing {
 class DeviceZone {
 public:
     DeviceZone(const DeviceRing &ring, uint32_t zid, uint32_t lid)
-        : ring_(ring), zid_(zid), on_(ring.want(lid)) {
-        if (on_) ring_.push(zid_, DEV_ZONE_ENTER, lid);
+        : ring_(ring), zid_(zid) {
+        ring_.push(zid_, DEV_ZONE_ENTER, lid);
     }
-    ~DeviceZone() { if (on_) ring_.push(zid_, DEV_ZONE_EXIT, 0); }
+    ~DeviceZone() { ring_.push(zid_, DEV_ZONE_EXIT, 0); }
 private:
-    DeviceRing ring_; uint32_t zid_; bool on_;
+    DeviceRing ring_; uint32_t zid_;
 };
 
 inline uint64_t read_timestamp() { return DeviceRing::timestamp(); }

@@ -12,11 +12,12 @@
 /// directory per kernel, this version discovers all source dependencies
 /// — including headers — by parsing the compiler-generated .d dependency
 /// files that CMake/Make/Ninja produce during the build
-/// (e.g. build/CMakeFiles/<target>.dir/kernel.cpp.d).
+/// (e.g. <build>/<subdir>/CMakeFiles/<target>.dir/<src>.cpp.o.d).
 ///
-/// Dependencies are resolved from the build directory's CMakeFiles
-/// structure so we accurately track every file that influences the
-/// kernel binary — without hard-coding include paths.
+/// The target's .dir directory is located through CMake's
+/// TargetDirectories.txt index (CMake nests it according to the
+/// add_library() source location), so dependencies are tracked
+/// regardless of where the kernel target is defined.
 ///
 /// Files outside the project root are ignored so system/Conan headers
 /// don't trigger rebuilds.

@@ -51,15 +51,20 @@ bool KernelLibrary::is_up_to_date(const std::string &kernel_name) const {
 
     auto so_time = fs::last_write_time(so);
 
-    // Check the CMakeFiles/<target>.dir/ for dependency (.d) files.
-    // The compiler generates .d files listing all headers included
-    // during compilation.  We compare the .so timestamp against each
-    // dependency listed in those files.
-    //
-    // Kernel targets build in a CMake subdirectory, so their dependency
-    // files live under <build_dir>/kernels/CMakeFiles/<target>.dir/.
-    // Probe both that location and the top-level one.
+    // Check the CMakeFiles/<target>.dir/ for dependency files.  The
+    // compiler emits either per-object .d files
+    // (<target>.dir/<src>/kernel.cpp.o.d — older Makefile layout) or
+    // CMake's aggregated compiler_depend.make (modern CMake ≥3.20); both
+    // use the "target: dep1 dep2 ..." syntax.  Scan recursively and pick
+    // up either form.  Kernel targets build in a CMake subdirectory, so
+    // their .dir lives under <build_dir>/kernels/CMakeFiles/<target>.dir/;
+    // probe that and the top-level location as a fallback.
     std::string target = kernel_name + native_suffix_;
+
+    auto is_dep_file = [](const fs::path &p) {
+        return p.extension() == ".d" ||
+               p.filename() == "compiler_depend.make";
+    };
 
     bool deps_checked = false;
     std::vector<fs::path> candidates = {
@@ -68,15 +73,16 @@ bool KernelLibrary::is_up_to_date(const std::string &kernel_name) const {
     };
     for (const fs::path &dep_root : candidates) {
         if (!fs::is_directory(dep_root)) continue;
-        // .d files may be nested (e.g. <target>.dir/<target>/kernel.cpp.o.d),
+        // Dep files may be nested (e.g. <target>.dir/<src>/kernel.cpp.o.d),
         // so scan recursively.
         for (auto &entry : fs::recursive_directory_iterator(dep_root)) {
             if (!entry.is_regular_file()) continue;
-            if (entry.path().extension() == ".d") {
+            if (!is_dep_file(entry.path())) continue;
+            {
                 deps_checked = true;
                 std::ifstream dep_file(entry.path());
                 std::string line;
-                // .d files have the format: target.o: dep1 dep2 ...
+                // Dep files have the format: target.o: dep1 dep2 ...
                 // Skip the first token (target.o:) then check each dependency.
                 while (std::getline(dep_file, line)) {
                     // Handle continuation lines (backslash-terminated)
@@ -204,7 +210,10 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
     }
 
     // Resolve the single entry point (kernel ABI: one function, no ops)
-    if ( !resolve_kernel_entry(handle) ) {
+    // and cache it on the handle so the per-frame dispatch path reuses
+    // this dlsym result instead of re-resolving every frame.
+    auto entry_sym = resolve_kernel_entry(handle);
+    if ( !entry_sym ) {
         spdlog::error("[kernel] kernel_entry not found in {}", ver_so.string());
         dlclose(handle);
         return active_.count(kernel_name) ? active_[kernel_name] : nullptr;
@@ -231,6 +240,7 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
         kh->path = ver_so.string();
         kh->generation = gen;
         kh->handle = handle;
+        kh->entry = reinterpret_cast<void*>(entry_sym);
         kh->src_mtime = so_time;
         auto *raw = kh.get();
         handles_[kernel_name] = std::move(kh);
@@ -244,6 +254,7 @@ KernelHandle *KernelLibrary::load(const std::string &kernel_name) {
         kh->path = ver_so.string();
         kh->generation = gen;
         kh->handle = handle;
+        kh->entry = reinterpret_cast<void*>(entry_sym);
         kh->src_mtime = so_time;
         active_[kernel_name] = kh.get();
         spdlog::info("[kernel] reloaded '{}' (gen {})", kernel_name, gen);

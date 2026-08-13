@@ -72,11 +72,6 @@ public:
     /// Does nothing if a build for that kernel is already running.
     void build_async(const std::string &kernel_name);
 
-    /// Build a kernel synchronously (blocks until complete).
-    /// Use for first-time builds or backend switches where the kernel
-    /// must be ready before proceeding.
-    BuildResult build_sync(const std::string &kernel_name);
-
     /// Cancel a running build (best-effort — sets a flag, thread cleans up).
     void cancel(const std::string &kernel_name);
 
@@ -127,12 +122,19 @@ private:
     struct ActiveBuild {
         std::thread                  thread;
         std::shared_ptr<std::atomic<bool>> cancel_flag;
+        /// Set by the build thread when its work is done (success or
+        /// failure).  `poll_results` reaps the entry once this is true;
+        /// without it, a naturally-completed build would stay in
+        /// `active_builds_` forever and `build_async` would keep refusing
+        /// rebuilds with "already building".
+        std::shared_ptr<std::atomic<bool>> done = std::make_shared<std::atomic<bool>>(false);
         std::string                  kernel_name;
     };
 
     // ── Build thread entry point ─────────────────────────────────────
     void build_thread_fn(const std::string &kernel_name,
-                         std::shared_ptr<std::atomic<bool>> cancel_flag);
+                         std::shared_ptr<std::atomic<bool>> cancel_flag,
+                         std::shared_ptr<std::atomic<bool>> done);
 
     // ── Progress parsing ─────────────────────────────────────────────
     /// Parse a line of build output and extract progress (0..1) if present.

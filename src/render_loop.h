@@ -82,6 +82,38 @@ inline void render_thread_func(AppState &state) {
     auto last_productive_end = last_end;
 
     while ( state.render_running.load() ) {
+        // ── Loop-top: UI commands + hot reload ──────────────────
+        // The device is idle here: the previous iteration's frame (if
+        // any) completed its tone-map wait before the loop returned to
+        // the top.  render_busy stays true through this whole window so
+        // the UI can tell "render thread busy applying an op / reloading"
+        // apart from "render thread idle in the gate".
+        state.render_busy.store(true);
+
+        // Deferred UI work (scene/backend switch, resize, re-init, ...)
+        state.drain_cmds();
+
+        // Source-watcher → background build → hot-reload.  Runs on the
+        // render thread: builds happen asynchronously in the background,
+        // and the reload is applied here at loop-top where no frame is in
+        // flight.  kernel_ready drops before the reload so the UI never
+        // reads descriptor-derived pointers (camera refs, ...) while the
+        // scene is being swapped in.
+        if ( state.kr ) {
+            std::string reloaded = state.kr->poll_hot_reload(
+                [&state] { state.kernel_ready.store(false); });
+            if ( !reloaded.empty() ) {
+                // Layout may have changed → the UI re-runs on_scene_changed
+                // for the new generation and then re-raises kernel_ready.
+                state.scene_generation.fetch_add(1);
+                state.current_spp.store(0);
+                state.tick.store(0);
+                state.scene_start_time.store(std::chrono::steady_clock::now());
+            }
+        }
+
+        state.render_busy.store(false);
+
         // ── Wait until kernel is fully initialized ───────────────
         if ( state.render_paused.load() || !state.kernel_ready.load() ) {
             if ( !wait_logged ) {
@@ -95,7 +127,7 @@ inline void render_thread_func(AppState &state) {
         }
         wait_logged = false;
 
-        // ── Frame scope: render_busy pairs with pause_pipeline() ─
+        // ── Frame scope: render_busy marks the render thread as busy ─
         state.render_busy.store(true);
         struct BusyClear {
             std::atomic<bool> &flag;
@@ -116,7 +148,7 @@ inline void render_thread_func(AppState &state) {
         {
             bool restart = false;
             if ( state.param_store.fetch(param_scratch, restart) ) {
-                auto *desc = state.kr->scene_desc();
+                auto desc = state.kr->scene_desc();
                 if ( desc && !param_scratch.empty() && state.kr->d_params() &&
                      param_scratch.size() == desc->buffer_size() ) {
                     std::memcpy(state.kr->d_params(), param_scratch.data(),
@@ -167,9 +199,10 @@ inline void render_thread_func(AppState &state) {
         float secs;
         {
             auto now = std::chrono::steady_clock::now();
-            secs = std::chrono::duration<float>(now - state.scene_start_time)
+            secs = std::chrono::duration<float>(
+                       now - state.scene_start_time.load())
                        .count();
-            auto *desc = state.kr->scene_desc();
+            auto desc = state.kr->scene_desc();
             if (desc) {
                 // find_param_ref() gives a type-safe accessor; the offset()
                 // is used to write into d_params, which only this thread touches.
@@ -189,7 +222,7 @@ inline void render_thread_func(AppState &state) {
 
         // ── Samples this frame (kernel honors the spp_frame param) ─
         uint32_t spp_frame = 1;
-        if ( auto *desc = state.kr->scene_desc() ) {
+        if ( auto desc = state.kr->scene_desc() ) {
             auto ref = desc->find_param_ref("spp_frame");
             if ( ref.valid() ) {
                 float v = *(float *)((char *)state.kr->d_params() + ref.offset());
@@ -204,7 +237,7 @@ inline void render_thread_func(AppState &state) {
         auto &krt = state.kr->runtime();
 
         sycl::queue *q = state.kr->queue_ptr();
-        int32_t w = state.width, h = state.height;
+        int32_t w = state.kr->width(), h = state.kr->height();
         size_t pixels = (size_t)w * h;
         profiler::DeviceRing ring = state.device_ring(pixels);
 
@@ -217,7 +250,7 @@ inline void render_thread_func(AppState &state) {
         // Params travel as a ParamLookup over the render-thread-owned
         // d_params buffer (tick/time/spp_frame are written there above).
         rt::ParamLookup lookup;
-        if ( auto *desc = state.kr->scene_desc() ) {
+        if ( auto desc = state.kr->scene_desc() ) {
             lookup.set_buffer(state.kr->d_params());
             lookup.set_entries(desc->lookup_entries.data(),
                                (int)desc->lookup_entries.size());
@@ -247,7 +280,9 @@ inline void render_thread_func(AppState &state) {
 
         ctx.output = staging;
         if (!ctx.output) ctx.output = krt.alloc_device<uint8_t>(pixels * 4);
-        call_kernel_entry(state.kr->kernel()->handle, ctx);
+        // Dispatch through the entry symbol cached at load() time —
+        // no dlsym lookup per frame.
+        call_kernel_entry(state.kr->kernel()->entry, ctx);
 
         auto k_t1 = std::chrono::steady_clock::now();
         state.kernel_time_ms.store(
@@ -280,8 +315,8 @@ inline void render_thread_func(AppState &state) {
         // Host overhead that only exists when profiler support was
         // compiled into the app (SANDBOX_ENABLE_PROFILER=ON): the device
         // ring → Tracy bridge submission.
-        state.tracy_bridge.submit_device_ring(state.d_ring_header_,
-                                              state.d_ring_records_,
+        state.tracy_bridge.submit_device_ring(state.d_ring_header_.data,
+                                              state.d_ring_records_.data,
                                               state.RING_CAPACITY,
                                               q, (int64_t)new_tick,
                                               host_t0, host_t1);

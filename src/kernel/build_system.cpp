@@ -62,13 +62,15 @@ void KernelBuildSystem::build_async(const std::string &kernel_name) {
     }
 
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
+    auto done = std::make_shared<std::atomic<bool>>(false);
     auto thread = std::thread(&KernelBuildSystem::build_thread_fn, this,
-                               kernel_name, cancel_flag);
+                               kernel_name, cancel_flag, done);
 
     std::lock_guard<std::mutex> lock(mtx_);
     auto build = std::make_unique<ActiveBuild>();
     build->thread = std::move(thread);
     build->cancel_flag = std::move(cancel_flag);
+    build->done = std::move(done);
     build->kernel_name = kernel_name;
     active_builds_.push_back(std::move(build));
 }
@@ -113,11 +115,21 @@ std::vector<BuildResult> KernelBuildSystem::poll_results() {
     // Join finished threads and move results
     std::lock_guard<std::mutex> lock(mtx_);
 
-    // Join completed threads
+    // Reap entries whose build thread has finished.  A build is finished
+    // when either:
+    //  - its `done` flag is set (natural completion: the thread ran to
+    //    the end of build_thread_fn and the RAII guard flipped it), or
+    //  - it was cancelled (cancel_flag set — preserved for the explicit
+    //    cancel path).
+    // Previously only cancelled builds were reaped, so a naturally-
+    // completed build stayed in active_builds_ forever and blocked
+    // subsequent rebuilds with "already building, skipping".
     for (auto it = active_builds_.begin(); it != active_builds_.end(); ) {
-        if ((*it)->cancel_flag->load()) {
+        const bool finished = (*it)->done->load(std::memory_order_acquire) ||
+                              (*it)->cancel_flag->load();
+        if (finished) {
             if ((*it)->thread.joinable()) {
-                (*it)->thread.detach(); // don't block
+                (*it)->thread.detach(); // don't block — thread already exited
             }
             it = active_builds_.erase(it);
         } else {
@@ -220,9 +232,20 @@ static float parse_and_log_build_line(const std::string &kernel_name,
 // ── Build thread function ─────────────────────────────────────────────
 
 void KernelBuildSystem::build_thread_fn(const std::string &kernel_name,
-                                         std::shared_ptr<std::atomic<bool>> cancel_flag) {
+                                          std::shared_ptr<std::atomic<bool>> cancel_flag,
+                                          std::shared_ptr<std::atomic<bool>> done) {
     pthread_setname_np(pthread_self(), "sycl-build");
     PROFILER_FUNCTION();
+
+    // RAII guard: flip the entry's `done` flag on every return path
+    // (natural completion, popen failure, or cancellation) so
+    // poll_results can reap this active_builds_ entry.  Without it the
+    // build would stay forever in active_builds_ and later build_async
+    // calls would refuse with "already building".
+    struct DoneGuard {
+        std::shared_ptr<std::atomic<bool>> done;
+        ~DoneGuard() { done->store(true, std::memory_order_release); }
+    } guard{done};
 
     // Use the KernelLibrary to determine the CMake target name
     std::string target = lib_.build_target_name(kernel_name);
@@ -365,51 +388,3 @@ void KernelBuildSystem::build_thread_fn(const std::string &kernel_name,
     }
 }
 
-// ── Sync build (returns result directly) ──────────────────────────────
-
-BuildResult KernelBuildSystem::build_sync(const std::string &kernel_name) {
-    PROFILER_FUNCTION();
-    spdlog::info("[build] sync build for '{}'", kernel_name);
-
-    // Cancel any existing build for this kernel
-    cancel(kernel_name);
-
-    // Run the build synchronously using the same thread function
-    auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
-
-    std::string target = lib_.build_target_name(kernel_name);
-    std::string cmd = "cmake --build " + build_dir_ + " --target " + target +
-                      " -- -j4 2>&1";
-
-    spdlog::info("[build] building target '{}' for kernel '{}'", target, kernel_name);
-
-    FILE *pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        spdlog::error("[build] popen failed for '{}'", kernel_name);
-        return {kernel_name, false, -1, "popen failed", 0.0f};
-    }
-
-    float peak_progress = 0.0f;
-    std::string full_log;
-    char line_buf[4096];
-    while (fgets(line_buf, sizeof(line_buf), pipe)) {
-        std::string line(line_buf);
-        if (!line.empty() && line.back() == '\n') line.pop_back();
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        full_log += line + "\n";
-
-        float p = parse_and_log_build_line(kernel_name, line);
-        if (p >= 0.0f) peak_progress = std::max(peak_progress, p);
-    }
-
-    int exit_code = pclose(pipe);
-    bool success = (exit_code == 0);
-
-    if (!success) {
-        spdlog::error("[build] '{}' FAILED (exit {})", kernel_name, exit_code);
-    } else {
-        spdlog::info("[build] '{}' sync build succeeded", kernel_name);
-    }
-
-    return {kernel_name, success, exit_code, std::move(full_log), peak_progress};
-}

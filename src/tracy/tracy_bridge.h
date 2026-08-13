@@ -28,9 +28,15 @@ public:
 #endif
     void frame_mark();
 private:
-    uint64_t srcloc_for(const std::string& name);
+    /// Allocates a compact srcloc for a GPU zone. The alloc-serial zone
+    /// begin API takes ownership and frees it after transmission, so a fresh
+    /// one must be created per emit (never cached/reused).
+    uint64_t make_srcloc(const std::string& name);
+    /// Stable plot-name pointer (Tracy keys plots by pointer identity; the
+    /// string must outlive the trace, so it is owned by plot_names_).
+    const char* plot_name_for(const std::string& name);
     std::mutex mtx_;
-    std::unordered_map<std::string, uint64_t> srclocs_;
+    std::unordered_map<std::string, uint64_t> plot_names_;
     uint16_t query_id_ = 0;
     int64_t previous_cpu_time_ = 0;
     bool initialized_ = false;

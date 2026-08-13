@@ -226,20 +226,28 @@ struct AppState {
     rt::Buffer<profiler::DeviceRingHeader> d_ring_header_;
     rt::Buffer<profiler::DeviceRecord> d_ring_records_;
     static constexpr uint32_t RING_CAPACITY = 256 * 1024;
-    static constexpr size_t   SAMPLED_ITEMS = 1024;
 
     void init_profiler_buffers(rt::Runtime *rt, sycl::queue *q) {
         free_profiler_buffers();
-        if (!q || !rt->pool) return;
-        // USM shared — the ring is written from device code (via
-        // sycl::atomic_ref) and read from host code (kernel .so
-        // KERNEL_BUILD path via sycl::atomic_ref).  Allocated through the
-        // KernelRuntime's pool so backend-switch teardown is uniform
-        // (release_all on the old queue frees them with the right queue).
+        if (!rt->pool) return;
+        // The device profiler ring. On every backend the storage lives at
+        // one address that is both writable from kernel code and readable
+        // from the app side:
+        //  - GPU / SYCL-CPU backend (q != nullptr): USM shared via
+        //    sycl::malloc_shared, written from parallel_for via
+        //    sycl::atomic_ref and read back by the Tracy bridge with
+        //    q->memcpy (ordered against in-flight device writes).
+        //  - Software backend (q == nullptr): plain host heap (the pool's
+        //    raw_alloc falls back to ::operator new + memset). The kernel
+        //    .so runs synchronously under OpenMP, so by the time
+        //    call_kernel_entry returns all atomic writes are visible to
+        //    the host; the bridge reads them with std::memcpy.
+        // Both go through alloc_shared so backend-switch teardown
+        // (release_all on the old queue / pool) is uniform.
         d_ring_header_ = rt->pool->alloc_shared<profiler::DeviceRingHeader>(
-            1, rt::MemScope::App);
+            1, ::rt::MemScope::App);
         d_ring_records_ = rt->pool->alloc_shared<profiler::DeviceRecord>(
-            RING_CAPACITY, rt::MemScope::App);
+            RING_CAPACITY, ::rt::MemScope::App);
         rt->fill(d_ring_header_.data, 0, sizeof(profiler::DeviceRingHeader));
     }
     void free_profiler_buffers() {
@@ -248,12 +256,11 @@ struct AppState {
     }
     profiler::DeviceRing device_ring(size_t work_items) const {
         if (!d_ring_header_.data) return {};
+        (void)work_items;
         profiler::DeviceRing ring;
         ring.header = d_ring_header_.data;
         ring.records = d_ring_records_.data;
         ring.capacity = RING_CAPACITY;
-        ring.sample_interval =
-            (uint32_t)std::max<size_t>(1, work_items / SAMPLED_ITEMS);
         return ring;
     }
 

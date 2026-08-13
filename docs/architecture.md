@@ -374,20 +374,40 @@ contract is trivially met.)
 
 ### Profiler buffer wiring
 
-The device profiler ring is a HOST-owned device buffer pair
-(`AppState::d_ring_header_` / `d_ring_records_`, capacity 256 K records).
-Each frame the render thread builds a `profiler::DeviceRing` POD handle
-over them (`AppState::device_ring(pixels)`, include/sycl-sandbox/profiler.h)
-and passes it to the kernel in `ctx.prof`.  Kernel-side `PROFILER_ZONE("name")`
-and `PROFILER_FUNCTION()` records sit in that ring; records carry only a
-32-bit FNV-1a zone hash + lane id (no strings on device), and an inactive
-ring (null header) makes every zone a no-op.  After the frame the host
-calls `Bridge::submit_device_ring()` to drain the ring into the Tracy
-client.
+The device profiler ring works on **every backend** (software / SYCL-CPU
+/ GPU).  It is a single-address buffer pair (`AppState::d_ring_header_` /
+`d_ring_records_`, capacity 256 K records) allocated through
+`MemoryPool::alloc_shared` with `MemScope::App`, so backend-switch
+teardown (`release_all`) frees it uniformly:
 
-There is no per-frame reset: the ring is a circular buffer — the host
-reads the window `[write_pos - capacity, write_pos)` after each frame,
-and the kernel just keeps pushing into it.
+- **GPU / SYCL-CPU** (`queue` non-null): `sycl::malloc_shared` USM —
+  one address writable from `parallel_for` (`sycl::atomic_ref`) and
+  readable from the host.
+- **Software** (`queue` null): the pool falls back to `::operator new` +
+  memset — plain host heap at one address.  The kernel `.so` runs
+  synchronously under OpenMP, so by the time `call_kernel_entry` returns
+  all atomic writes are visible to the host.
+
+Each frame the render thread builds a `profiler::DeviceRing` POD handle
+over the buffers (`AppState::device_ring(pixels)`,
+include/sycl-sandbox/profiler.h) and passes it to the kernel in
+`ctx.prof`.  Kernel-side `PROFILER_ZONE("name")` and
+`PROFILER_FUNCTION()` records sit in that ring; records carry only a
+32-bit FNV-1a zone hash + lane id (no strings on device), and an
+inactive ring (null header) makes every zone a no-op.  After the frame
+`Bridge::submit_device_ring()` drains the ring into the Tracy client:
+`q->memcpy` / `q->memset` for ordered SYCL readback, `std::memcpy` /
+`std::memset` for the software path.
+
+The ring is **reset every frame** (`write_pos` zeroed after drain), so
+within a frame the kernel writes into a fresh buffer but wraps around
+the capacity if it exceeds 256 K records.  When it wraps, mid-zone
+ENTER/(EXIT records are dropped, which yields unpaired zone endpoints in
+the trace; the bridge warns (`[tracy] N zone EXIT records had no
+matching ENTER`) when this happens.  Decimation
+(`AppState::SAMPLED_ITEMS = 1024`) limits how many work-items emit
+zones, but a complex scene still overflows — the capacity is a tuning
+knob if zone coverage needs to improve.
 
 ### Profiler compile-time toggle
 

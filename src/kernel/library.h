@@ -8,6 +8,12 @@
 
 struct KernelHandle {
     void*       handle     = nullptr;
+    /// Cached dlsym result for the kernel's single entry point
+    /// ("kernel_entry").  Resolved once in KernelLibrary::load() so the
+    /// per-frame dispatch path never calls dlsym again — render_loop.h
+    /// forwards this to call_kernel_entry(), which reinterpret_casts it
+    /// to the typed kernel_entry_fn.
+    void*       entry      = nullptr;
     int         generation = 0;
     std::string name;
     std::string path;

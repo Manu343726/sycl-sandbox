@@ -8,6 +8,7 @@
 #include <sycl-sandbox/rt/collector.h>
 
 #include <dlfcn.h>
+#include <cstdio>
 
 // ── Single-entry kernel dispatch ──────────────────────────────────────
 // ABI: every kernel .so exports exactly ONE function,
@@ -22,16 +23,36 @@
 using kernel_entry_fn = void (*)(const rt::Context *);
 
 /// Resolve the single kernel entry point.
+/// Called once at kernel load time (KernelLibrary::load()); the result
+/// is cached in KernelHandle::entry so the per-frame dispatch path
+/// never calls dlsym again.
 inline kernel_entry_fn resolve_kernel_entry(void *handle) {
     return reinterpret_cast<kernel_entry_fn>(dlsym(handle, "kernel_entry"));
 }
 
 /// Render one frame: forward the fully-populated context to the kernel.
-/// No-op when the kernel doesn't export the entry (old-ABI binary — the
-/// loader refuses those, so in practice this only happens in hand-rolled
-/// paths like the GPU diag).
-inline void call_kernel_entry(void *handle, const rt::Context &ctx) {
+/// `entry` is the cached dlsym result for the kernel's "kernel_entry"
+/// symbol (KernelHandle::entry), resolved once at load().  A null entry
+/// only happens in hand-rolled paths like the GPU diag — the loader
+/// refuses kernels that don't export the symbol.
+inline void call_kernel_entry(void *entry, const rt::Context &ctx) {
     PROFILER_FUNCTION();
-    auto *fn = resolve_kernel_entry(handle);
+    auto fn = reinterpret_cast<kernel_entry_fn>(entry);
     if ( fn ) fn(&ctx);
+
+    // Per-call Frame-scope enforcement: the kernel must leave no host-side
+    // allocations behind (no-state-between-calls contract).  Any leftover
+    // Frame-scoped buffer is self-healing-freed here; a nonzero count is a
+    // kernel bug reported through stderr in debug builds.
+    if ( ctx.runtime && ctx.runtime->pool ) {
+        size_t leaked = ctx.runtime->pool->check_frame_clean();
+#ifndef NDEBUG
+        if ( leaked ) {
+            std::fprintf(stderr,
+                         "[kernel] kernel_entry leaked %zu Frame-scope "
+                         "allocation(s); freed by the runtime\n",
+                         leaked);
+        }
+#endif
+    }
 }
