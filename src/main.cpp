@@ -216,8 +216,10 @@ int main(int argc, char **argv) {
     state.tex = state.display_target->texture();
     spdlog::info("[startup] display target: {}", state.display_target->name());
 
-    // ── Render buffers at the actual framebuffer size ────────────────
-    state.recreate_buffers(state.width, state.height);
+    // Render buffers are sized on the render thread: the first scene
+    // switch (below) carries the framebuffer size and apply_scene_switch
+    // allocates the accumulation buffer for it.  No synchronous sizing
+    // here → resize always flows through a render-thread apply_* entry.
 
     // ── Scene system ─────────────────────────────────────────────────
     spdlog::debug("[startup] loading scenes...");
@@ -248,28 +250,29 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    // Clear accumulator
-    state.kr->clear_accum();
-
-    // ── Auto-load first scene ─────────────────────────────────────────
-    spdlog::info("[startup] scenes loaded: {}", state.scenes->all().size());
-    if ( !state.scenes->all().empty() ) {
-        state.kr->switch_scene(state.scenes->all().front(),
-                                state.width, state.height);
-        state.current_spp = 0;
-        state.target_spp = state.kr->scene() ? state.kr->scene()->max_spp : 1;
-        state.tick.store(0);
-        state.scene_start_time = std::chrono::steady_clock::now();
-        state.on_scene_changed();
-        state.kernel_ready.store(true);
-        state.render_paused.store(false);
-    }
-
     // ── Start the render thread ──────────────────────────────────────
+    // The render thread owns ALL device work, including the initial scene
+    // and kernel load.  It starts before the first scene switch so the
+    // (potentially slow) first kernel build + load runs there too — the
+    // UI never blocks on it and renders a loading state until
+    // kernel_ready is raised.
     spdlog::debug("[render] thread starting");
     state.render_running.store(true);
     state.render_thread = std::thread(render_thread_func, std::ref(state));
     spdlog::info("[render] execution loop started on background thread");
+
+    // ── Auto-load first scene (deferred to the render thread) ────────
+    // Same deferred-op protocol as runtime scene switches: the command is
+    // applied on the render thread (build → dlopen → YAML parse → host-
+    // scene build), which then publishes the scene params (descriptor
+    // swap) and stat layout (PublishedStats seqlock) for the UI.  The UI
+    // re-runs on_scene_changed() for the new generation and only then
+    // re-raises kernel_ready.
+    spdlog::info("[startup] scenes loaded: {}", state.scenes->all().size());
+    if ( !state.scenes->all().empty() ) {
+        state.request_scene_switch(&state.scenes->all().front(),
+                                    state.width, state.height);
+    }
 
     // ---- Main loop (delegates to subsystem calls) ----
     frame_loop(state);

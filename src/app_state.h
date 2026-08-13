@@ -3,7 +3,6 @@
 #include <sycl-sandbox/kernel/execution_context.h>
 #include <sycl-sandbox/scene_loader.h>
 #include <sycl-sandbox/profiler.h>
-#include <sycl-sandbox/profiler.h>
 #include "kernel/runtime.h"
 #include "scene/registry.h"
 #include "scene/host_scene.h"
@@ -26,6 +25,9 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <functional>
+#include <deque>
+#include <mutex>
 
 // ── AppState ─────────────────────────────────────────────────────────
 /// Groups all mutable state for the sycl-sandbox application.
@@ -55,40 +57,144 @@ struct AppState {
     ParamStore param_store;
     PublishedStats published_stats;
 
-    /// Stop the render thread from starting a new frame and drain the
-    /// device queue.  Main thread only.  Restore with resume_pipeline().
-    /// Required before any operation that frees device memory the render
-    /// thread may be using (resize, backend switch).
-    /// Sets the kernel cancellation flag so in-flight work can bail out
-    /// early while we wait for the frame to finish.
-    bool pause_pipeline() {
-        if (kr) kr->cancel();
-        bool was_ready = kernel_ready.exchange(false);
-        while (render_busy.load())
+    // ── Command mailbox (UI → render thread) ─────────────────────
+    /// The UI thread never touches device/kernel state directly; it posts
+    /// work here and the render thread drains the queue at the top of
+    /// every loop iteration.  All device/queue operations therefore run
+    /// on the render thread and the UI can never block on them.
+    std::mutex cmd_mtx;
+    std::deque<std::function<void()>> cmd_queue;
+
+    /// UI thread: enqueue work for the render thread.  Capture by value;
+    /// never capture UI-owned buffers the render thread would race on.
+    void post_cmd(std::function<void()> fn) {
+        std::lock_guard<std::mutex> lk(cmd_mtx);
+        cmd_queue.push_back(std::move(fn));
+    }
+
+    /// Render thread only: run every queued command in FIFO order.
+    /// Commands posted *by* commands land in the queue for the next pass.
+    void drain_cmds() {
+        std::deque<std::function<void()>> local;
+        {
+            std::lock_guard<std::mutex> lk(cmd_mtx);
+            local.swap(cmd_queue);
+        }
+        for (auto &fn : local) fn();
+    }
+
+    // ── Deferred-op request helpers (UI thread) ──────────────────
+    /// Request a scene switch.  The pipeline is gated (kernel_ready down)
+    /// until the render thread finishes applying the switch and the UI has
+    /// re-run on_scene_changed() for the new scene generation.  `scene`
+    /// points into the (stable) SceneRegistry.  `w`/`h` default to -1 =
+    /// keep the render thread's current resolution (runtime switches);
+    /// the startup load passes the live framebuffer size so the first
+    /// switch also sizes the accumulation buffer.
+    void request_scene_switch(const SceneDef *scene, int w = -1, int h = -1) {
+        kernel_ready.store(false);
+        pending_device_ops.fetch_add(1);
+        post_cmd([this, scene, w, h] {
+            bool ok = kr->apply_scene_switch(*scene, w, h);
+            if (ok) {
+                current_spp.store(0);
+                target_spp.store(scene->max_spp);
+                tick.store(0);
+                scene_start_time.store(std::chrono::steady_clock::now());
+                scene_generation.fetch_add(1);
+            }
+            pending_device_ops.fetch_sub(1);
+        });
+    }
+
+    /// Flag a pending resize at `w`×`h`; a UI-frame step posts the actual
+    /// (coalesced) command.  Gating: kernel_ready stays down until the
+    /// render thread re-allocates the accumulation buffer and the UI has
+    /// resized the display target.
+    void request_resize(int w, int h) {
+        std::lock_guard<std::mutex> lk(resize_mtx);
+        if ( w != resize_w || h != resize_h ) {
+            // The requested size changed — restart the settle clock.  The
+            // viewport re-requests on every frame its region differs from
+            // the applied size, so identical requests must NOT reset it
+            // (otherwise the debounce could never expire).
+            resize_w = w;
+            resize_h = h;
+            resize_last_change = std::chrono::steady_clock::now();
+        }
+        resize_pending = true;
+    }
+
+    /// Bounded wait for the render thread to leave its frame scope.
+    /// Only used for backend switches, where the GL display target must be
+    /// torn down before the render thread swaps queues.  Returns once the
+    /// current frame completes — never waits on builds or reloads.
+    void wait_render_idle() {
+        for (int i = 0; i < 5000 && render_busy.load(); i++)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        if (kr) kr->drain();
-        return was_ready;
     }
 
-    void resume_pipeline(bool was_ready) {
-        kernel_ready.store(was_ready);
-    }
+    
 
-    void recreate_buffers(int w, int h) {
-        bool was_ready = pause_pipeline();
-        width = w;
-        height = h;
-        if (kr) {
-            kr->resize(w, h);
-            kr->reinit_kernel();   // kernels re-derive per-resolution state
-        }
-        if (display_target) {
-            display_target->resize(w, h);
-            tex = display_target->texture();
-        }
-        current_spp = 0;
-        resume_pipeline(was_ready);
-    }
+    // ── Deferred UI→render operations ───────────────────────────
+    /// The UI takes kernel_ready down *before* posting a gating command
+    /// (scene switch, backend switch, resize, profiler toggle).  The
+    /// render thread drains commands at the top of every loop iteration —
+    /// the device is always idle there, since a frame completes before the
+    /// loop returns to the top — applies the op, and acks.  The UI does
+    /// any GL/display-side work when it sees the ack, then re-raises
+    /// kernel_ready once no ops are outstanding.  Commands that don't
+    /// touch the display (re-init) never gate rendering.
+    std::atomic<int> pending_device_ops{0};  ///< gating ops in flight
+
+    /// Bumped by the render thread after it applied any op that may have
+    /// changed the scene *layout* (scene switch, backend switch, hot
+    /// reload, profiler toggle).  The UI then re-runs on_scene_changed()
+    /// (camera refs, stat store, param store reset).
+    std::atomic<uint64_t> scene_generation{0};
+    uint64_t last_processed_generation = 0;  ///< UI thread only
+
+    /// Render-thread ack for a resize: the device-side accumulation buffer
+    /// was re-allocated; the UI now finishes the GL/display side
+    /// (display_target->resize, texture refresh) and re-raises kernel_ready.
+    std::atomic<bool> resize_applied{false};
+
+    /// Render-thread ack for a backend switch: the device side swapped
+    /// queues and reloaded the kernel; the UI now recreates the display
+    /// target on the new queue and re-raises kernel_ready.
+    std::atomic<bool> backend_switch_applied{false};
+    /// Resolution the render thread just applied (read by the UI when it
+    /// finishes the GL/display side of a resize).
+    std::atomic<int> applied_resize_w{0};
+    std::atomic<int> applied_resize_h{0};
+    /// Param values to restore after a backend switch (same scene re-parsed,
+    /// so the layout matches).  UI thread only.
+    std::vector<float> backend_restore_params;
+
+    // ── Coalesced resize (window drags fire many events) ────────
+    /// The viewport panel flags a pending resize; a UI-frame step snapshots
+    /// the latest dims and posts at most one command at a time, so a drag
+    /// collapses into a single device-side resize with the final size.
+    /// Requests are also debounced: the viewport re-requests on every frame
+    /// its region differs from the applied size, so a region that never
+    /// settles (e.g. a dock-layout fight at startup) would otherwise gate
+    /// the pipeline forever.  The kickoff only fires once the requested
+    /// size has held still for `resize_settle_ms`.
+    std::mutex resize_mtx;
+    int resize_w = 0, resize_h = 0;          ///< UI thread only
+    bool resize_pending = false;             ///< UI thread only
+    std::chrono::steady_clock::time_point resize_last_change{};  ///< UI thread only
+    std::atomic<bool> resize_posted{false};  ///< at most one cmd in flight
+
+    // ── Coalesced re-init (param change → render thread) ─────────
+    /// Params are edited in scene_desc->current_buffer (UI thread only).
+    /// On a param change the UI snapshots the latest values here and
+    /// posts at most one reinit command at a time; rapid drags collapse
+    /// into a single re-init with the final values.
+    std::mutex reinit_mtx;
+    std::vector<float> reinit_params;
+    bool reinit_pending = false;
+    std::atomic<bool> reinit_posted{false};
 
     /// Rebind everything that depends on the active scene/kernel: camera
     /// pointers, the stat seqlock size, pending param snapshots.  Call
@@ -98,8 +204,9 @@ struct AppState {
         refresh_camera_ptrs();
         published_stats.resize(kr ? kr->stat_buffer().size() : 0);
         param_store.reset();
-        auto *scene_desc = kr ? kr->scene_desc() : nullptr;
+        auto scene_desc = kr ? kr->scene_desc() : nullptr;
         if (scene_desc) stat_store.init_from(scene_desc->stats);
+        orbit_init = false;
     }
 
     // ── Scene system (loaded at startup, static list) ──────────
@@ -111,41 +218,39 @@ struct AppState {
     /// Animation frame counter — increments each sample (like Shadertoy iFrame).
     std::atomic<uint64_t> tick{0};
     /// Animation clock — steady time-point for elapsed-time computation.
-    std::chrono::steady_clock::time_point scene_start_time;
+    /// Atomic: written by the UI (epoch processing) on scene changes,
+    /// read by the render thread for the `time` param.
+    std::atomic<std::chrono::steady_clock::time_point> scene_start_time{};
 
     // ── Device profiler ring ─────────────────────────────────
-    profiler::DeviceRingHeader *d_ring_header_ = nullptr;
-    profiler::DeviceRecord *d_ring_records_ = nullptr;
-    sycl::queue *ring_q_ = nullptr;
+    rt::Buffer<profiler::DeviceRingHeader> d_ring_header_;
+    rt::Buffer<profiler::DeviceRecord> d_ring_records_;
     static constexpr uint32_t RING_CAPACITY = 256 * 1024;
     static constexpr size_t   SAMPLED_ITEMS = 1024;
 
-    void init_profiler_buffers(rt::Runtime *, sycl::queue *q) {
+    void init_profiler_buffers(rt::Runtime *rt, sycl::queue *q) {
         free_profiler_buffers();
-        if (!q) return;
-        ring_q_ = q;
+        if (!q || !rt->pool) return;
         // USM shared — the ring is written from device code (via
         // sycl::atomic_ref) and read from host code (kernel .so
-        // KERNEL_BUILD path via sycl::atomic_ref).  malloc_device
-        // is not host-accessible on CUDA.
-        d_ring_header_ = sycl::malloc_shared<profiler::DeviceRingHeader>(1, *q);
-        d_ring_records_ = sycl::malloc_shared<profiler::DeviceRecord>(RING_CAPACITY, *q);
-        q->memset(d_ring_header_, 0, sizeof(profiler::DeviceRingHeader)).wait();
+        // KERNEL_BUILD path via sycl::atomic_ref).  Allocated through the
+        // KernelRuntime's pool so backend-switch teardown is uniform
+        // (release_all on the old queue frees them with the right queue).
+        d_ring_header_ = rt->pool->alloc_shared<profiler::DeviceRingHeader>(
+            1, rt::MemScope::App);
+        d_ring_records_ = rt->pool->alloc_shared<profiler::DeviceRecord>(
+            RING_CAPACITY, rt::MemScope::App);
+        rt->fill(d_ring_header_.data, 0, sizeof(profiler::DeviceRingHeader));
     }
     void free_profiler_buffers() {
-        if (ring_q_) {
-            if (d_ring_header_) sycl::free(d_ring_header_, *ring_q_);
-            if (d_ring_records_) sycl::free(d_ring_records_, *ring_q_);
-        }
-        d_ring_header_ = nullptr;
-        d_ring_records_ = nullptr;
-        ring_q_ = nullptr;
+        d_ring_header_ = {};
+        d_ring_records_ = {};
     }
     profiler::DeviceRing device_ring(size_t work_items) const {
-        if (!d_ring_header_) return {};
+        if (!d_ring_header_.data) return {};
         profiler::DeviceRing ring;
-        ring.header = d_ring_header_;
-        ring.records = d_ring_records_;
+        ring.header = d_ring_header_.data;
+        ring.records = d_ring_records_.data;
         ring.capacity = RING_CAPACITY;
         ring.sample_interval =
             (uint32_t)std::max<size_t>(1, work_items / SAMPLED_ITEMS);
@@ -168,8 +273,10 @@ struct AppState {
     std::atomic<bool> render_paused{false};
     std::atomic<bool> render_running{true};
     std::atomic<bool> kernel_ready{false};
-    /// True while the render thread is inside a frame iteration.  Paired
-    /// with kernel_ready by pause_pipeline() to stop the pipeline safely.
+    /// True while the render thread is inside a frame iteration or the
+    /// loop-top op window.  The UI uses this to avoid raising kernel_ready
+    /// while the render thread is applying an op / reloading, and for the
+    /// bounded idle-wait before display-target teardown (backend switch).
     std::atomic<bool> render_busy{false};
     std::thread render_thread;
 
@@ -228,7 +335,7 @@ struct AppState {
     bool has_2d() const { return center_x.valid() && center_y.valid() && zoom.valid(); }
 
     void refresh_camera_ptrs() {
-        auto *scene_desc = kr ? kr->scene_desc() : nullptr;
+        auto scene_desc = kr ? kr->scene_desc() : nullptr;
         if (!scene_desc) {
             camera_eye = camera_at = camera_up = scene_loader::ParamRef{};
             fov = aperture = scene_loader::ParamRef{};

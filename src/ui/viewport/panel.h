@@ -35,9 +35,11 @@ inline void render_viewport_panel(AppState &state) {
             PROFILER_ZONE("Viewport resize");
             spdlog::info("[viewport] resize {}x{} -> {}x{}",
                          state.width, state.height, vp_w, vp_h);
-            // Pauses the pipeline, resizes buffers + display target, and
-            // re-inits the kernel at the new resolution.
-            state.recreate_buffers(vp_w, vp_h);
+            // Deferred resize: the render thread re-allocates the device
+            // accumulation buffer; the UI finishes the GL/display side when
+            // it sees the ack.  Requests are coalesced — a drag collapses
+            // into a single device-side resize with the final size.
+            state.request_resize(vp_w, vp_h);
         }
 
         // Image fills the whole region (texture matches region size)
@@ -60,8 +62,44 @@ inline void render_viewport_panel(AppState &state) {
             p0, p1,
             ImVec2(0, 0), ImVec2(1, 1));
 
+        // ── Loading overlay (render thread not ready) ───────────
+        // Startup, scene switches, backend switches, and profiler toggles
+        // gate rendering until the render thread has finished the build +
+        // reload.  The UI never blocks on that (the first kernel build can
+        // take seconds) — draw a scrim + spinner over the stale/empty
+        // texture so the app doesn't look frozen.
+        if ( !state.kernel_ready.load() ) {
+            const char *status = state.render_busy.load()
+                ? "Building / loading kernel..." : "Loading scene...";
+            auto *dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p0, p1, IM_COL32(12, 12, 14, 220));
+
+            float cx = (p0.x + p1.x) * 0.5f;
+            float cy = (p0.y + p1.y) * 0.5f;
+            float r  = 16.f;
+            float t  = (float)ImGui::GetTime();
+            for ( int i = 0; i < 8; i++ ) {
+                float a = t * 3.0f + i * (float)(IM_PI * 2.0 / 8.0);
+                ImVec2 c(cx + cosf(a) * r, cy + sinf(a) * r);
+                dl->AddCircleFilled(
+                    c, 4.f,
+                    IM_COL32(255, 255, 255,
+                             (int)(100 + 155 * (0.5f + 0.5f * sinf(a)))),
+                    8);
+            }
+            ImVec2 ts = ImGui::CalcTextSize(status);
+            dl->AddText(ImVec2(cx - ts.x * 0.5f, cy + r + 14.f),
+                        IM_COL32(220, 220, 220, 255), status);
+        }
+
         // ── Camera controls (2D pan / 3D orbit) ─────────────────
-        if ( state.kr->kernel() && state.kr->scene_desc() ) {
+        // Gated on kernel_ready: the cached camera ParamRefs point into
+        // the active SceneDescriptor's buffer, which the RENDER thread
+        // swaps in during reloads / scene / backend switches.  The refs are
+        // only valid once the UI has re-run on_scene_changed() for the
+        // latest generation (i.e. while kernel_ready is true).
+        if ( state.kr->kernel() && state.kr->scene_desc() &&
+             state.kernel_ready.load() ) {
             // Refresh camera pointers each frame (in case SceneDescriptor changed)
             state.refresh_camera_ptrs();
             bool has_3d = state.has_3d();
@@ -177,7 +215,7 @@ inline void render_viewport_panel(AppState &state) {
                 // clears the accumulator, and restarts sampling — no
                 // lock is held while the GPU works, no re-init needed
                 // (camera params are read per frame from d_params).
-                auto *desc = state.kr->scene_desc();
+                auto desc = state.kr->scene_desc();
                 state.param_store.publish(desc->current_buffer.data(),
                                           desc->buffer_size(),
                                           /*restart_accum=*/true);

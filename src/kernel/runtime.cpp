@@ -54,45 +54,32 @@ KernelRuntime::KernelRuntime(const std::string &build_dir,
         q_ = &q_storage_;
     }
     krt_.queue = q_;
+    pool_.bind(q_);
+    krt_.pool = &pool_;
 
-    // ── Cancellation flag (USM shared when queue exists, plain heap
+    // ── Cancellation flag (USM shared when queue exists; plain heap
     //    in software mode — device/host visible in either case).
     //    Plain int, not std::atomic — see execution_context.h rationale.
-    if (q_) {
-        cancel_flag_ = sycl::malloc_shared<int>(1, *q_);
-    } else {
-        cancel_flag_ = new int(0);
-    }
-    krt_.cancel_flag = cancel_flag_;
+    cancel_flag_ = pool_.alloc_shared<int>(1, rt::MemScope::Kernel);
+    krt_.cancel_flag = cancel_flag_.data;
 
     // Per-frame trace counters (num_hits / num_bvh_hits)
-    d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
-    krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+    d_trace_counters_ = pool_.alloc_device<rt::TraceCounters>(1);
+    krt_.fill(d_trace_counters_.data, 0, sizeof(rt::TraceCounters));
 
     spdlog::info("[startup] {}", device_name());
 }
 
 KernelRuntime::~KernelRuntime() {
-    // Free accum and params before the queue is destroyed
-    if (d_params_) { krt_.dealloc(d_params_); d_params_ = nullptr; }
-    if (d_accum_) { krt_.dealloc(d_accum_); d_accum_ = nullptr; }
-    if (d_trace_counters_) {
-        krt_.dealloc(d_trace_counters_);
-        d_trace_counters_ = nullptr;
-    }
+    // Free everything while the queue is still alive.  release_all()
+    // drains first, then frees accum/params/trace counters/cancel flag
+    // and the scene arrays (all pool-registered).  The rt::Buffer
+    // members' destructors then see an empty registry and no-op.
+    pool_.release_all();
+    host_scene_ = HostScene{};
 
-    // Free cancellation flag
-    if (cancel_flag_) {
-        if (q_) sycl::free(cancel_flag_, *q_);
-        else    delete cancel_flag_;
-        cancel_flag_ = nullptr;
-        krt_.cancel_flag = nullptr;
-    }
-
-    // Free host scene
-    if (!host_scene_.data.empty()) {
-        host_scene_.data.free(&krt_);
-    }
+    krt_.cancel_flag = nullptr;
+    krt_.pool = nullptr;
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────
@@ -103,52 +90,30 @@ void KernelRuntime::setup_all_kernels(SceneRegistry &scenes) {
     }
 }
 
-// ── Scene switch ──────────────────────────────────────────────────────
+// ── Scene switch (render thread, background build) ────────────────────
 
-bool KernelRuntime::switch_scene(const SceneDef &scene, int w, int h) {
+bool KernelRuntime::apply_scene_switch(const SceneDef &scene, int w, int h) {
     spdlog::info("[scene] switching to '{}' (kernel '{}')",
                  scene.name, scene.kernel);
     width_ = w > 0 ? w : width_;
     height_ = h > 0 ? h : height_;
 
-    // Cancel pending builds
-    builder_->cancel(scene.kernel);
+    // Size the accumulation buffer for the target resolution (no-op on
+    // runtime switches that keep the current size).  This is the ONLY
+    // allocation path for d_accum_: the startup load reaches it through
+    // (w,h) = the framebuffer size, and a plain resize goes through
+    // apply_resize(); both call resize(), which reallocates + zeroes.
+    size_t needed = (size_t)width_ * height_ * 4 * sizeof(float);
+    if (d_accum_.data == nullptr || accum_bytes_ != needed)
+        resize(width_, height_);
 
-    // Auto-build if binary is missing
-    if (!lib_->so_exists(scene.kernel)) {
-        spdlog::info("[scene] kernel '{}' binary not found, building...",
-                     scene.kernel);
-        BuildResult br = builder_->build_sync(scene.kernel);
-        if (!br.success) {
-            spdlog::error("[scene] kernel '{}' build failed, cannot switch scene",
-                          scene.kernel);
-            return false;
-        }
-        spdlog::info("[scene] kernel '{}' built successfully", scene.kernel);
-    }
-
-    // Rebuild if the binary is out-of-date relative to source files
-    if (!lib_->is_up_to_date(scene.kernel)) {
-        spdlog::info("[scene] kernel '{}' sources changed, rebuilding...",
-                     scene.kernel);
-        BuildResult br = builder_->build_sync(scene.kernel);
-        if (!br.success) {
-            spdlog::error("[scene] kernel '{}' rebuild failed, "
-                          "falling back to old binary", scene.kernel);
-        } else {
-            spdlog::info("[scene] kernel '{}' rebuilt successfully", scene.kernel);
-        }
-    }
-
-    // Profiler clear
-    // (the caller clears kernel_profiler since it owns it)
-
+    if (!ensure_built_async(scene.kernel, /*force=*/false)) return false;
     return ordered_reload(scene);
 }
 
-// ── Backend switch ────────────────────────────────────────────────────
+// ── Backend switch (render thread) ────────────────────────────────────
 
-int KernelRuntime::switch_backend(int new_backend, int w, int h) {
+int KernelRuntime::apply_backend_switch(int new_backend, int w, int h) {
     // ── Phase 1: Ordered shutdown ─────────────────────────────────
     spdlog::info("[backend] switching to {}", backends_[new_backend].label);
 
@@ -156,13 +121,13 @@ int KernelRuntime::switch_backend(int new_backend, int w, int h) {
     builder_->cancel_all();
 
     // Save scene info before freeing
-    const SceneDef *prev_scene = active_scene_;
+    const SceneDef *prev_scene = active_scene_.load();
     std::string prev_kernel_name;
     if (prev_scene) prev_kernel_name = prev_scene->kernel;
 
     // Free all device resources tied to the OLD backend
     free_device_resources();
-    active_kernel_ = nullptr;
+    active_kernel_.store(nullptr);
 
     // ── Phase 2: Create new queue ─────────────────────────────────
     is_software_ = (backends_[new_backend].id == "cpu_software");
@@ -175,6 +140,7 @@ int KernelRuntime::switch_backend(int new_backend, int w, int h) {
         q_ = &q_storage_;
     }
     krt_.queue = q_;
+    pool_.bind(q_);
     active_backend_ = new_backend;
     spdlog::info("[backend] now using device: {}", device_name());
 
@@ -187,32 +153,14 @@ int KernelRuntime::switch_backend(int new_backend, int w, int h) {
 
     // ── Phase 3: Rebuild + reload ─────────────────────────────────
     if (prev_scene && !prev_kernel_name.empty()) {
-        // Binary missing for the new backend → build from scratch
-        if (!lib_->so_exists(prev_kernel_name)) {
-            spdlog::info("[backend] kernel '{}' binary not found for new backend, "
-                         "building...", prev_kernel_name);
-            BuildResult br = builder_->build_sync(prev_kernel_name);
-            if (!br.success) {
-                spdlog::error("[backend] kernel '{}' build failed for new backend",
-                              prev_kernel_name);
-                return new_backend;
-            }
-        }
-        // Binary stale relative to headers/sources → rebuild.
-        // Critical: an existing .so may have been compiled against an older
-        // ABI (RenderContext/ParamLookup layout), which would make the device
-        // kernel read garbage pointers → sticky CUDA error 700.
-        if (!lib_->is_up_to_date(prev_kernel_name)) {
-            spdlog::info("[backend] kernel '{}' sources changed, rebuilding for "
-                         "new backend...", prev_kernel_name);
-            BuildResult br = builder_->build_sync(prev_kernel_name);
-            if (!br.success) {
-                spdlog::error("[backend] kernel '{}' rebuild failed for new backend, "
-                              "falling back to old binary", prev_kernel_name);
-            } else {
-                spdlog::info("[backend] kernel '{}' rebuilt successfully",
-                             prev_kernel_name);
-            }
+        // Background build: missing binary, stale sources, or (critical)
+        // an existing .so compiled against an older ABI (RenderContext /
+        // ParamLookup layout) would make the device kernel read garbage
+        // pointers → sticky CUDA error 700.
+        if (!ensure_built_async(prev_kernel_name, /*force=*/false)) {
+            spdlog::error("[backend] kernel '{}' build failed for new backend",
+                          prev_kernel_name);
+            return new_backend;
         }
         ordered_reload(*prev_scene);
     }
@@ -220,37 +168,96 @@ int KernelRuntime::switch_backend(int new_backend, int w, int h) {
     return new_backend;
 }
 
+// ── Resolution change (render thread) ─────────────────────────────────
+
+void KernelRuntime::apply_resize(int w, int h) {
+    // Pure resolution change: only the accumulation buffer depends on the
+    // pixel count (params/scene/stat-writer are resolution-independent),
+    // so a plain resize() is sufficient — reinit would redundantly rebuild
+    // the YAML scene on every window drag.
+    resize(w, h);
+}
+
+// ── Build helper (render thread) ──────────────────────────────────────
+
+bool KernelRuntime::ensure_built_async(const std::string &kernel, bool force) {
+    if (!force && lib_->so_exists(kernel) && lib_->is_up_to_date(kernel))
+        return true;
+
+    // Cancel any in-flight build for this kernel and purge cancelled /
+    // finished entries so build_async() can start a fresh one (a
+    // cancelled build never pushes a result, so we must not wait on it).
+    builder_->cancel(kernel);
+    builder_->poll_results();
+
+    spdlog::info("[build] kernel '{}' {}...", kernel,
+                 force ? "rebuilding" : "missing or stale, building");
+    builder_->build_async(kernel);
+
+    bool success = false;
+    bool got = false;
+    while (!got) {
+        for (auto &r : builder_->poll_results()) {
+            if (r.kernel_name == kernel) {
+                success = r.success;
+                got = true;
+            }
+        }
+        if (!got)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!success)
+        spdlog::error("[build] kernel '{}' build failed", kernel);
+    return success;
+}
+
 // ── Re-init (param / camera change) ───────────────────────────────────
 
 void KernelRuntime::reinit_kernel() {
-    // Works on every backend — q_ is legitimately null in software mode.
-    if (!active_kernel_ || !active_scene_desc_) return;
+    auto desc = scene_desc();
+    if (!desc) return;
+    reinit_kernel(desc->current_buffer);
+}
 
-    auto sz = active_scene_desc_->buffer_size();
-    krt_.copy_to_device(d_params_,
-                        active_scene_desc_->current_buffer.data(),
-                        sz);
+void KernelRuntime::reinit_kernel(const std::vector<float> &params) {
+    // Works on every backend — q_ is legitimately null in software mode.
+    if (!active_kernel_.load()) return;
+
+    auto desc = scene_desc();
+    if (!desc) return;
+
+    auto sz = desc->buffer_size();
+    // The snapshot was taken from a previous scene's descriptor (the UI
+    // queued a re-init and a scene switch happened in between) — drop it
+    // rather than copy a mismatched layout into d_params.
+    if (params.size() * sizeof(float) < sz) {
+        spdlog::warn("[param] re-init dropped: param snapshot layout "
+                     "({} floats) doesn't match active scene ({})",
+                     params.size(), desc->buffer_size() / sizeof(float));
+        return;
+    }
+    krt_.copy_to_device(d_params_.data, params.data(), sz);
 
     // Rebuild the YAML scene from the current live params (kernels that
     // accept a host-built scene; others skip it entirely).
-    if (active_scene_ && active_scene_->uses_scene) {
+    const SceneDef *scene = active_scene_.load();
+    if (scene && scene->uses_scene) {
         rebuild_yaml_scene(&krt_,
-                           active_scene_->yaml_path,
-                           *active_scene_desc_,
+                           scene->yaml_path,
+                           *desc,
                            host_scene_);
     }
 
     // Refresh the host-side stat writer (the kernel writes into it via
     // ctx->stats during the render call — no device round-trip).
     {
-        stat_buffer_.assign(active_scene_desc_->current_stat_buffer.size(),
-                            0.f);
+        stat_buffer_.assign(desc->current_stat_buffer.size(), 0.f);
         stat_writer_ = rt::StatWriter{};
         if (!stat_buffer_.empty()) {
             stat_writer_.set_buffer(stat_buffer_.data());
             stat_writer_.set_entries(
-                active_scene_desc_->stat_lookup_entries.data(),
-                (int)active_scene_desc_->stat_lookup_entries.size());
+                desc->stat_lookup_entries.data(),
+                (int)desc->stat_lookup_entries.size());
         }
     }
 
@@ -273,8 +280,8 @@ std::string KernelRuntime::poll_hot_reload(
     for (auto &res : builder_->poll_results()) {
         if (res.success) {
             auto *new_kh = lib_->load(res.kernel_name);
-            if (new_kh && active_scene_ && active_kernel_ &&
-                active_kernel_->name == res.kernel_name) {
+            if (new_kh && active_scene_.load() && active_kernel_.load() &&
+                active_kernel_.load()->name == res.kernel_name) {
                 spdlog::info("[hotreload] rebuilt and reloading '{}' (gen {})",
                              res.kernel_name, new_kh->generation);
                 triggered = true;
@@ -300,13 +307,13 @@ std::string KernelRuntime::poll_hot_reload(
 // ── Accumulation ops ──────────────────────────────────────────────────
 
 void KernelRuntime::clear_accum() {
-    if (d_accum_) krt_.fill(d_accum_, 0, accum_bytes_);
+    if (d_accum_.data) krt_.fill(d_accum_.data, 0, accum_bytes_);
 }
 
 void KernelRuntime::clear_accum_async() {
-    if (!d_accum_) return;
-    if (q_) q_->memset(d_accum_, 0, accum_bytes_);   // in-order: sequenced
-    else std::memset(d_accum_, 0, accum_bytes_);     // native: synchronous
+    if (!d_accum_.data) return;
+    if (q_) q_->memset(d_accum_.data, 0, accum_bytes_);   // in-order: sequenced
+    else std::memset(d_accum_.data, 0, accum_bytes_);     // native: synchronous
 }
 
 void KernelRuntime::fill_zero(float *buf) {
@@ -314,9 +321,9 @@ void KernelRuntime::fill_zero(float *buf) {
 }
 
 void KernelRuntime::zero_trace_counters_async() {
-    if (!d_trace_counters_) return;
-    if (q_) q_->memset(d_trace_counters_, 0, sizeof(rt::TraceCounters));
-    else std::memset(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+    if (!d_trace_counters_.data) return;
+    if (q_) q_->memset(d_trace_counters_.data, 0, sizeof(rt::TraceCounters));
+    else std::memset(d_trace_counters_.data, 0, sizeof(rt::TraceCounters));
 }
 
 void KernelRuntime::drain() {
@@ -334,14 +341,12 @@ void KernelRuntime::resize(int w, int h) {
     size_t pixel_count = (size_t)w * h;
     size_t bytes = pixel_count * 4 * sizeof(float);
 
-    // Free old — after draining: enqueued kernels may still reference it.
-    drain();
-    if (d_accum_) { krt_.dealloc(d_accum_); d_accum_ = nullptr; }
-
-    // Allocate new
+    // Free old (the move-assign drains via the pool before freeing) and
+    // allocate new.
+    d_accum_ = {};
     accum_bytes_ = bytes;
-    d_accum_ = krt_.alloc_device<float>(pixel_count * 4);
-    krt_.fill(d_accum_, 0, accum_bytes_);
+    d_accum_ = pool_.alloc_device<float>(pixel_count * 4);
+    krt_.fill(d_accum_.data, 0, accum_bytes_);
 }
 
 // ── Device name ───────────────────────────────────────────────────────
@@ -356,56 +361,52 @@ bool KernelRuntime::ordered_reload(const SceneDef &scene) {
     // Free old params — after draining: enqueued frames read them at
     // dispatch time, but a memcpy targeting them may still be queued.
     drain();
-    if (d_params_) {
-        krt_.dealloc(d_params_);
-        d_params_ = nullptr;
-    }
+    d_params_ = {};
 
     // Load kernel
-    active_kernel_ = lib_->load(scene.kernel);
-    if (!active_kernel_) {
+    active_kernel_.store(lib_->load(scene.kernel));
+    if (!active_kernel_.load()) {
         spdlog::error("[scene] failed to load kernel '{}'", scene.kernel);
         return false;
     }
 
     spdlog::info("[scene] switch complete: kernel loaded (gen {})",
-                 active_kernel_->generation);
+                 active_kernel_.load()->generation);
 
     // Load + build scene descriptor
-    active_scene_ = &scene;
-    active_scene_desc_ =
-        std::make_unique<scene_loader::SceneDescriptor>(
-            scene_loader::load_scene_descriptor(scene.yaml_path));
-    active_scene_desc_->build_layout();
+    active_scene_.store(&scene);
+    set_scene_desc(std::make_shared<scene_loader::SceneDescriptor>(
+        scene_loader::load_scene_descriptor(scene.yaml_path)));
+    scene_desc()->build_layout();
 
     // Allocate + upload params.  Host-visible (alloc_host): the kernel
     // reads its param snapshot through a ParamLookup over this buffer.
-    auto sz = active_scene_desc_->buffer_size();
-    d_params_ = krt_.alloc_host<float>(sz / sizeof(float));
-    krt_.copy_to_device(d_params_,
-                        active_scene_desc_->current_buffer.data(),
+    auto desc = scene_desc();
+    auto sz = desc->buffer_size();
+    d_params_ = pool_.alloc_host<float>(sz / sizeof(float));
+    krt_.copy_to_device(d_params_.data,
+                        desc->current_buffer.data(),
                         sz);
 
     // Rebuild the YAML scene first — the per-frame ctx carries the scene
     // view, so the geometry must exist before the first render call.
-    if (active_scene_->uses_scene) {
+    if (scene.uses_scene) {
         rebuild_yaml_scene(&krt_,
                            scene.yaml_path,
-                           *active_scene_desc_,
+                           *desc,
                            host_scene_);
     }
 
     // Host-side stat writer for this scene (handed to the kernel via
     // ctx->stats each frame — no Setup op, no kernel call).
     {
-        stat_buffer_.assign(active_scene_desc_->current_stat_buffer.size(),
-                            0.f);
+        stat_buffer_.assign(desc->current_stat_buffer.size(), 0.f);
         stat_writer_ = rt::StatWriter{};
         if (!stat_buffer_.empty()) {
             stat_writer_.set_buffer(stat_buffer_.data());
             stat_writer_.set_entries(
-                active_scene_desc_->stat_lookup_entries.data(),
-                (int)active_scene_desc_->stat_lookup_entries.size());
+                desc->stat_lookup_entries.data(),
+                (int)desc->stat_lookup_entries.size());
         }
     }
 
@@ -418,29 +419,19 @@ bool KernelRuntime::ordered_reload(const SceneDef &scene) {
 // ── Backend helpers ───────────────────────────────────────────────────
 
 void KernelRuntime::free_device_resources() {
-    drain();
-    if (d_params_) {
-        krt_.dealloc(d_params_);
-        d_params_ = nullptr;
-    }
-    if (d_accum_) {
-        krt_.dealloc(d_accum_);
-        d_accum_ = nullptr;
-    }
-    if (d_trace_counters_) {
-        krt_.dealloc(d_trace_counters_);
-        d_trace_counters_ = nullptr;
-    }
+    // release_all drains first, then frees every pool-registered buffer
+    // (accum/params/trace counters/cancel flag/scene arrays) with the
+    // OLD queue — which is still bound here, before the backend switch
+    // rebinds the pool.
+    pool_.release_all();
+    d_accum_ = {};
+    d_params_ = {};
+    d_trace_counters_ = {};
+    cancel_flag_ = {};
+    krt_.cancel_flag = nullptr;
 
-    // Free cancellation flag
-    if (cancel_flag_) {
-        if (q_) sycl::free(cancel_flag_, *q_);
-        else    delete cancel_flag_;
-        cancel_flag_ = nullptr;
-        krt_.cancel_flag = nullptr;
-    }
-
-    // Free host scene
+    // Free host scene (its arrays were pool-registered and freed above;
+    // this resets the SceneData view's counts/pointers).
     if (!host_scene_.data.empty()) {
         host_scene_.data.free(&krt_);
         host_scene_ = HostScene{};
@@ -451,22 +442,18 @@ void KernelRuntime::alloc_device_resources() {
     size_t pixel_count = (size_t)width_ * height_;
     accum_bytes_ = pixel_count * 4 * sizeof(float);
 
-    d_accum_ = krt_.alloc_device<float>(pixel_count * 4);
-    krt_.fill(d_accum_, 0, accum_bytes_);
+    d_accum_ = pool_.alloc_device<float>(pixel_count * 4);
+    krt_.fill(d_accum_.data, 0, accum_bytes_);
 
     // Trace counters — persistent across scenes, re-created per backend
-    d_trace_counters_ = krt_.alloc_device<rt::TraceCounters>(1);
-    krt_.fill(d_trace_counters_, 0, sizeof(rt::TraceCounters));
+    d_trace_counters_ = pool_.alloc_device<rt::TraceCounters>(1);
+    krt_.fill(d_trace_counters_.data, 0, sizeof(rt::TraceCounters));
 
     // Re-allocate cancellation flag after a backend switch (freed by
     // free_device_resources() above).  Guard against double-allocation.
-    if (!cancel_flag_) {
-        if (q_) {
-            cancel_flag_ = sycl::malloc_shared<int>(1, *q_);
-        } else {
-            cancel_flag_ = new int(0);
-        }
-        krt_.cancel_flag = cancel_flag_;
+    if (!cancel_flag_.data) {
+        cancel_flag_ = pool_.alloc_shared<int>(1, rt::MemScope::Kernel);
+        krt_.cancel_flag = cancel_flag_.data;
     }
 }
 
@@ -612,7 +599,7 @@ void KernelRuntime::begin_frame() {
     // Mirror the host cancel state to device-visible USM before the
     // kernel dispatch, then clear the host flag.  Only the render
     // thread calls this — it owns the queue, so USM is always valid.
-    int *cf = cancel_flag_;
+    int *cf = cancel_flag_.data;
     if (cf) {
         int v = cancel_requested_.load(std::memory_order_relaxed);
         __atomic_store_n(cf, v, __ATOMIC_RELAXED);
@@ -622,7 +609,7 @@ void KernelRuntime::begin_frame() {
 
 // ── Profiler flag (on-the-fly kernel builds) ──────────────────────────
 
-void KernelRuntime::set_profiler_enabled(bool enabled) {
+bool KernelRuntime::apply_profiler_toggle(bool enabled) {
     std::string value = enabled ? "ON" : "OFF";
     spdlog::info("[profiler] reconfiguring kernel builds with "
                  "SANDBOX_ENABLE_PROFILER={}", value);
@@ -635,7 +622,7 @@ void KernelRuntime::set_profiler_enabled(bool enabled) {
     FILE *pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
         spdlog::error("[profiler] popen failed for cmake reconfigure");
-        return;
+        return false;
     }
     char buf[4096];
     while (fgets(buf, sizeof(buf), pipe)) {
@@ -648,25 +635,27 @@ void KernelRuntime::set_profiler_enabled(bool enabled) {
     if (rc != 0) {
         spdlog::error("[profiler] cmake reconfigure failed (exit {}), "
                       "kernel builds keep the previous flag", rc);
-        return;
+        return false;
     }
 
-    // Rebuild + reload the active kernel with the new flag.  build_sync
-    // no-ops cheaply when the binary is already up to date (no source
-    // change → only the define changed → cmake re-runs the compile).
-    if (active_scene_ && active_kernel_) {
-        std::string name = active_kernel_->name;
-        builder_->cancel(name);
-        BuildResult br = builder_->build_sync(name);
-        if (!br.success) {
+    // Rebuild + reload the active kernel with the new flag.  The compile
+    // definition changed, so the .so is stale even though its timestamps
+    // look current — force the rebuild.
+    const SceneDef *scene = active_scene_.load();
+    KernelHandle *kh = active_kernel_.load();
+    if (scene && kh) {
+        std::string name = kh->name;
+        if (!ensure_built_async(name, /*force=*/true)) {
             spdlog::error("[profiler] kernel '{}' rebuild failed with "
                           "profiler={} — falling back to old binary", name, value);
-            return;
+            return false;
         }
-        ordered_reload(*active_scene_);
+        ordered_reload(*scene);
         spdlog::info("[profiler] kernel '{}' rebuilt (SANDBOX_ENABLE_PROFILER={})",
                      name, value);
+        return true;
     }
+    return true;
 }
 
 bool KernelRuntime::profiler_enabled() const {

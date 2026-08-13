@@ -33,6 +33,62 @@ Each frame:
    buffer from device, tonemap (Reinhard + gamma), upload to OpenGL texture.
 8. **Render ImGui** — draw UI over the scene.
 
+### Thread model (UI thread vs render thread)
+
+Two threads split the work.  The **UI thread** runs the GLFW/ImGui frame
+loop (`src/frame_loop.h`) — event polling, panel drawing, compositing.
+The **render thread** owns the SYCL queue and runs `render_thread_func()`
+(`src/render_loop.h`), which enqueues the kernel frame, publishes the
+display slot and the stats seqlock, and handles hot reload.
+
+The UI thread NEVER blocks on device work.  Everything that gates device
+state (scene switch, backend switch, resize, profiler toggle, and the
+initial scene + kernel load) runs on the render thread through a
+deferred-op protocol:
+
+- The UI posts work with `AppState::post_cmd(closure)`; the render thread
+  drains the mailbox at the top of its loop (`drain_cmds()`), where the
+  device is always idle (a frame completes before the loop returns to the
+  top).
+- Render-thread entry points are `KernelRuntime::apply_*`
+  (`apply_scene_switch`, `apply_backend_switch`, `apply_resize`,
+  `apply_profiler_toggle`).  They may block on a background build — only
+  the render thread is allowed to block.
+- Gating ops take `kernel_ready` down and bump `pending_device_ops`; the
+  UI re-raises `kernel_ready` only once the pipeline is quiescent and the
+  latest `scene_generation` has been processed (which re-runs
+  `on_scene_changed()` — camera refs, stat seqlock size, param store
+  reset).
+- Resize requests are **debounced**: the viewport re-requests every frame
+  its region differs from the applied size, and the kickoff only fires
+  once the requested size has held still for ~150 ms.  This stops an
+  unstable region (a dock-layout fight at startup, where a docked window
+  that pops in/out shifts the viewport) from re-posting a resize forever
+  and keeping `kernel_ready` down permanently.
+- A resize is a **pure resolution change** — `apply_resize()` only
+  reallocates the accumulation buffer and stores the new width/height.
+  The scene, kernel, params, and stat writer are resolution-independent
+  and are NOT reloaded; the kernel receives the new resolution via
+  `ctx.width`/`ctx.height` on the next dispatch.  (Reloading on resize
+  would redundantly rebuild the YAML scene on every window drag.)
+- There is **one resize path**: the debounced `request_resize` flow
+  above, applied through the render-thread `apply_resize`/`resize`
+  primitive.  There is no synchronous startup sizing — `main.cpp` creates
+  the GL display target at the framebuffer size, then the first
+  `request_scene_switch` carries that size and `apply_scene_switch`
+  allocates `d_accum_` for it (calling `resize()` only when the buffer is
+  unallocated or mis-sized).  Runtime scene switches keep the current
+  resolution (`w`/`h` = -1).
+- The startup path is identical: `main.cpp` starts the render thread
+  before the first scene switch and posts the first load through the same
+  `request_scene_switch()` deferred protocol (the synchronous
+  `KernelRuntime::switch_scene()` path is removed).  While `kernel_ready`
+  is false the viewport draws a loading overlay (`src/ui/viewport/panel.h`)
+  over the stale texture, so the first build doesn't look like a hang.
+
+Hot reload (`KernelRuntime::poll_hot_reload`) also runs only on the render
+thread, at loop top.
+
 ### Kernel library (`src/kernel/library.cpp`)
 
 Each kernel is a shared library built by `acpp` (AdaptiveCpp).  On every load:
@@ -367,6 +423,149 @@ Each kernel is built twice from the same sources (kernels/CMakeLists.txt):
 |-------------------|------------|---------|
 | `<name>.so`       | `add_sycl_to_target()` (SYCL) | GPU / SYCL CPU backends |
 | `<name>_native.so`| plain C++ (`KERNEL_NATIVE`) | Software (CPU, no SYCL runtime) |
+
+## Memory system
+
+All kernel-usable memory is allocated through one allocator — **`rt::MemoryPool`**
+(`include/sycl-sandbox/kernel/memory.h`) — which owns a registry of live
+allocations, per-kind byte counters, and the drain protocol. There is no
+second allocator path; the older `alloc/` and `containers/` subsystems were
+dead code and have been removed.
+
+### The three sides
+
+The application has three execution sides. The memory system classifies every
+allocation by *which side owns its lifetime* and *which locality* the bytes
+live in, so there is never ambiguity about who frees a buffer or with which
+queue.
+
+| Side | Where the code runs | May allocate? | Owns? |
+|------|--------------------|---------------|-------|
+| **App** | the `sycl-sandbox` binary (main + render thread) | yes (App + Kernel scopes) | App-scope and Kernel-scope buffers |
+| **Kernel host** | the kernel `.so`, host code (the `kernel_entry` body and helpers) | yes, but **per-call only** (Frame scope) | nothing across calls |
+| **Kernel device** | a SYCL `parallel_for` lambda | **never** | — |
+
+### Localities (`rt::MemoryKind`)
+
+```cpp
+enum class MemoryKind : uint8_t { Device, Host, Shared };
+```
+
+- **Device** — `sycl::malloc_device`. Only the device side reads/writes
+  directly; the host copies through the queue. Used for accum/output/scene
+  arrays.
+- **Host** — `sycl::malloc_host` (device-accessible host USM). Device side
+  can read it directly too; host side can touch it without a copy. Used for
+  the params snapshot.
+- **Shared** — `sycl::malloc_shared`. Every side can access the same
+  pointer. Used for the cancellation flag and the device profiler ring
+  (both written from device, read from host).
+
+(In software/native mode the queue is null and all three fall back to plain
+`new[]`/`delete[]` — the pool's `void *queue_` field is null and every op
+becomes a `std::memcpy`/`memset`.)
+
+### `rt::MemoryPool`
+
+One pool is bound to a queue (or null for software mode). It exposes a
+single allocation API:
+
+```cpp
+class MemoryPool {
+    void *queue_ = nullptr;                      // sycl::queue*, null in software mode
+    std::vector<Entry> entries_;                  // the registry (host-only)
+    int64_t bytes_[3] = {0,0,0};                  // per-kind live bytes
+public:
+    template <typename T> Buffer<T> alloc(MemoryKind kind, size_t count);
+    template <typename T> Buffer<T> alloc_device(size_t n);   // shorthands
+    template <typename T> Buffer<T> alloc_host(size_t n);
+    template <typename T> Buffer<T> alloc_shared(size_t n);
+    template <typename T> Buffer<T> upload(const T *host, size_t n); // -> Device
+
+    void copy_to_device(void *dst, const void *src, size_t bytes);
+    void copy_to_host(void *dst, const void *src, size_t bytes);
+    void fill(void *ptr, int val, size_t bytes);
+
+    void bind(void *q);                          // rebind after a backend switch
+    void drain();                                // queue->wait()
+    void release(void *ptr);                     // free + unregister (drains first)
+    void release_all();                           // drain + free every entry
+    int64_t device_bytes() const;
+    int64_t host_bytes() const;
+    bool check_frame_clean(const char *where);   // Frame-scope enforcement
+};
+```
+
+**Drain-on-free invariant.** `release()` and `release_all()` always call
+`queue->wait()` first. The in-order queue plus the blocking kernel
+(`foreach_pixel` waits internally) means the wait is essentially free in the
+steady state — but it removes the footgun of freeing a buffer that an
+enqueued op still references. Callers no longer need to remember the
+"drain before free" choreography; the allocator owns it.
+
+**Registry holds the queue.** `sycl::free` must be called with the queue
+that allocated, so the pool remembers `queue_` per entry implicitly (all
+entries share the pool's bound queue). A backend switch rebinds the pool
+*after* `release_all()` frees every entry with the old queue — the bug-class
+of freeing with a destroyed queue is eliminated.
+
+### `rt::Buffer<T>` — owning handle
+
+```cpp
+template <typename T> struct Buffer {
+    MemoryPool *pool = nullptr;
+    T *data = nullptr;
+    size_t count = 0;
+    MemoryKind kind = MemoryKind::Device;
+    ~Buffer() { release(); }    // RAII; move-only
+};
+```
+
+An owning `Buffer` is the **only** thing that frees memory. A raw pointer
+obtained from `buf.data` (for capturing into a device lambda, or handing to
+`SceneView`) is a *borrowed view* — it is valid only while its owning
+`Buffer` lives and must never be freed. `Buffer::write`/`read` are the
+explicit side-to-side copies.
+
+`rt::Runtime` retains its kernel-facing API (`alloc_device`, `alloc_host`,
+`dealloc`, `make_input`, `make_output`, `read_back`, `copy_to_device`,
+`copy_to_host`, `fill`) and forwards every call to its `MemoryPool *pool`.
+Kernels and `SceneBuilder` keep working unchanged. The pool is stored as a
+**pointer** on `Runtime` (forward-declared, incomplete type) rather than an
+embedded member, so the `Runtime` struct parses cleanly in the SYCL device
+pass (where `std::vector` cannot be instantiated); the pool itself is
+host-only.
+
+### Scopes and lifetimes
+
+| Scope | Allocated by | Released by | Examples |
+|-------|-------------|------------|----------|
+| **App** | app, process lifetime | process end / explicit destroy | DisplayTarget staging, GL textures, host `std::vector` scratch |
+| **Kernel** | app on the kernel's behalf | `release_all()` on reload / backend switch / shutdown | accum, params, trace counters, cancel flag, `SceneData` arrays |
+| **Frame** | kernel host side | **before `kernel_entry` returns** (strict) | `make_input`/`make_output` per-call buffers |
+
+**Frame scope is enforced.** `call_kernel_entry` (src/kernel/dispatch.h) calls
+`ctx.runtime->pool->check_frame_clean("after kernel_entry")` on return; if
+the registry still holds Frame-scope leftovers in a debug build it logs an
+error and frees them (self-healing). The no-state-between-calls contract for
+kernels is thus a runtime-checked property, not a hope.
+
+### Runtime transitions (all uniform now)
+
+| Event | What happens to memory |
+|-------|------------------------|
+| Frame end | kernel already blocked; Frame allocations freed by RAII / checked empty |
+| Scene switch / hot reload | `release_all()` on the Kernel-scope pool, then rebuild with the same queue |
+| Backend switch | `release_all()` (frees with the **old** queue) → `pool.bind(new_queue)` → realloc |
+| Resize | `release(accum)` (drains) → alloc new accum |
+| Shutdown | `release_all()` while the queue is still alive |
+
+The previously hand-rolled "drain → free each raw pointer → null it" lists in
+`KernelRuntime::{~KernelRuntime, ordered_reload, free_device_resources,
+alloc_device_resources, resize}` collapse into pool calls; the profiler rings
+in `AppState` (which were `sycl::malloc_shared` outside any registry) move
+into the same pool so backend-switch teardown is uniform and the freed-with-
+dangling-queue bug is gone.
 
 ## Build system
 
