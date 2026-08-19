@@ -227,6 +227,16 @@ extern "C" void kernel_entry(const rt::Context *ctxp) {
 GPU/CPU backends, plain loops in native mode), and accumulates samples
 into `ctx.accum`.
 
+Every pixel's path is marked with `PROFILER_INTEREST_BEGIN(px,
+"pixel_path")` (a scope guard wrapping the per-pixel body inside
+`rt::render()`).  That makes per-pixel profiling **sampled**: the host
+"Profiler" panel sets a percentage, and only that many percent of the
+pixels get their full path trace (bounce steps, hit tests, scatter,
+emit, tonemap) recorded — the rest emit zero profiler records.  This
+keeps a full frame's traces inside the device ring when the scene is too
+complex to record every pixel; see docs/architecture.md → "Profiler
+buffer wiring".
+
 ## Primitive composition
 
 Primitives can be composed from other primitives.  For example, `Box` is

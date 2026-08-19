@@ -14,12 +14,35 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#if defined(__linux__)
+#include <sys/sysinfo.h>
+#endif
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+/// Total memory the device profiler ring is drawn from, in bytes:
+/// GPU backend → device global memory, CPU / software → system RAM.
+inline uint64_t ring_total_mem_bytes(AppState &state) {
+    if ( state.kr && state.kr->queue_ptr() ) {
+        const auto &backends = state.kr->backends();
+        const int idx = state.kr->active_backend();
+        if ( idx >= 0 && idx < (int)backends.size() &&
+             backends[idx].id == "gpu_sycl" ) {
+            return state.kr->queue().get_device()
+                .get_info<sycl::info::device::global_mem_size>();
+        }
+    }
+#if defined(__linux__)
+    struct sysinfo si;
+    if ( sysinfo(&si) == 0 ) return (uint64_t)si.totalram * si.mem_unit;
+#endif
+    return 0;
+}
+
 /// Update auto-generated standard stats (FPS, SPP, memory, etc.).
 inline void update_standard_stats(AppState &state) {
-    auto *scene_desc = state.kr ? state.kr->scene_desc() : nullptr;
+    auto scene_desc = state.kr ? state.kr->scene_desc() : nullptr;
     if ( !scene_desc ) return;
     auto &krt = state.kr->runtime();
     auto fps = scene_desc->find_stat_ref("fps");
@@ -34,9 +57,11 @@ inline void update_standard_stats(AppState &state) {
     auto px = scene_desc->find_stat_ref("pixel_count");
     if ( px.valid() ) px.set((float)(state.width * state.height) / 1e6f);
     auto dev_mem = scene_desc->find_stat_ref("device_memory_mb");
-    if ( dev_mem.valid() ) dev_mem.set((float)krt.device_memory_used / (1024.0f * 1024.0f));
+    if ( dev_mem.valid() )
+        dev_mem.set((float)(krt.pool ? krt.pool->device_bytes() : 0) / (1024.0f * 1024.0f));
     auto host_mem = scene_desc->find_stat_ref("host_memory_mb");
-    if ( host_mem.valid() ) host_mem.set((float)krt.host_memory_used / (1024.0f * 1024.0f));
+    if ( host_mem.valid() )
+        host_mem.set((float)(krt.pool ? krt.pool->host_bytes() : 0) / (1024.0f * 1024.0f));
 }
 
 // ── Controls panel ────────────────────────────────────────────────────
@@ -45,8 +70,12 @@ inline void update_standard_stats(AppState &state) {
 /// parameter controls, camera controls, statistics, backend switcher, etc.
 inline void render_controls_panel(AppState &state) {
     if (!state.kr) return;
-    auto *scene_desc = state.kr->scene_desc();
-    auto *scene_def  = state.kr->scene();
+    // Shared-ptr copies: the render thread can swap in a new descriptor
+    // (hot reload, scene/backend switch) while this function runs — the
+    // copies keep the old one alive, so nothing here ever dereferences a
+    // freed descriptor.
+    auto scene_desc = state.kr->scene_desc();
+    const SceneDef *scene_def  = state.kr->scene();
     auto &krt = state.kr->runtime();
 
     ImGui::Begin("Controls");
@@ -58,30 +87,18 @@ inline void render_controls_panel(AppState &state) {
             bool sel = scene_def && scene_def->name == s.name;
             if ( ImGui::Selectable(s.name.c_str(), sel) ) {
                 if ( !sel ) {
-                    state.render_paused.store(true);
-                    state.pause_pipeline();
-                    if (state.kr->switch_scene(s, state.width, state.height)) {
-                        state.current_spp = 0;
-                        state.target_spp = state.kr->scene()
-                            ? state.kr->scene()->max_spp : 1;
-                        state.tick.store(0);
-                        state.scene_start_time = std::chrono::steady_clock::now();
-                        state.orbit_init = false;
-                        state.on_scene_changed();
-                        state.kernel_ready.store(true);
-                        state.render_paused.store(false);
-                    } else {
-                        state.render_paused.store(false);
-                    }
+                    // Deferred scene switch: the render thread applies the
+                    // build + reload; the UI re-runs on_scene_changed() for
+                    // the new generation and re-raises kernel_ready.
+                    state.request_scene_switch(&s);
                 }
             }
         }
         ImGui::EndCombo();
     }
 
-    // A scene switch above replaces state.kr's active SceneDescriptor
-    // (the old one is destroyed) — re-fetch so the rest of this function
-    // never dereferences the stale pointer captured before the switch.
+    // A scene switch above replaces state.kr's active SceneDescriptor —
+    // re-fetch so the rest of this function uses the current one.
     scene_desc = state.kr->scene_desc();
     scene_def  = state.kr->scene();
 
@@ -113,14 +130,16 @@ inline void render_controls_panel(AppState &state) {
             param_changed = true;
         }
         if ( param_changed ) {
-            spdlog::debug("[param] param changed, re-init kernel and reset accum");
+            spdlog::debug("[param] param changed, coalesced re-init");
             // Kernel-category params may feed init-time precomputation, so
-            // run the full re-init — under the pause handshake, because it
-            // rewrites d_params and kernel .so globals the render thread reads.
-            bool was_ready = state.pause_pipeline();
-            state.kr->reinit_kernel();
-            state.current_spp = 0;
-            state.resume_pipeline(was_ready);
+            // the full re-init (rewrite d_params + rebuild the host scene)
+            // runs as a coalesced render-thread command — at most one is in
+            // flight and rapid drags collapse to the latest values.
+            {
+                std::lock_guard<std::mutex> lk(state.reinit_mtx);
+                state.reinit_params = scene_desc->current_buffer;
+                state.reinit_pending = true;
+            }
         }
     }
 
@@ -134,9 +153,15 @@ inline void render_controls_panel(AppState &state) {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, (ImVec4)ImColor::HSV(0.33f, 0.8f, 0.8f));
             if ( ImGui::Button("> Play") ) {
                 spdlog::info("[render] play \u2014 starting execution loop");
+                // The accumulator clear is a device op → run it on the
+                // render thread.  The loop drains commands at the top of
+                // every iteration, so the clear lands before the first
+                // frame of the resumed pipeline.
+                state.post_cmd([&state] {
+                    state.kr->clear_accum();
+                    state.current_spp.store(0);
+                });
                 state.render_paused.store(false);
-                state.kr->clear_accum();
-                state.current_spp.store(0);
             }
             ImGui::PopStyleColor(3);
             ImGui::SameLine();
@@ -148,8 +173,10 @@ inline void render_controls_panel(AppState &state) {
             if ( ImGui::Button("|| Stop") ) {
                 spdlog::info("[render] pause \u2014 halting execution loop");
                 state.render_paused.store(true);
-                state.current_spp.store(0);
-                state.kr->clear_accum();
+                state.post_cmd([&state] {
+                    state.kr->clear_accum();
+                    state.current_spp.store(0);
+                });
             }
             ImGui::PopStyleColor(3);
             ImGui::SameLine();
@@ -225,50 +252,52 @@ inline void render_controls_panel(AppState &state) {
         ImGui::TextUnformatted(state.kr->device_name().c_str());
 
         if ( backend_changed && new_backend != state.kr->active_backend() ) {
-            state.render_paused.store(true);
-            state.pause_pipeline();
-
             // Preserve live param values across the backend switch:
-            // switch_backend() reloads the scene from YAML, which rebuilds
-            // current_buffer from defaults and would wipe user edits.
-            std::vector<float> saved_params;
-            if ( scene_desc ) saved_params = scene_desc->current_buffer;
+            // apply_backend_switch() reloads the scene from YAML, which
+            // rebuilds current_buffer from defaults and would wipe edits.
+            state.backend_restore_params.clear();
+            if ( scene_desc ) state.backend_restore_params = scene_desc->current_buffer;
 
-            // Display target + device profiler ring hold allocations on the
-            // OLD queue — tear them down while it is still alive, and
-            // rebuild against the new one after the switch.
-            if (state.display_target) {
-                state.display_target->destroy();
-                state.display_target.reset();
-            }
-            state.kr->switch_backend(new_backend, state.width, state.height);
-            state.display_target.reset(create_display_target(
-                state.kr->queue_ptr(), state.width, state.height));
-            state.tex = state.display_target->texture();
-            state.init_profiler_buffers(&state.kr->runtime(),
-                                        state.kr->queue_ptr());
-            state.current_spp = 0;
-            state.target_spp = state.kr->scene()
-                ? state.kr->scene()->max_spp : 1;
-            state.tick.store(0);
-            state.scene_start_time = std::chrono::steady_clock::now();
-            state.on_scene_changed();
+            // Stop the pipeline.  wait_render_idle() parks the render
+            // thread out of its frame scope (bounded — it's not waiting
+            // on device work, just on the frame-scope flag flipping).
+            // The actual device-side teardown (drain the in-flight
+            // tone-map, free the staging USM allocated on the OLD
+            // queue) happens INSIDE the render-thread closure below —
+            // the UI thread never blocks on a SYCL queue wait.  The
+            // display target object stays alive until the ack
+            // (process_frame_ops step 5) calls destroy() on the UI
+            // thread to release its GL/CUDA-GL resources, then
+            // recreates it on the new queue.
+            state.kernel_ready.store(false);
+            state.wait_render_idle();
 
-            // Restore the saved params.  Same scene re-parsed, so the
-            // layout (param order/offsets) is identical; re-publish so the
-            // render thread picks them up before its first frame.  Must
-            // re-fetch scene_desc — the switch destroyed the old one.
-            scene_desc = state.kr->scene_desc();
-            if ( scene_desc && saved_params.size() == scene_desc->current_buffer.size() ) {
-                scene_desc->current_buffer = std::move(saved_params);
-                state.param_store.publish(scene_desc->current_buffer.data(),
-                                          scene_desc->buffer_size(),
-                                          /*restart_accum=*/true);
-                state.current_spp = 0;
-            }
-
-            state.kernel_ready.store(true);
-            state.render_paused.store(false);
+            state.pending_device_ops.fetch_add(1);
+            state.post_cmd([&state, new_backend] {
+                // Render-thread: drain the queue + free staging USM
+                // (release_device_buffers — allowed to block here)
+                // BEFORE apply_backend_switch frees the old queue.
+                if (state.display_target)
+                    state.display_target->release_device_buffers();
+                state.kr->apply_backend_switch(
+                    new_backend, state.kr->width(), state.kr->height());
+                // The device profiler ring holds allocations on the old
+                // queue (freed by the switch) — re-create it against the
+                // new queue here, on the render thread.
+                state.init_profiler_buffers(&state.kr->runtime(),
+                                            state.kr->queue_ptr());
+                // Same for the per-lane sample-flags array (freed with
+                // the ring above) — re-alloc against the new pool at the
+                // current resolution.
+                state.ensure_profiler_sample_flags(
+                    (uint32_t)(state.kr->width() * state.kr->height()));
+                state.backend_switch_applied.store(true);
+                state.current_spp.store(0);
+                state.tick.store(0);
+                state.scene_start_time.store(std::chrono::steady_clock::now());
+                state.scene_generation.fetch_add(1);
+                state.pending_device_ops.fetch_sub(1);
+            });
         }
     }
 
@@ -302,21 +331,24 @@ inline void render_controls_panel(AppState &state) {
         bool enabled = state.profiler_enabled;
         if ( ImGui::Checkbox("Enable profiler (kernel build)", &enabled) &&
              enabled != state.profiler_enabled ) {
-            // Reconfigure the CMake cache + rebuild the active kernel
-            // with the new compile-time flag (mirrors a backend switch:
-            // stop the pipeline first, rebuild, then resume).
-            state.render_paused.store(true);
-            state.pause_pipeline();
-            state.kr->set_profiler_enabled(enabled);
+            // Deferred: the CMake reconfigure + rebuild + reload runs as a
+            // command on the render thread (the UI stays responsive for the
+            // whole rebuild); the UI re-runs on_scene_changed() for the new
+            // generation and re-raises kernel_ready.
             state.profiler_enabled = enabled;
-            state.current_spp = 0;
-            state.target_spp = state.kr->scene()
-                ? state.kr->scene()->max_spp : 1;
-            state.tick.store(0);
-            state.scene_start_time = std::chrono::steady_clock::now();
-            state.on_scene_changed();
-            state.kernel_ready.store(true);
-            state.render_paused.store(false);
+            state.kernel_ready.store(false);
+            state.pending_device_ops.fetch_add(1);
+            state.post_cmd([&state, enabled] {
+                if ( state.kr->apply_profiler_toggle(enabled) ) {
+                    state.current_spp.store(0);
+                    state.target_spp.store(state.kr->scene()
+                        ? state.kr->scene()->max_spp : 1);
+                    state.tick.store(0);
+                    state.scene_start_time.store(std::chrono::steady_clock::now());
+                    state.scene_generation.fetch_add(1);
+                }
+                state.pending_device_ops.fetch_sub(1);
+            });
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
@@ -327,6 +359,115 @@ inline void render_controls_panel(AppState &state) {
                 "macro a no-op — the kernel carries zero profiling "
                 "overhead.  Changing it reconfigures CMake and rebuilds "
                 "the active kernel.");
+        }
+
+        // ---- Ring capacity (runtime, resize-on-the-fly) ----
+        // Sized as a percentage of the active backend's total memory
+        // (GPU global memory on the GPU backend, system RAM on CPU /
+        // software).  The slider is log-scaled because useful ring sizes
+        // are tiny fractions of device memory; the capacity snaps to a
+        // power of two (the ring masks with idx & (cap-1)).
+        const uint32_t cap = state.ring_capacity.load();
+        uint64_t total_mem = ring_total_mem_bytes(state);
+        // If the memory query returned 0 (transient — e.g. during the
+        // very first frame before the sysinfo/SYCL query completes),
+        // derive a usable total from the current capacity so the
+        // percent slider and resize logic still work.
+        if ( total_mem == 0 && cap > 0 )
+            total_mem = (uint64_t)cap * 16;   // assume ring ≈ 100%
+        const double cur_pct = total_mem > 0
+            ? (double)cap * 16.0 / (double)total_mem * 100.0
+            : 0.0;
+
+        char total_txt[64];
+        if ( total_mem >= (1024ull * 1024ull * 1024ull) )
+            snprintf(total_txt, sizeof(total_txt), "%.2f GiB",
+                     (double)total_mem / (1024.0 * 1024.0 * 1024.0));
+        else if ( total_mem >= (1024ull * 1024ull) )
+            snprintf(total_txt, sizeof(total_txt), "%.1f MiB",
+                     (double)total_mem / (1024.0 * 1024.0));
+        else
+            snprintf(total_txt, sizeof(total_txt), "?");
+        ImGui::Text("Device ring: %.3f%% of %s", cur_pct, total_txt);
+
+        // Persistent slider state so a live drag doesn't fight the
+        // actual ring capacity (updated only after the render thread
+        // applies the resize); re-synced from the ring whenever idle.
+        static float s_ring_pct = -1.0f;
+        static bool s_ring_editing = false;
+        if ( !s_ring_editing ) s_ring_pct = (float)cur_pct;
+        constexpr float kMinPct = 0.001f, kMaxPct = 100.0f;
+        ImGui::SliderFloat("##ring_pct", &s_ring_pct, kMinPct, kMaxPct,
+                           "%.3f%%", ImGuiSliderFlags_Logarithmic);
+        s_ring_editing = ImGui::IsItemActive();
+
+        // Size for the current slider position (live preview, snapped to
+        // a power of two) — shown alongside the percent above.
+        uint64_t want_rec = total_mem > 0
+            ? (uint64_t)((double)s_ring_pct / 100.0 * (double)total_mem / 16.0)
+            : cap;
+        if ( want_rec < 2 ) want_rec = 2;
+        if ( want_rec > (1ull << 30) ) want_rec = 1ull << 30;
+        const uint32_t target = AppState::next_pow2((uint32_t)want_rec);
+        ImGui::Text("= %u records (%.2f MiB)", target,
+                    target * 16.0 / (1024.0 * 1024.0));
+
+        if ( ImGui::IsItemDeactivatedAfterEdit() && target != cap ) {
+            state.request_ring_resize(target);
+        }
+        if ( ImGui::IsItemHovered() )
+            ImGui::SetTooltip(
+                "Device-side profiler ring as a percentage of the active "
+                "backend's total memory (GPU global memory on the GPU "
+                "backend, system RAM on CPU / software).  Records are "
+                "16 bytes each; the capacity snaps to the nearest power "
+                "of two.  The ring wraps per frame, so if a frame writes "
+                "more records than this, the tail is dropped.  Resize "
+                "applies at the next frame boundary on the render thread "
+                "(no kernel reload).");
+
+        // ---- Overflow warning ----
+        const uint32_t last_wp = state.tracy_bridge.last_write_pos();
+        const bool ovf = state.tracy_bridge.last_overflow();
+        if ( ovf ) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.2f, 1.0f));
+            ImGui::TextWrapped("⚠ Ring overflow — dropped records.");
+            ImGui::TextWrapped("Last frame wrote %u records (cap %u).  "
+                               "Full-frame trace needs ~%u records (%.0f MB).",
+                               last_wp, cap,
+                               state.next_pow2(last_wp),
+                               state.next_pow2(last_wp) * 16.0 / (1024.0 * 1024.0));
+            ImGui::PopStyleColor();
+        }
+
+        // ---- Interest-zone sampling ----
+        // PROFILER_INTEREST_BEGIN regions (e.g. the per-pixel path in the
+        // raytracing kernel) record or drop their ENTIRE trace per
+        // work-item depending on this percentage: with 0% nothing inside
+        // an interest zone is recorded, with 100% everything is.  This
+        // trades trace completeness for ring headroom — sampling ~10-30%
+        // of the pixels usually keeps a full frame inside the default
+        // 256K ring.
+        {
+            int pct = (int)state.profiler_interest_pct.load();
+            ImGui::Text("Interest-zone sampling: %d%%", pct);
+            if ( ImGui::SliderInt("Sampled traces", &pct, 0, 100,
+                                  "%d%%") &&
+                 pct != (int)state.profiler_interest_pct.load() ) {
+                // Applied next frame by the render loop (uploaded to the
+                // ring header before dispatch) — no device op needed.
+                state.profiler_interest_pct.store((uint32_t)pct);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if ( ImGui::IsItemHovered() ) {
+                ImGui::SetTooltip(
+                    "%% of work-items whose PROFILER_INTEREST_BEGIN region "
+                    "(the per-pixel raytrace path) is fully recorded; the "
+                    "rest drop every profiler record.  Lower it to keep a "
+                    "full frame's traces inside the ring (see warning above) "
+                    "without dropping the tail mid-zone.");
+            }
         }
     }
 

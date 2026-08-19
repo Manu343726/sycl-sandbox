@@ -60,6 +60,8 @@ int run_loader_diag(const std::string &path) {
     builder.build_mesh_bvhs();
 
     rt::Runtime rt; // queue == nullptr → software mode (heap)
+    rt::MemoryPool pool; // heap allocation mode
+    rt.pool = &pool;
     rt::SceneData data = builder.build(&rt);
 
     std::printf("== built scene: handles=%d  quads=%d  boxes=%d  spheres=%d\n",

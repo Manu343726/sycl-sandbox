@@ -376,7 +376,8 @@ contract is trivially met.)
 
 The device profiler ring works on **every backend** (software / SYCL-CPU
 / GPU).  It is a single-address buffer pair (`AppState::d_ring_header_` /
-`d_ring_records_`, capacity 256 K records) allocated through
+`d_ring_records_`, capacity a runtime-adjustable power of two, default
+256 K records — see "Profiler buffer wiring" below) allocated through
 `MemoryPool::alloc_shared` with `MemScope::App`, so backend-switch
 teardown (`release_all`) frees it uniformly:
 
@@ -401,13 +402,35 @@ inactive ring (null header) makes every zone a no-op.  After the frame
 
 The ring is **reset every frame** (`write_pos` zeroed after drain), so
 within a frame the kernel writes into a fresh buffer but wraps around
-the capacity if it exceeds 256 K records.  When it wraps, mid-zone
-ENTER/(EXIT records are dropped, which yields unpaired zone endpoints in
+the capacity if it exceeds the ring size.  When it wraps, mid-zone
+ENTER/EXIT records are dropped, which yields unpaired zone endpoints in
 the trace; the bridge warns (`[tracy] N zone EXIT records had no
-matching ENTER`) when this happens.  Decimation
-(`AppState::SAMPLED_ITEMS = 1024`) limits how many work-items emit
-zones, but a complex scene still overflows — the capacity is a tuning
-knob if zone coverage needs to improve.
+matching ENTER`) when this happens.  Two knobs control this:
+
+- **Ring capacity** (Profiler panel): `AppState::ring_capacity` is an
+  atomic (default 256 K records = 16-byte records → 4 MB).  The UI
+  re-allocates it on the fly via `AppState::request_ring_resize()` — a
+  render-thread closure that frees the old buffer pair and allocates a
+  new one at loop-top, where no frame is in flight (`Buffer::operator=`
+  returns the old USM to the pool immediately, so resizing never leaks).
+  The capacity must be a power of two (`idx & (capacity - 1)`).
+- **Interest-zone sampling** (Profiler panel slider, 0-100%): the
+  raytracer marks the body of `foreach_pixel` with
+  `PROFILER_INTEREST_BEGIN(px, "pixel_path")`
+  (include/sycl-sandbox/rt/trace.h).  Each work-item's guard reads
+  `header->interest_pct` (uploaded by the render loop every frame, since
+  the bridge memsets the header to zero on drain) and decides
+  deterministically whether to record: `hash(lane) % 100 < pct`.  The
+  decision is stored in a per-lane byte array
+  (`AppState::d_prof_sample_flags_`, `profiler::DeviceRing::sample_flags`,
+  sized to the pixel count on scene switch / resize / backend switch).
+  0 = not inside an interest zone (record), 1 = inside a sampled zone
+  (record), 2 = inside a dropped zone — every nested `PROFILER_ZONE` /
+  `MSG` / `PLOT` record is skipped.  Dropped work-items emit zero
+  records, so a 10-30% sampling rate keeps a full frame inside the
+  default 256 K ring where the full trace (≈ 700 K records for the mesh
+  demo) would overflow.  Sampling is uniform: ~pct% of pixels get their
+  entire path trace recorded, the rest contribute nothing.
 
 ### Profiler compile-time toggle
 
@@ -641,16 +664,25 @@ When enabled, Tracy (master) is fetched via `FetchContent` and provides:
   separate process that connects to it.
 
 **Bridge** (`src/tracy/tracy_bridge.{h,cpp}`).  The kernel profiler's
-device records (read back from the `ctx.prof` ring after each frame,
-timestamps already in the host rdtsc cycle domain) are forwarded to the
-client with the serial GPU C API (`TracyC.h`
-`___tracy_emit_gpu_*_serial`) on a "Custom" GPU context (type 7).  Like
-the official Rocprof client, the context period is `1.0f` and a
-`GpuCalibration` event is emitted every frame — the server maps
-gpu→cpu time from `cpuDelta` (cpu time elapsed since the previous
-calibration).  Zone names are cached as source locations with stable
-FNV-1a colors.  All emissions are connection-gated, so `submit()` runs
-from the render thread every frame at no cost while nothing is
+device records (read back from the `ctx.prof` ring after each frame) are
+forwarded to the client with the serial GPU C API (`TracyC.h`
+`___tracy_emit_gpu_*_serial`) on a "Custom" GPU context (type 7).  The
+device clock is the TSC (`DeviceRing::timestamp()` = `rdtsc`), the same
+clock Tracy's host timestamps use.  Zone begin/end times are emitted
+RAW in `___tracy_emit_gpu_time_serial` — the protocol requires raw
+device-clock values (the client wire layer delta-compresses them and the
+server re-integrates), so the bridge never pre-maps them into a host
+bracket.  Like the official Rocprof client, the context period is
+`1.0f` and a `GpuCalibration` event is emitted every frame; its
+`cpuDelta` must be host **nanoseconds** since the previous calibration
+(the server computes `calibrationMod = cpuDelta / gpuDelta` = ns per
+device cycle) — `steady_clock` ns is used, NOT `Tracy::Profiler::
+GetTime()`, which returns raw TSC cycles on x86_64.  A seed calibration
+measured over the `init()` window is emitted right after the context so
+the first frame's zones don't fall back on Tracy's provisional
+`calibrationMod = 1.0`.  Zone names are cached as source locations with
+stable FNV-1a colors.  All emissions are connection-gated, so `submit()`
+runs from the render thread every frame at no cost while nothing is
 connected.
 
 **Device zones & profiler name extraction.**  Every raytracing stage is

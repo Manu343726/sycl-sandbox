@@ -241,8 +241,6 @@ void render(const Context &ctx, BgFn &&background_fn) {
     float tm_gamma   = reader.read<float>("tonemap_gamma");
 
     ctx.runtime->foreach_pixel<KernelName>(ctx.width, ctx.height, [=](int x, int y, int flat_index) {
-        PROFILER_ZONE("render_pixel");
-
         // Per-work-item context: a copy of the frame context with a
         // consistent linear id for this pixel (the profiler ring and the
         // per-frame hit counters carry over from the frame context; the
@@ -251,8 +249,24 @@ void render(const Context &ctx, BgFn &&background_fn) {
         rt::Context px = ctx;
         px.linear_id = static_cast<uint32_t>(flat_index);
 
+        // Interest-zone sampling: every profiler zone below (the pixel
+        // wrapper, samples, bounce steps, hit tests, scatter, emit,
+        // tonemap) is either fully recorded or fully dropped for this
+        // pixel, depending on the host-configured PROFILER_INTEREST
+        // sampling percentage (see the "Profiler" panel).  Dropped
+        // pixels emit zero records — this is what keeps the ring from
+        // overflowing when a full frame's traces don't fit.  RAII: the
+        // zone ends at lambda scope exit.
+        PROFILER_INTEREST_BEGIN(px, "pixel_path");
+
+        // Per-pixel wrapper.  Sits INSIDE the interest gate so un-sampled
+        // pixels emit nothing at all — the ring is left for the sampled
+        // lanes' complete trees (which is what keeps the deep library
+        // zones like trace_bounce / bvh_hit / aabb_slab in the trace).
+        PROFILER_ZONE_IN(px, "render_pixel");
+
         for ( int sample = 0; sample < params.spp_frame; sample++ ) {
-            PROFILER_ZONE("render_sample");
+            PROFILER_ZONE_IN(px, "render_sample");
 
             // Initialise the per-pixel, per-sample RNG from the pixel index and
             // total accumulated samples for stream decorrelation.
@@ -287,7 +301,7 @@ void render(const Context &ctx, BgFn &&background_fn) {
                                   params.transparent_backfaces, rng, background_fn, px);
 
             {
-                PROFILER_ZONE("accumulate_pixel");
+                PROFILER_ZONE_IN(px, "accumulate_pixel");
 
                 // Accumulate the sample into the RGBA output buffer
                 int base = flat_index * 4;

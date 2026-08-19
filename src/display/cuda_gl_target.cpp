@@ -126,19 +126,11 @@ bool CudaGLDisplayTarget::init(sycl::queue *q, int w, int h, int slots) {
     return true;
 }
 
-void CudaGLDisplayTarget::destroy() {
-    std::lock_guard<std::mutex> lk(mtx_);
-    drain();
-    free_slots();
-    if (tex_) { glDeleteTextures(1, &tex_); tex_ = 0; }
-    if (ctx_retained_) {
-        cuda_api::cuDevicePrimaryCtxRelease(cu_dev_);
-        ctx_retained_ = false;
-        cu_ctx_ = nullptr;
-    }
-}
-
 void CudaGLDisplayTarget::free_slots() {
+    // Full teardown — drains USM, unregisters CUDA-GL resources, AND
+    // deletes the GL PBO buffers.  Use from the UI thread (GL context
+    // current) — release_device_buffers() is the render-thread half
+    // that skips the glDeleteBuffers half.
     using namespace cuda_api;
     if (cu_ctx_) cuCtxSetCurrent(cu_ctx_);
     for (auto &s : slots_) {
@@ -155,12 +147,58 @@ void CudaGLDisplayTarget::free_slots() {
     slots_.clear();
 }
 
+void CudaGLDisplayTarget::release_device_buffers() {
+    // Render-thread half of a backend switch: drain the queue (the
+    // render thread is allowed to block on device work; the UI thread
+    // is not) and free the device-visible staging buffers while the OLD
+    // queue still exists.  Then null q_ so the UI-thread destroy() never
+    // dereferences the OLD queue pointer (which apply_backend_switch
+    // frees right after this returns).  The CUDA-GL resources
+    // (s.resource) and GL PBO (s.pbo) are LEFT for destroy() on the UI
+    // thread — they need the GL context.
+    std::lock_guard<std::mutex> lk(mtx_);
+    drain();
+    using namespace cuda_api;
+    if (cu_ctx_) cuCtxSetCurrent(cu_ctx_);
+    for (auto &s : slots_) {
+        if (s.d_staging && q_) {
+            sycl::free(s.d_staging, *q_);
+            s.d_staging = nullptr;
+        }
+    }
+    q_ = nullptr;
+}
+
+void CudaGLDisplayTarget::destroy() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // release_device_buffers() may have freed the device staging on the
+    // render thread (backend-switch path); free_slots() handles both
+    // legs — UK-side CUDA-GL resources + GL PBO on the UI thread here —
+    // and is a no-op for slots already fully released.  When destroy()
+    // is the only call (shutdown / non-switch teardown) the slots are
+    // fully live and are drained + freed here.
+    if (!slots_.empty()) { drain(); free_slots(); }
+    if (tex_) { glDeleteTextures(1, &tex_); tex_ = 0; }
+    if (ctx_retained_) {
+        cuda_api::cuDevicePrimaryCtxRelease(cu_dev_);
+        ctx_retained_ = false;
+        cu_ctx_ = nullptr;
+    }
+}
+
 void CudaGLDisplayTarget::resize(int w, int h) {
     // Caller guarantees the render thread is not mid-frame (pause_pipeline).
     std::size_t n;
     {
+        // No drain() here: the render-thread apply_resize closure already
+        // drained the queue (KernelRuntime::resize() → krt_.fill →
+        // q->memset().wait(), which in the in-order queue completes only
+        // after every prior command — including the in-flight render
+        // kernel + tone-map that wrote into the OLD staging slots — has
+        // finished).  By the time the UI thread sees resize_applied and
+        // calls us, those staging writes are quiescent, so we can free
+        // and reallocate without blocking the UI thread on q_->wait().
         std::lock_guard<std::mutex> lk(mtx_);
-        drain();
         n = slots_.size();
         free_slots();
         w_ = w;

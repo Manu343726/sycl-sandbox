@@ -29,6 +29,8 @@ namespace {
 
 int run_bvh_diag(int num_rays) {
     rt::Runtime rt; // null queue -> software mode
+    rt::MemoryPool pool; // heap allocation mode
+    rt.pool = &pool;
 
     // Cornell-box-like scene + some spheres (mix of types)
     SceneBuilder b;

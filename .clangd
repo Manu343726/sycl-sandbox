@@ -3,7 +3,7 @@
 # Re-run cmake configure to regenerate.
 
 CompileFlags:
-  CompilationDatabase: "/home/manu343726/Projects/sycl-sandbox/build"
+  CompilationDatabase: "/home/manu343726/Projects/sycl-sandbox/build_debug"
 
 Index:
   Background: Skip

@@ -44,14 +44,27 @@ public:
     /// current.  `q` may be null (software/native backend — synchronous
     /// host execution, default-constructed events count as complete).
     virtual bool init(sycl::queue *q, int w, int h, int slots) = 0;
-    /// Release all resources.  Main thread.  Implementations drain the
-    /// queue internally before freeing device-visible memory.
+    /// Release all resources.  Main thread.  If
+    /// release_device_buffers() was called first (backend-switch path),
+    /// this only frees the GL texture; otherwise it drains the queue and
+    /// frees everything (legacy single-call path).
     virtual void destroy() = 0;
-    /// Reallocate for a new resolution.  Main thread.  The caller must
-    /// have stopped the render thread from acquiring new slots (see
-    /// AppState::pause_pipeline); implementations additionally drain the
-    /// queue before freeing.
+    /// Reallocate for a new resolution.  Main thread.  The caller (the
+    /// resize-ack path in process_frame_ops) is responsible for having
+    /// the render thread drain the SYCL queue BEFORE acking — the
+    /// render-thread apply_resize closure does that via
+    /// KernelRuntime::resize() → krt_.fill → q->memset().wait().  By the
+    /// time this runs the in-flight staging writes are quiescent, so
+    /// resize() must NOT call q_->wait() itself.
     virtual void resize(int w, int h) = 0;
+    /// Drain the SYCL queue and free device-visible staging buffers
+    /// (the render-thread half of a backend switch).  Called on the
+    /// RENDER thread before apply_backend_switch tears down the old
+    /// queue; the staging USM was allocated on that queue and must be
+    /// freed while it still exists.  The GL texture (UI-thread half,
+    /// needs the GL context) is left for destroy() to release.  No-op
+    /// when called a second time (slots already freed).
+    virtual void release_device_buffers() = 0;
 
     // ── Render thread ────────────────────────────────────────────────
     /// Reserve a slot for the next frame.  Returns a slot index, or -1 if

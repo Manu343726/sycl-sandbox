@@ -366,6 +366,8 @@ if(SANDBOX_ENABLE_TRACY)
     target_sources(sycl-sandbox PRIVATE
         tracy/tracy_bridge.cpp
         tracy/tracy_launcher.cpp
+        diags/tracy_diag.cpp
+        diags/profiler_diag.cpp
     )
     target_compile_definitions(sycl-sandbox PRIVATE SANDBOX_ENABLE_TRACY)
 endif()
@@ -401,6 +403,7 @@ target_link_libraries(sycl-sandbox PRIVATE
 if(SANDBOX_ENABLE_TRACY)
     target_link_libraries(sycl-sandbox PRIVATE
         TracyClient
+        TracyServer
     )
 endif()
 

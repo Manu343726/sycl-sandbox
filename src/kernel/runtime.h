@@ -7,6 +7,7 @@
 #include "scene/host_scene.h"
 #include "io/watcher.h"
 #include <sycl-sandbox/sandbox_api.h>
+#include <sycl-sandbox/kernel/memory.h>
 
 #ifndef KERNEL_NATIVE
 #include <sycl/sycl.hpp>
@@ -58,24 +59,16 @@ public:
     /// Call once after construction, before the event loop.
     void setup_all_kernels(SceneRegistry &scenes);
 
-    // ── Lifecycle operations ─────────────────────────────────────
-    /// Full ordered scene switch: cancel → build → load → init.
-    /// On success the caller should:
-    ///   - Reset SPP counters (current_spp = 0, target_spp = scene()->max_spp)
-    ///   - Set tick = 0, scene_start_time = now
-    ///   - Set kernel_ready = true, render_paused = false
-    ///   - Re-init orbit camera
-    /// Returns true if the kernel was loaded successfully.
-    bool switch_scene(const SceneDef &scene, int width, int height);
-
-    /// Full ordered backend switch: free resources → new queue → rebuild → reload.
-    /// @return The index of the newly activated backend.
-    int switch_backend(int new_backend, int width, int height);
-
+    // ── Re-init (param / camera change) ───────────────────────────
     /// Re-init the kernel after a param or camera change (no rebuild).
     /// Copies the latest param buffer to the device and calls init_kernel
-    /// with the last-known width/height.
+    /// with the last-known width/height.  Startup/synchronous path.
     void reinit_kernel();
+    /// Render-thread variant: re-init using an explicit parameter snapshot
+    /// (the UI may be editing current_buffer concurrently).  Silently
+    /// dropped when the snapshot's layout doesn't match the active scene
+    /// (scene switched while the re-init was queued).
+    void reinit_kernel(const std::vector<float> &params);
 
     /// Poll the source watcher for dirty files and check build results.
     /// If a kernel was hot-reloaded, triggers the full ordered_reload
@@ -84,6 +77,29 @@ public:
     /// the app uses it to stop the render thread and drain the queue.
     std::string poll_hot_reload(
         const std::function<void()> &pre_reload = {});
+
+    // ── Render-thread apply variants ─────────────────────────────
+    /// All of these run ON the render thread (posted via the UI command
+    /// mailbox).  They may block on a background build (the render thread
+    /// is allowed to block — the UI never is).  Callers are responsible
+    /// for the surrounding handshake (kernel_ready/apply_epoch).
+
+    /// Scene switch with background build + wait.  Returns false when the
+    /// build failed (no reload performed, old scene stays active).
+    bool apply_scene_switch(const SceneDef &scene, int w, int h);
+
+    /// Backend switch with background build + wait.  Frees resources on
+    /// the old queue, creates the new queue, rebuilds + reloads the
+    /// active scene.  Returns the new backend index.
+    int apply_backend_switch(int new_backend, int w, int h);
+
+    /// Resolution change: re-allocate the accumulation buffer for w×h.
+    void apply_resize(int w, int h);
+
+    /// Reconfigure the CMake cache for SANDBOX_ENABLE_PROFILER and force a
+    /// rebuild + reload of the active kernel with the new flag.
+    /// Returns true when the kernel was successfully rebuilt+reloaded.
+    bool apply_profiler_toggle(bool enabled);
 
     // ── Window resize ────────────────────────────────────────────
     /// Update internal width/height and re-allocate accumulation buffers.
@@ -129,21 +145,25 @@ public:
     /// before the render kernel), read back after frame completion and
     /// folded into the per-frame stat block.  May be null in degenerate
     /// states.
-    rt::TraceCounters *trace_counters() { return d_trace_counters_; }
+    rt::TraceCounters *trace_counters() { return d_trace_counters_.data; }
 
     /// Zero the trace counters before enqueuing the render kernel
     /// (in-order queue sequences the memset ahead of the kernel).
     void zero_trace_counters_async();
 
-    KernelHandle *kernel() const { return active_kernel_; }
-    const SceneDef *scene() const { return active_scene_; }
-    scene_loader::SceneDescriptor *scene_desc() const {
-        return active_scene_desc_.get();
+    KernelHandle *kernel() const { return active_kernel_.load(); }
+    const SceneDef *scene() const { return active_scene_.load(); }
+    /// Current scene descriptor (parsed + laid out).  Returns a shared_ptr
+    /// so UI-side readers can hold the descriptor across a reload that
+    /// swaps in a new one.  Thread-safe.
+    std::shared_ptr<scene_loader::SceneDescriptor> scene_desc() const {
+        std::lock_guard<std::mutex> lk(desc_mtx_);
+        return active_scene_desc_;
     }
 
-    float *d_params() const { return d_params_; }
+    float *d_params() const { return d_params_.data; }
 
-    float *d_accum() const { return d_accum_; }
+    float *d_accum() const { return d_accum_.data; }
     size_t accum_bytes() const { return accum_bytes_; }
     int width() const { return width_; }
     int height() const { return height_; }
@@ -170,12 +190,6 @@ public:
     void begin_frame();
 
     // ── Profiler flag (on-the-fly kernel builds) ─────────────────
-    /// Reconfigure the CMake cache for the on-the-fly kernel builds
-    /// (`SANDBOX_ENABLE_PROFILER=ON|OFF`) and rebuild + reload the
-    /// active kernel with the new compile-time flag.  No-op when no
-    /// kernel is active.  The caller must pause the pipeline first
-    /// (pause_pipeline()) and resume afterwards.
-    void set_profiler_enabled(bool enabled);
     /// Whether the CMake cache currently has SANDBOX_ENABLE_PROFILER=ON
     /// (the value the UI checkbox starts from).  Defaults to true when
     /// the cache file cannot be read.
@@ -183,10 +197,22 @@ public:
 
 private:
     // ── Ordered reload (internal) ────────────────────────────────
-    /// Core ordered sequence shared by switch_scene, backend switch,
+    /// Core ordered sequence shared by backend switch, scene switch,
     /// and hot-reload.  Assumes the kernel binary already exists.
     /// Uses internal width_/height_ for init_kernel dimensions.
     bool ordered_reload(const SceneDef &scene);
+
+    /// Swap in a new scene descriptor (render thread; desc_mtx_ guarded).
+    void set_scene_desc(std::shared_ptr<scene_loader::SceneDescriptor> d) {
+        std::lock_guard<std::mutex> lk(desc_mtx_);
+        active_scene_desc_ = std::move(d);
+    }
+
+    /// Render-thread helper: make sure `kernel`'s binary is built, kicking
+    /// a background build and waiting for it when missing/stale (or always
+    /// when `force` — used when a compile-time define changed).  Returns
+    /// false on build failure.
+    bool ensure_built_async(const std::string &kernel, bool force);
 
     // ── Backend helpers ──────────────────────────────────────────
     void free_device_resources();
@@ -208,13 +234,26 @@ private:
     bool is_software_ = false;
     sycl::queue q_storage_;
     sycl::queue *q_ = nullptr;
+    /// Single allocation registry for all kernel-usable memory.  Bound to
+    /// `q_` (null in software mode).  Declared before `krt_` so the pool
+    /// outlives the Runtime that references it; released explicitly in the
+    /// destructor while the queue is still alive.
+    rt::MemoryPool pool_;
     rt::Runtime krt_;
 
     // ── Active scene / kernel ────────────────────────────────────
-    const SceneDef *active_scene_ = nullptr;
-    KernelHandle *active_kernel_ = nullptr;
-    std::unique_ptr<scene_loader::SceneDescriptor> active_scene_desc_;
-    float *d_params_ = nullptr;
+    /// Pointers into stable, owned storage (SceneRegistry / KernelLibrary),
+    /// so concurrent UI reads see either the old or the new entry — never
+    /// a dangling one.  Atomic because the render thread swaps them on
+    /// reload while the UI reads them every frame.
+    std::atomic<const SceneDef *> active_scene_{nullptr};
+    std::atomic<KernelHandle *> active_kernel_{nullptr};
+    /// Scene descriptor.  Swap-protected by desc_mtx_; readers get a
+    /// shared_ptr copy that keeps the (possibly replaced) descriptor alive
+    /// for as long as they use it.
+    mutable std::mutex desc_mtx_;
+    std::shared_ptr<scene_loader::SceneDescriptor> active_scene_desc_;
+    rt::Buffer<float> d_params_;
     HostScene host_scene_;
 
     // ── Per-frame stats (render-thread private, seqlock-published) ─
@@ -222,10 +261,10 @@ private:
     rt::StatWriter stat_writer_;
 
     // ── Trace counters (device buffer, zeroed per frame) ─────────
-    rt::TraceCounters *d_trace_counters_ = nullptr;
+    rt::Buffer<rt::TraceCounters> d_trace_counters_;
 
     // ── Accumulation buffer (single, persistent) ─────────────────
-    float *d_accum_ = nullptr;
+    rt::Buffer<float> d_accum_;
     size_t accum_bytes_ = 0;
     int width_ = 0;
     int height_ = 0;
@@ -236,10 +275,9 @@ private:
     /// This is the canonical cancel signal for host code; the USM
     /// pointer below is a mirror for device-code visibility.
     std::atomic<int> cancel_requested_{0};
-    /// USM-shared flag mirror for device code.  May be null (software
-    /// backend) or briefly null during a backend switch.  Host code
-    /// must NEVER access this pointer — use cancel_requested_ instead.
-    /// Only the render thread (which owns the queue lifecycle) reads
-    /// and writes this pointer.
-    int *cancel_flag_ = nullptr;
+    /// USM-shared flag mirror for device code.  Allocated through the
+    /// pool (Shared kind) so backend-switch teardown is uniform.  May
+    /// be empty (software backend) or briefly empty during a backend
+    /// switch.
+    rt::Buffer<int> cancel_flag_;
 };

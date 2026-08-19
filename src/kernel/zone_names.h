@@ -35,12 +35,23 @@
 
 namespace profiler {
 
+namespace detail {
+/// Shared runtime name map + guard (function-local statics below both
+/// reference this so registered hot-reload names are visible to lookups).
+inline std::mutex &runtime_names_mtx() {
+    static std::mutex mtx;
+    return mtx;
+}
+inline std::unordered_map<uint32_t, std::string> &runtime_names() {
+    static std::unordered_map<uint32_t, std::string> names;
+    return names;
+}
+} // namespace detail
+
 /// Register a runtime-discovered name (hot-reload fallback).
 inline void register_zone_name(uint32_t hash, std::string name) {
-    static std::mutex mtx;
-    static std::unordered_map<uint32_t, std::string> names;
-    std::lock_guard<std::mutex> lock(mtx);
-    names[hash] = std::move(name);
+    std::lock_guard<std::mutex> lock(detail::runtime_names_mtx());
+    detail::runtime_names()[hash] = std::move(name);
 }
 
 /// Look up the display name for a hash.
@@ -54,9 +65,8 @@ inline std::string lookup_zone_name(uint32_t hash) {
     if (!sv.empty()) return std::string(sv);
 #endif
     // Tier 2: runtime map (hot-reload names + fallback).
-    static std::mutex mtx;
-    static std::unordered_map<uint32_t, std::string> names;
-    std::lock_guard<std::mutex> lock(mtx);
+    std::lock_guard<std::mutex> lock(detail::runtime_names_mtx());
+    auto &names = detail::runtime_names();
     auto it = names.find(hash);
     return it != names.end() ? it->second : std::string{};
 }

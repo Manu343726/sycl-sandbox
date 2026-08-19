@@ -40,6 +40,9 @@ int run_gpu_diag(const std::string &yaml, const std::string &so_path,
     auto config = scene_loader::load_and_resolve(yaml);
     rt::Runtime rt;
     rt.queue = &q;
+    rt::MemoryPool pool;
+    pool.bind(&q);
+    rt.pool = &pool;
     rt::SceneBuilder builder;
     scene_loader::build_scene(builder, config);
     builder.build_bvh();

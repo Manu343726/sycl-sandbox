@@ -239,12 +239,14 @@ inline void render_thread_func(AppState &state) {
         sycl::queue *q = state.kr->queue_ptr();
         int32_t w = state.kr->width(), h = state.kr->height();
         size_t pixels = (size_t)w * h;
-        profiler::DeviceRing ring = state.device_ring(pixels);
 
-#ifdef SANDBOX_ENABLE_PROFILER
-        // Host timestamp bracket for the device ring → Tracy bridge.
-        uint64_t host_t0 = profiler::DeviceRing::timestamp();
-#endif
+        // Interest-zone sampling percentage → device ring header.  Must
+        // run every frame: the Tracy bridge memsets the header to zero
+        // after draining, so a change-only upload would leave the kernel
+        // reading 0% (drop everything) the frames after an update.
+        state.upload_profiler_pct(q, state.profiler_interest_pct.load());
+
+        profiler::DeviceRing ring = state.device_ring(pixels);
 
         // ── Frame context for the kernel (single entry, no ops) ──
         // Params travel as a ParamLookup over the render-thread-owned
@@ -277,6 +279,8 @@ inline void render_thread_func(AppState &state) {
         state.kr->zero_trace_counters_async();
 
         auto k_t0 = std::chrono::steady_clock::now();
+        spdlog::debug("[render] dispatching kernel (tick={}, spp={}, {}x{})",
+                      new_tick, cur_spp, w, h);
 
         ctx.output = staging;
         if (!ctx.output) ctx.output = krt.alloc_device<uint8_t>(pixels * 4);
@@ -285,12 +289,11 @@ inline void render_thread_func(AppState &state) {
         call_kernel_entry(state.kr->kernel()->entry, ctx);
 
         auto k_t1 = std::chrono::steady_clock::now();
+        spdlog::debug("[render] kernel returned in {:.1f}ms",
+                      std::chrono::duration<double, std::milli>(k_t1 - k_t0).count());
         state.kernel_time_ms.store(
             std::chrono::duration<double, std::milli>(k_t1 - k_t0).count());
         if (!staging) krt.dealloc(ctx.output);
-#ifdef SANDBOX_ENABLE_PROFILER
-        uint64_t host_t1 = profiler::DeviceRing::timestamp();
-#endif
 
         // ── Publish frame ────────────────────────────────────────
         if ( slot >= 0 && staging ) {
@@ -315,11 +318,10 @@ inline void render_thread_func(AppState &state) {
         // Host overhead that only exists when profiler support was
         // compiled into the app (SANDBOX_ENABLE_PROFILER=ON): the device
         // ring → Tracy bridge submission.
+        const uint32_t cur_cap = state.ring_capacity.load();
         state.tracy_bridge.submit_device_ring(state.d_ring_header_.data,
                                               state.d_ring_records_.data,
-                                              state.RING_CAPACITY,
-                                              q, (int64_t)new_tick,
-                                              host_t0, host_t1);
+                                              cur_cap, q);
         state.tracy_bridge.frame_mark();
 #endif
         } // if (render_this_frame)

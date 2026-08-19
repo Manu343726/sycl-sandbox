@@ -33,16 +33,43 @@ public:
         return true;
     }
 
-    void destroy() override {
+    void release_device_buffers() override {
+        // Render-thread half of a backend switch: drain the queue (the
+        // render thread is allowed to block on device work; the UI
+        // thread is not) and free the USM staging slots while the OLD
+        // queue still exists.  Then null q_ so the UI-thread destroy()
+        // never dereferences the OLD queue pointer (which
+        // apply_backend_switch frees right after this returns).
         std::lock_guard<std::mutex> lk(mtx_);
         drain();
         free_slots();
+        q_ = nullptr;
+    }
+
+    void destroy() override {
+        std::lock_guard<std::mutex> lk(mtx_);
+        // release_device_buffers() may already have freed the slots on
+        // the render thread (backend-switch path); free_slots() is a
+        // no-op in that case.  When destroy() is the only call
+        // (shutdown / non-switch teardown) the slots are still live and
+        // must be drained + freed here.
+        if ( !slots_.empty() && slots_[0].pixels ) {
+            drain();
+            free_slots();
+        }
         if (tex_) { glDeleteTextures(1, &tex_); tex_ = 0; }
     }
 
     void resize(int w, int h) override {
+        // No drain() here: the render-thread apply_resize closure already
+        // drained the queue (KernelRuntime::resize() → krt_.fill →
+        // q->memset().wait(), which in the in-order queue completes only
+        // after every prior command — including the in-flight render
+        // kernel + tone-map that wrote into the OLD staging slots — has
+        // finished).  By the time the UI thread sees resize_applied and
+        // calls us, those staging writes are quiescent, so we can free
+        // and reallocate without blocking the UI thread on q_->wait().
         std::lock_guard<std::mutex> lk(mtx_);
-        drain();
         free_slots();
         w_ = w;
         h_ = h;

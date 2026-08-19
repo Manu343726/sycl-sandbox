@@ -147,6 +147,8 @@ bool validate_mesh_bvh(const SceneView &scene, uint32_t mesh_index) {
 
 int run_mesh_diag(int num_rays) {
     rt::Runtime rt; // null queue -> software mode
+    rt::MemoryPool pool; // heap allocation mode
+    rt.pool = &pool;
 
     auto mesh_tris = make_sphere_mesh(48, 96, 1.f, {0, 0, 0});
     int mesh_tri_count = (int)mesh_tris.size();

@@ -36,6 +36,8 @@ static int run_scene_diag(const std::string &yaml, bool strict) {
     auto config = scene_loader::load_and_resolve(yaml);
 
     rt::Runtime rt; // null queue → software mode (heap)
+    rt::MemoryPool pool; // heap allocation mode
+    rt.pool = &pool;
     rt::SceneBuilder builder;
     scene_loader::build_scene(builder, config);
     builder.build_bvh();

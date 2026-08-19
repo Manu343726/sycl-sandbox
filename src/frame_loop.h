@@ -86,6 +86,7 @@ void process_frame_ops(AppState &state) {
             // redundantly rebuild the YAML scene on every window drag.
             state.post_cmd([&state, w, h] {
                 state.kr->apply_resize(w, h);
+                state.ensure_profiler_sample_flags((uint32_t)(w * h));
                 state.resize_applied.store(true);
                 state.resize_posted.store(false);
                 state.pending_device_ops.fetch_sub(1);
@@ -113,10 +114,14 @@ void process_frame_ops(AppState &state) {
         spdlog::info("[viewport] resize applied {}x{}", w, h);
     }
 
-    // 5. Backend-switch ack → recreate the GL display target on the new
-    //    queue (its old allocations died with the old queue) and restore
-    //    the live param values the switch reload wiped.
+    // 5. Backend-switch ack → tear down the OLD display target's GL/CUDA-GL
+//    resources (its device-side staging was already freed by
+//    release_device_buffers() on the render thread before the queue
+//    swap; q_ in the target is now null so destroy() won't touch the
+//    freed queue), then recreate the display target on the new queue
+//    and restore the live param values the switch reload wiped.
     if ( state.backend_switch_applied.exchange(false) ) {
+        if (state.display_target) state.display_target->destroy();
         state.display_target.reset(create_display_target(
             state.kr->queue_ptr(), state.kr->width(), state.kr->height()));
         state.tex = state.display_target->texture();
@@ -144,6 +149,17 @@ void process_frame_ops(AppState &state) {
          !state.resize_applied.load() &&
          state.scene_generation.load() == state.last_processed_generation ) {
         state.kernel_ready.store(true);
+        spdlog::debug("[kernel-ready] RAISED (gen {})", state.scene_generation.load());
+    } else if ( !state.kernel_ready.load() && state.render_busy.load() == false ) {
+        // TEMP DEBUG
+        static uint64_t dbg_n = 0;
+        if ( (dbg_n++ & 511u) == 0 ) {
+            spdlog::debug(
+                "[kernel-ready] still down: rb={} ops={} bsa={} ra={} gen={} lpg={}",
+                state.render_busy.load(), state.pending_device_ops.load(),
+                state.backend_switch_applied.load(), state.resize_applied.load(),
+                state.scene_generation.load(), state.last_processed_generation);
+        }
     }
 
     // Build notifications (rendered by the BuildMonitor panel) are

@@ -192,34 +192,30 @@ Use angle brackets, never quotes with relative paths:
 // Bad
 #include "buffer.h"
 #include "rt/trace.h"
-#include "../alloc/buffer.h"
+#include "../kernel/memory.h"
 
 // Good
-#include <sycl-sandbox/alloc/buffer.h>
+#include <sycl-sandbox/kernel/memory.h>
 #include <sycl-sandbox/rt/trace.h>
-#include <sycl-sandbox/containers/vector.h>
+#include <sycl-sandbox/kernel/execution_context.h>
 ```
 
 The only exceptions are generated/config files co-located with the source.
 
 ## Fully qualified names in library headers
 
-Library headers (`include/alloc/`, `include/containers/`, `include/rt/`) must
-use fully qualified names — no `using namespace` or `using X::y` declarations
-(exceptions: type aliases like `using Allocator = …`).  Every symbol reference
-must spell out its full path:
+Library headers (`include/sycl-sandbox/rt/`, `include/sycl-sandbox/kernel/`)
+must use fully qualified names — no `using namespace` or `using X::y`
+declarations (exceptions: type aliases like `using Allocator = …`).  Every
+symbol reference must spell out its full path:
 
 ```cpp
 // Bad
-using namespace alloc::raw;
-LinearAllocator<Tag> a;
-
-// Bad
-using alloc::raw::LinearAllocator;
-LinearAllocator<Tag> a;
+using namespace rt;
+MemoryPool a;
 
 // Good
-alloc::raw::LinearAllocator<alloc::Target::Host> a;
+rt::MemoryPool a;
 ```
 
 Kernel code (`.cpp` files under `kernels/`) may use `using namespace` for

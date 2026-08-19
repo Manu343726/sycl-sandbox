@@ -56,9 +56,11 @@ uint32_t fnv1a(const std::string &s) {
 static bool is_profiler_name_macro(const std::string &spelling) {
     return spelling == "PROFILER_ZONE" ||
            spelling == "PROFILER_ZONE" ||
+           spelling == "PROFILER_ZONE_IN" ||
            spelling == "PROFILER_PLOT" ||
            spelling == "PROFILER_MSG" ||
-           spelling == "PROFILER_MSG_FMT";
+           spelling == "PROFILER_MSG_FMT" ||
+           spelling == "PROFILER_INTEREST_BEGIN";
 }
 
 struct CollectData {

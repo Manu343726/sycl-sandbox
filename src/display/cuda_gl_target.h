@@ -31,6 +31,7 @@ public:
     bool init(sycl::queue *q, int w, int h, int slots) override;
     void destroy() override;
     void resize(int w, int h) override;
+    void release_device_buffers() override;
 
     int acquire() override;
     uint8_t *staging_ptr(int slot) override;

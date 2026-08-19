@@ -30,9 +30,17 @@
 /// its reference — the renderer can never read freed memory.
 struct SceneDebugScene {
     rt::Runtime rt;          ///< NULL-queue runtime (heap allocation mode)
-    rt::SceneData data = {}; ///< OWNING heap arrays
+    rt::MemoryPool pool;     ///< heap allocation registry for `rt` + `data`
+    rt::SceneData data = {}; ///< OWNING heap arrays (pool-registered)
     rt::SceneView view = {}; ///< NON-OWNING view of data
     uint64_t version = 0;    ///< bumped on every rebuild
+
+    SceneDebugScene() { rt.pool = &pool; }
+    ~SceneDebugScene() {
+        if (!data.empty()) data.free(&rt);   // pool-registered; drains (no-op, null q)
+    }
+    SceneDebugScene(const SceneDebugScene &) = delete;
+    SceneDebugScene &operator=(const SceneDebugScene &) = delete;
 };
 
 // ── HostScene ────────────────────────────────────────────────────────

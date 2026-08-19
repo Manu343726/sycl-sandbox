@@ -16,6 +16,8 @@
 #include "diags/gpu_diag.h"
 #include "diags/sycl_diag.h"
 #include "diags/camera_diag.h"
+#include "diags/tracy_diag.h"
+#include "diags/profiler_diag.h"
 
 #include <cstdio>
 
@@ -42,6 +44,8 @@ void register_diag_subcommands(argparse::ArgumentParser &program) {
     register_gpu_diag(diag_parser, commands);
     register_sycl_diag(diag_parser, commands);
     register_camera_diag(diag_parser, commands);
+    register_tracy_diag(diag_parser, commands);
+    register_profiler_diag(diag_parser, commands);
     program.add_subparser(diag_parser);
 }
 

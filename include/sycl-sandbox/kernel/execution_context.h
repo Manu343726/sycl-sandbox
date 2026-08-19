@@ -18,15 +18,23 @@
 #include <cstring>
 #include <string>
 #include <type_traits>
-#include <atomic>
 
 #ifndef KERNEL_NATIVE
 #include <sycl/sycl.hpp>
 #endif
 
+// MemoryPool + Buffer live host-side; the SYCL device pass parses this
+// header but never needs the pool's layout (device code never allocates),
+// so the include is gated on __SYCL_DEVICE_ONLY__.  rt::Runtime carries
+// the pool as an incomplete-type pointer member either way.
+#ifndef __SYCL_DEVICE_ONLY__
+#include <sycl-sandbox/kernel/memory.h>
+#endif
+
 namespace rt {
 
-template <typename T> struct Buffer;   ///< defined below (owns Runtime memory)
+class MemoryPool;   ///< host-side allocation registry (defined in memory.h)
+template <typename T> struct Buffer;  ///< owning handle (defined in memory.h)
 
 /// Kernel execution context — memory allocator, data transfer, pixel
 /// iteration primitive, profiler buffer, and queue access.
@@ -59,11 +67,15 @@ struct Runtime {
     sycl::queue *queue = nullptr;  ///< valid in SYCL mode
 #endif
 
-    // ── Memory tracking counters ────────────────────────────────────
-    std::atomic<int64_t> device_memory_used{0};
-    std::atomic<int64_t> host_memory_used{0};
-    int64_t peak_device_memory{0};
-    int64_t peak_host_memory{0};
+    // ── Memory ────────────────────────────────────────────────────────
+    /// Host-side allocation registry for all kernel-usable memory.  Set
+    /// by the owner (KernelRuntime / diags / SceneDebugScene) to a
+    /// `rt::MemoryPool` it owns.  Null when the Runtime is default
+    /// constructed without an owner — the alloc methods then become no-ops
+    /// / null returns, so owners MUST install a pool before allocating.
+    /// Carried as an incomplete-type pointer so this header parses in the
+    /// SYCL device pass (device code never allocates).
+    MemoryPool *pool = nullptr;
 
     // ── Cancellation ────────────────────────────────────────────────
     /// Device-visible cancellation flag (USM shared allocation).
@@ -147,123 +159,86 @@ struct Runtime {
     }
 
     // ── Memory ───────────────────────────────────────────────────────
+    // All allocation/transfer/free calls delegate to the bound
+    // `rt::MemoryPool` (host-side registry + drain-on-free + per-kind
+    // byte counters).  Owners install the pool via `rt.runtime.pool`.
+    // The kernel-facing surface (alloc_device/host, dealloc, make_input,
+    // make_output, read_back, copy_to_*/fill) is unchanged from the
+    // pre-pool API, so kernels and SceneBuilder keep working as-is.
 
     template <typename T>
-    T *alloc_device(size_t count) {
-        size_t bytes = count * sizeof(T);
-        T *ptr;
-#ifndef KERNEL_NATIVE
-        if (queue) { ptr = sycl::malloc_device<T>(count, *queue); }
-        else
-#endif
-        { ptr = new T[count](); }
-        device_memory_used += bytes;
-        if (device_memory_used > peak_device_memory)
-            peak_device_memory = device_memory_used;
-        // TODO: uncomment when profiler works
-        // PROFILER_ALLOC(ptr, bytes);
-        // PROFILER_PLOT("Device memory", (float)device_memory_used.load());
-        return ptr;
+    T *alloc_device(size_t count, MemScope scope = MemScope::Kernel) {
+        if (!pool) return nullptr;
+        return pool->alloc_device_raw<T>(count, scope);
     }
 
     template <typename T>
-    T *alloc_host(size_t count) {
-        size_t bytes = count * sizeof(T);
-        T *ptr;
-#ifndef KERNEL_NATIVE
-        if (queue) { ptr = sycl::malloc_host<T>(count, *queue); }
-        else
-#endif
-        { ptr = new T[count](); }
-        host_memory_used += bytes;
-        if (host_memory_used > peak_host_memory)
-            peak_host_memory = host_memory_used;
-        // TODO: uncomment when profiler works
-        // PROFILER_ALLOC(ptr, bytes);
-        // PROFILER_PLOT("Host memory", (float)host_memory_used.load());
-        return ptr;
+    T *alloc_host(size_t count, MemScope scope = MemScope::Kernel) {
+        if (!pool) return nullptr;
+        return pool->alloc_host_raw<T>(count, scope);
+    }
+
+    template <typename T>
+    T *alloc_shared(size_t count, MemScope scope = MemScope::Kernel) {
+        if (!pool) return nullptr;
+        return pool->alloc_shared_raw<T>(count, scope);
     }
 
     template <typename T>
     void dealloc(T *ptr) {
-        if (!ptr) return;
-        // TODO: uncomment when profiler works
-        // PROFILER_FREE(ptr);
-#ifndef KERNEL_NATIVE
-        if (queue) { sycl::free(ptr, *queue); return; }
-#endif
-        delete[] ptr;
+        if (!pool || !ptr) return;
+        pool->release(static_cast<void *>(ptr));
     }
 
     template <typename T>
-    void dealloc_sized(T *ptr, size_t count, bool is_device) {
-        if (!ptr) return;
-        size_t bytes = count * sizeof(T);
-        if (is_device) {
-            device_memory_used -= bytes;
-            // TODO: uncomment when profiler works
-            // PROFILER_PLOT("Device memory", (float)device_memory_used.load());
-        } else {
-            host_memory_used -= bytes;
-            // TODO: uncomment when profiler works
-            // PROFILER_PLOT("Host memory", (float)host_memory_used.load());
-        }
-        // TODO: uncomment when profiler works
-        // PROFILER_FREE(ptr);
-#ifndef KERNEL_NATIVE
-        if (queue) { sycl::free(ptr, *queue); return; }
-#endif
-        delete[] ptr;
+    void dealloc_sized(T *ptr, size_t /*count*/, bool /*is_device*/) {
+        if (!pool || !ptr) return;
+        pool->release(static_cast<void *>(ptr));
     }
 
     // ── Transfers ────────────────────────────────────────────────────
 
     void copy_to_device(void *dst, const void *src, size_t bytes) {
-#ifndef KERNEL_NATIVE
-        if (queue) { queue->memcpy(dst, src, bytes).wait(); return; }
-#endif
-        std::memcpy(dst, src, bytes);
+        if (pool) pool->copy_to_device(dst, src, bytes);
     }
 
     void copy_to_host(void *dst, const void *src, size_t bytes) {
-#ifndef KERNEL_NATIVE
-        if (queue) { queue->memcpy(dst, src, bytes).wait(); return; }
-#endif
-        std::memcpy(dst, src, bytes);
+        if (pool) pool->copy_to_host(dst, src, bytes);
     }
 
     void fill(void *ptr, int val, size_t bytes) {
-#ifndef KERNEL_NATIVE
-        if (queue) { queue->memset(ptr, val, bytes).wait(); return; }
-#endif
-        std::memset(ptr, val, bytes);
+        if (pool) pool->fill(ptr, val, bytes);
     }
 
-    // ── Generic buffers ────────────────────────────────────────────
+    // ── Generic buffers (kernel-facing, Frame scope) ───────────────
     // One-shot input/output buffers for kernels: upload a host array
     // (texture data, lookup tables, LUTs) as a device buffer, or
     // allocate an output buffer for per-pixel results.  The returned
-    // rt::Buffer<T> OWNS the memory and frees it through this Runtime
-    // on destruction — never dealloc() it manually.
+    // rt::Buffer<T> OWNS the memory and frees it back to the pool on
+    // destruction — never dealloc() it manually.  Allocated under
+    // MemScope::Frame so the per-call clean check enforces the
+    // no-state-between-calls contract.
 
     /// Allocate a device (heap in software mode) buffer and copy the
     /// host data into it.  Returns an empty buffer when count is 0.
     template <typename T>
     Buffer<T> make_input(const T *host_data, size_t count) {
-        if (count == 0) return {};
-        T *ptr = alloc_device<T>(count);
-        copy_to_device(ptr, host_data, count * sizeof(T));
-        return Buffer<T>(this, ptr, count);
+        if (!pool || count == 0) return {};
+        auto buf = pool->alloc_device<T>(count, MemScope::Frame);
+        if (buf.data) pool->copy_to_device(static_cast<void *>(buf.data),
+                                           host_data, count * sizeof(T));
+        return buf;
     }
 
     /// Allocate a zero-initialized output buffer.  Returns an empty
     /// buffer when count is 0.
     template <typename T>
     Buffer<T> make_output(size_t count) {
-        if (count == 0) return {};
-        T *ptr = alloc_device<T>(count);
-        fill(ptr, 0, count * sizeof(T));
-        return Buffer<T>(this, ptr, count);
+        if (!pool || count == 0) return {};
+        auto buf = pool->alloc_device<T>(count, MemScope::Frame);
+        if (buf.data) pool->fill(static_cast<void *>(buf.data), 0,
+                                 count * sizeof(T));
+        return buf;
     }
 
     /// Copy a buffer back to host memory (synchronous).  No-op when the
@@ -286,66 +261,6 @@ struct Runtime {
     /// Kernels can install it via set_profiler_buffer() for Tracy-style
     /// GPU device-side profiling zones.
     void *profiler_buffer = nullptr;
-};
-
-/// Owning device (or heap, in software mode) buffer allocated through a
-/// rt::Runtime via make_input() / make_output().  Frees its memory back
-/// to the Runtime on destruction.  Move-only — copy ownership is
-/// meaningless for a raw device pointer.
-///
-/// Usage in a kernel:
-/// @code
-///   auto palette = rt->make_input<float3>(host_colors, num_colors);
-///   ...
-///   // palette.data is a device pointer, usable inside parallel_for
-///   // lambdas (captured by value); the buffer frees itself on scope
-///   // exit, or can be released early with release().
-/// @endcode
-template <typename T>
-struct Buffer {
-    Runtime *runtime = nullptr;
-    T *data = nullptr;
-    size_t count = 0;
-
-    Buffer() = default;
-    Buffer(Runtime *rt, T *ptr, size_t n) : runtime(rt), data(ptr), count(n) {}
-
-    Buffer(const Buffer &) = delete;
-    Buffer &operator=(const Buffer &) = delete;
-
-    Buffer(Buffer &&other) noexcept
-        : runtime(other.runtime), data(other.data), count(other.count) {
-        other.runtime = nullptr;
-        other.data = nullptr;
-        other.count = 0;
-    }
-    Buffer &operator=(Buffer &&other) noexcept {
-        if (this != &other) {
-            release();
-            runtime = other.runtime;
-            data = other.data;
-            count = other.count;
-            other.runtime = nullptr;
-            other.data = nullptr;
-            other.count = 0;
-        }
-        return *this;
-    }
-
-    ~Buffer() { release(); }
-
-    T &operator[](size_t index) { return data[index]; }
-    const T &operator[](size_t index) const { return data[index]; }
-
-    explicit operator bool() const { return data != nullptr; }
-
-    /// Return the memory to the Runtime and reset to empty.
-    void release() {
-        if (runtime && data) runtime->dealloc(data);
-        runtime = nullptr;
-        data = nullptr;
-        count = 0;
-    }
 };
 
 } // namespace rt
